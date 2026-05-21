@@ -1,0 +1,111 @@
+import 'package:flutter/material.dart';
+import 'ui/themes/app_theme.dart';
+import 'ui/screens/home_screen.dart';
+import 'ui/screens/chart_screen.dart';
+import 'ui/screens/backtest_screen.dart';
+import 'ui/screens/paper_trading_screen.dart';
+import 'ui/screens/strategy_management_screen.dart';
+
+void main() {
+  runApp(const TradingApp());
+}
+
+class TradingApp extends StatelessWidget {
+  const TradingApp({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return MaterialApp(
+      title: 'Trading App',
+      debugShowCheckedModeBanner: false,
+      theme: AppTheme.darkTheme,
+      home: const AppScaffold(),
+    );
+  }
+}
+
+/// Main scaffold with adaptive navigation:
+/// - BottomNavigationBar on narrow screens (mobile / portrait)
+/// - NavigationRail on wide screens (desktop / landscape)
+class AppScaffold extends StatefulWidget {
+  const AppScaffold({super.key});
+
+  @override
+  State<AppScaffold> createState() => _AppScaffoldState();
+}
+
+class _AppScaffoldState extends State<AppScaffold> {
+  int _selectedIndex = 0;
+
+  static const _screens = <Widget>[
+    HomeScreen(),
+    ChartScreen(),
+    BacktestScreen(),
+    PaperTradingScreen(),
+    StrategyManagementScreen(),
+  ];
+
+  static const _navItems = <_NavItem>[
+    _NavItem(icon: Icons.dashboard_outlined, selectedIcon: Icons.dashboard, label: 'Home'),
+    _NavItem(icon: Icons.candlestick_chart_outlined, selectedIcon: Icons.candlestick_chart, label: 'Chart'),
+    _NavItem(icon: Icons.history_outlined, selectedIcon: Icons.history, label: 'Backtest'),
+    _NavItem(icon: Icons.play_circle_outline, selectedIcon: Icons.play_circle_filled, label: 'Paper'),
+    _NavItem(icon: Icons.extension_outlined, selectedIcon: Icons.extension, label: 'Strategies'),
+  ];
+
+  static const double _wideBreakpoint = 720;
+
+  @override
+  Widget build(BuildContext context) {
+    final isWide = MediaQuery.of(context).size.width >= _wideBreakpoint;
+
+    if (isWide) {
+      return Scaffold(
+        body: Row(
+          children: [
+            NavigationRail(
+              selectedIndex: _selectedIndex,
+              onDestinationSelected: (i) => setState(() => _selectedIndex = i),
+              labelType: NavigationRailLabelType.all,
+              leading: Padding(
+                padding: const EdgeInsets.symmetric(vertical: 16),
+                child: Icon(Icons.show_chart, color: AppColors.accentCyan, size: 32),
+              ),
+              destinations: _navItems
+                  .map((item) => NavigationRailDestination(
+                        icon: Icon(item.icon),
+                        selectedIcon: Icon(item.selectedIcon),
+                        label: Text(item.label),
+                      ))
+                  .toList(),
+            ),
+            const VerticalDivider(width: 1, thickness: 0.5, color: AppColors.divider),
+            Expanded(child: _screens[_selectedIndex]),
+          ],
+        ),
+      );
+    }
+
+    return Scaffold(
+      body: _screens[_selectedIndex],
+      bottomNavigationBar: BottomNavigationBar(
+        currentIndex: _selectedIndex,
+        onTap: (i) => setState(() => _selectedIndex = i),
+        items: _navItems
+            .map((item) => BottomNavigationBarItem(
+                  icon: Icon(item.icon),
+                  activeIcon: Icon(item.selectedIcon),
+                  label: item.label,
+                ))
+            .toList(),
+      ),
+    );
+  }
+}
+
+class _NavItem {
+  final IconData icon;
+  final IconData selectedIcon;
+  final String label;
+  const _NavItem({required this.icon, required this.selectedIcon, required this.label});
+}
