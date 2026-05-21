@@ -1,0 +1,19 @@
+[package]
+name = "trading_engine"
+version = "0.1.0"
+edition = "2021"
+description = "Rust strategy engine for the Trading App with StrategyAddin trait system"
+
+[lib]
+crate-type = ["staticlib", "cdylib", "lib"]
+
+[dependencies]
+flutter_rust_bridge = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = { version = "0.4", features = ["serde"] }
+anyhow = "1"
+log = "0.4"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full"] }
