@@ -15,7 +15,7 @@ class AppConstants {
 
   // Supported timeframes
   static const List<String> supportedTimeframes = [
-    '1m', '5m', '15m', '1h', '4h', '1d',
+    '1m', '5m', '15m', '1h', '2h', '3h', '4h', '1d',
   ];
 
   // BB+RSI defaults
