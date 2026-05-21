@@ -7,6 +7,7 @@
 //! - Context struct for providing market data to strategies
 //! - Flutter Rust Bridge API functions for cross-platform integration
 
+pub mod addins;
 pub mod api;
 pub mod models;
 pub mod strategy;
