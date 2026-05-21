@@ -1,4 +1,6 @@
 import 'package:flutter/material.dart';
+import 'package:provider/provider.dart';
+import 'features/backtest/backtest_provider.dart';
 import 'ui/themes/app_theme.dart';
 import 'ui/screens/home_screen.dart';
 import 'ui/screens/chart_screen.dart';
@@ -15,11 +17,16 @@ class TradingApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return MaterialApp(
-      title: 'Trading App',
-      debugShowCheckedModeBanner: false,
-      theme: AppTheme.darkTheme,
-      home: const AppScaffold(),
+    return MultiProvider(
+      providers: [
+        ChangeNotifierProvider(create: (_) => BacktestProvider()),
+      ],
+      child: MaterialApp(
+        title: 'Trading App',
+        debugShowCheckedModeBanner: false,
+        theme: AppTheme.darkTheme,
+        home: const AppScaffold(),
+      ),
     );
   }
 }
