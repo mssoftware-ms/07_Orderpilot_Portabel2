@@ -1,4 +1,6 @@
 /// Backtest feature state management via ChangeNotifier (Provider pattern).
+///
+/// Manages both single backtest runs and parameter optimization.
 library;
 
 import 'dart:io';
@@ -8,12 +10,15 @@ import 'package:intl/intl.dart';
 
 import '../../core/constants/app_constants.dart';
 import '../../core/models/candle.dart';
+import '../../core/utils/param_storage.dart';
 import '../../services/backtest_service.dart';
 import '../../services/binance_api_client.dart';
+import '../../services/optimization_service.dart';
 
-// ─── State enum ─────────────────────────────────────────────────────────────
+// ─── State enums ────────────────────────────────────────────────────────────
 
 enum BacktestState { idle, fetchingData, running, success, error }
+enum OptimizationState { idle, fetchingData, running, success, error }
 
 // ─── Configuration model ────────────────────────────────────────────────────
 
@@ -66,7 +71,9 @@ class BacktestConfig {
 
 class BacktestProvider extends ChangeNotifier {
   final BinanceApiClient _binanceClient = BinanceApiClient();
+  final OptimizedParamsStorage _paramStorage = OptimizedParamsStorage();
 
+  // ── Backtest state ──
   BacktestState _state = BacktestState.idle;
   BacktestConfig _config = BacktestConfig();
   BacktestResult? _result;
@@ -74,7 +81,14 @@ class BacktestProvider extends ChangeNotifier {
   String _statusMessage = '';
   int _candlesFetched = 0;
 
-  // Getters
+  // ── Optimization state ──
+  OptimizationState _optState = OptimizationState.idle;
+  OptimizationResult? _optResult;
+  String? _optError;
+  String _optStatusMessage = '';
+  bool _usingOptimizedParams = false;
+
+  // ── Getters: backtest ──
   BacktestState get state => _state;
   BacktestConfig get config => _config;
   BacktestResult? get result => _result;
@@ -85,6 +99,20 @@ class BacktestProvider extends ChangeNotifier {
   bool get isRunning =>
       _state == BacktestState.fetchingData || _state == BacktestState.running;
 
+  // ── Getters: optimization ──
+  OptimizationState get optState => _optState;
+  OptimizationResult? get optResult => _optResult;
+  String? get optError => _optError;
+  String get optStatusMessage => _optStatusMessage;
+  bool get isOptimizing =>
+      _optState == OptimizationState.fetchingData ||
+      _optState == OptimizationState.running;
+  bool get usingOptimizedParams => _usingOptimizedParams;
+  bool get hasOptResult => _optResult != null;
+
+  /// Whether any operation is in progress (backtest or optimization).
+  bool get isBusy => isRunning || isOptimizing;
+
   // ─── Configuration updates ──────────────────────────────────────────────
 
   void updateConfig(BacktestConfig newConfig) {
@@ -94,12 +122,18 @@ class BacktestProvider extends ChangeNotifier {
 
   void updateSymbol(String symbol) {
     _config = _config.copyWith(symbol: symbol);
+    _usingOptimizedParams = false;
     notifyListeners();
+    // Auto-load optimized params for new symbol
+    _tryLoadOptimizedParams();
   }
 
   void updateTimeframe(String tf) {
     _config = _config.copyWith(timeframe: tf);
+    _usingOptimizedParams = false;
     notifyListeners();
+    // Auto-load optimized params for new timeframe
+    _tryLoadOptimizedParams();
   }
 
   void updateDateRange(DateTime start, DateTime end) {
@@ -119,7 +153,45 @@ class BacktestProvider extends ChangeNotifier {
 
   void updateStrategyParams(BbRsiParams params) {
     _config = _config.copyWith(strategyParams: params);
+    _usingOptimizedParams = false;
     notifyListeners();
+  }
+
+  /// Apply specific optimized params from a trial result.
+  void applyOptimizedParams(BbRsiParams params) {
+    _config = _config.copyWith(strategyParams: params);
+    _usingOptimizedParams = true;
+    notifyListeners();
+  }
+
+  /// Reset strategy params to defaults.
+  void resetParamsToDefaults() {
+    _config = _config.copyWith(strategyParams: const BbRsiParams());
+    _usingOptimizedParams = false;
+    notifyListeners();
+  }
+
+  // ─── Auto-load optimized params ─────────────────────────────────────────
+
+  Future<void> _tryLoadOptimizedParams() async {
+    try {
+      final params = await _paramStorage.loadOptimizedParams(
+        _config.symbol,
+        _config.timeframe,
+      );
+      if (params != null) {
+        _config = _config.copyWith(strategyParams: params);
+        _usingOptimizedParams = true;
+        notifyListeners();
+      }
+    } catch (_) {
+      // Silently ignore storage errors
+    }
+  }
+
+  /// Explicitly load optimized params (callable from UI init).
+  Future<void> loadOptimizedParamsIfAvailable() async {
+    await _tryLoadOptimizedParams();
   }
 
   // ─── Run backtest ───────────────────────────────────────────────────────
@@ -132,13 +204,11 @@ class BacktestProvider extends ChangeNotifier {
     notifyListeners();
 
     try {
-      // Calculate days between start and end
       final days = _config.endDate.difference(_config.startDate).inDays;
       if (days <= 0) {
         throw Exception('End date must be after start date');
       }
 
-      // Fetch candles from Binance
       final candles = await _binanceClient.downloadHistory(
         symbol: _config.symbol,
         interval: _config.timeframe,
@@ -156,7 +226,6 @@ class BacktestProvider extends ChangeNotifier {
             'No candle data returned for ${_config.symbol} ${_config.timeframe}');
       }
 
-      // Run backtest (compute-bound, runs synchronously)
       final result = await compute(_runBacktestIsolate, _BacktestArgs(
         candles: candles,
         initialBalance: _config.initialBalance,
@@ -177,9 +246,92 @@ class BacktestProvider extends ChangeNotifier {
     }
   }
 
+  // ─── Parameter optimization ─────────────────────────────────────────────
+
+  /// Run grid-search optimization over all BB+RSI parameter combinations.
+  Future<void> optimizeParameters() async {
+    _optState = OptimizationState.fetchingData;
+    _optError = null;
+    _optStatusMessage = 'Fetching candle data for optimization...';
+    _optResult = null;
+    notifyListeners();
+
+    try {
+      final days = _config.endDate.difference(_config.startDate).inDays;
+      if (days <= 0) {
+        throw Exception('End date must be after start date');
+      }
+
+      final candles = await _binanceClient.downloadHistory(
+        symbol: _config.symbol,
+        interval: _config.timeframe,
+        days: days,
+      );
+
+      if (candles.isEmpty) {
+        throw Exception(
+            'No candle data for ${_config.symbol} ${_config.timeframe}');
+      }
+
+      final totalCombs = DefaultRanges.totalCombinations;
+      _optStatusMessage =
+          'Running $totalCombs parameter combinations on ${candles.length} candles...';
+      _optState = OptimizationState.running;
+      notifyListeners();
+
+      // Run in isolate for UI responsiveness
+      final result = await compute(
+        runOptimizationIsolate,
+        OptimizationArgs(
+          candles: candles,
+          initialBalance: _config.initialBalance,
+          feeRate: _config.feeRate,
+        ),
+      );
+
+      _optResult = result;
+      _optState = OptimizationState.success;
+
+      if (result.topResults.isNotEmpty) {
+        _optStatusMessage =
+            'Optimization complete: ${result.combinationsRun} tested in '
+            '${result.elapsed.inSeconds}s. Best Sharpe: '
+            '${result.topResults.first.sharpeRatio.toStringAsFixed(2)}';
+
+        // Auto-apply best params
+        final bestParams = result.bestParams!;
+        _config = _config.copyWith(strategyParams: bestParams);
+        _usingOptimizedParams = true;
+
+        // Save to persistent storage
+        await _paramStorage.saveOptimizedParams(
+          _config.symbol,
+          _config.timeframe,
+          bestParams,
+        );
+      } else {
+        _optStatusMessage =
+            'Optimization complete but no valid results found '
+            '(${result.combinationsRun} combinations tested)';
+      }
+
+      notifyListeners();
+    } catch (e) {
+      _optState = OptimizationState.error;
+      _optError = e.toString();
+      _optStatusMessage = 'Optimization error: $e';
+      notifyListeners();
+    }
+  }
+
+  /// Dismiss optimization results dialog state.
+  void dismissOptimization() {
+    _optState = OptimizationState.idle;
+    notifyListeners();
+  }
+
   // ─── CSV export ─────────────────────────────────────────────────────────
 
-  /// Export trade log to CSV and return the file path.
   Future<String> exportTradesCsv() async {
     if (_result == null) throw Exception('No backtest result to export');
 
@@ -187,7 +339,6 @@ class BacktestProvider extends ChangeNotifier {
     final fileName = 'trades_${_config.symbol}_${_config.timeframe}_'
         '${df.format(DateTime.now())}.csv';
 
-    // Use temp directory or current directory
     final dir = Directory.systemTemp;
     final file = File('${dir.path}/$fileName');
 
@@ -212,7 +363,6 @@ class BacktestProvider extends ChangeNotifier {
     return file.path;
   }
 
-  /// Export equity curve to CSV and return the file path.
   Future<String> exportEquityCsv() async {
     if (_result == null) throw Exception('No backtest result to export');
 
@@ -256,7 +406,7 @@ class BacktestProvider extends ChangeNotifier {
   }
 }
 
-// ─── Isolate helper ─────────────────────────────────────────────────────────
+// ─── Isolate helpers ────────────────────────────────────────────────────────
 
 class _BacktestArgs {
   final List<CandleData> candles;

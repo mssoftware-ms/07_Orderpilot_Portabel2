@@ -14,9 +14,11 @@ import 'package:provider/provider.dart';
 import '../../core/constants/app_constants.dart';
 import '../../features/backtest/backtest_provider.dart';
 import '../../services/backtest_service.dart';
+import '../../services/optimization_service.dart';
 import '../themes/app_theme.dart';
 import '../widgets/equity_curve_chart.dart';
 import '../widgets/metric_card.dart';
+import '../widgets/optimization_results_dialog.dart';
 import '../widgets/trade_log_list.dart';
 
 class BacktestScreen extends StatelessWidget {
@@ -258,7 +260,7 @@ class _ConfigPanelState extends State<_ConfigPanel> {
           _buildDropdown<String>(
             value: cfg.symbol,
             items: AppConstants.supportedSymbols,
-            onChanged: _p.isRunning ? null : (v) => _p.updateSymbol(v!),
+            onChanged: _p.isBusy ? null : (v) => _p.updateSymbol(v!),
           ),
           const SizedBox(height: 14),
 
@@ -272,7 +274,7 @@ class _ConfigPanelState extends State<_ConfigPanel> {
               return ChoiceChip(
                 label: Text(tf),
                 selected: selected,
-                onSelected: _p.isRunning ? null : (s) {
+                onSelected: _p.isBusy ? null : (s) {
                   if (s) _p.updateTimeframe(tf);
                 },
                 selectedColor: AppColors.accentCyan.withAlpha(40),
@@ -296,7 +298,7 @@ class _ConfigPanelState extends State<_ConfigPanel> {
           _DateRangeSelector(
             start: cfg.startDate,
             end: cfg.endDate,
-            enabled: !_p.isRunning,
+            enabled: !_p.isBusy,
             onChanged: _p.updateDateRange,
           ),
           const SizedBox(height: 14),
@@ -357,6 +359,48 @@ class _ConfigPanelState extends State<_ConfigPanel> {
 
           if (_showAdvanced) ...[
             const SizedBox(height: 12),
+
+            // Optimized params indicator
+            if (_p.usingOptimizedParams) ...[
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                margin: const EdgeInsets.only(bottom: 10),
+                decoration: BoxDecoration(
+                  color: AppColors.accentCyan.withAlpha(15),
+                  borderRadius: BorderRadius.circular(6),
+                  border: Border.all(color: AppColors.accentCyan.withAlpha(50)),
+                ),
+                child: Row(
+                  children: [
+                    const Icon(Icons.auto_awesome, size: 14, color: AppColors.accentCyan),
+                    const SizedBox(width: 6),
+                    const Expanded(
+                      child: Text(
+                        'Using optimized parameters',
+                        style: TextStyle(
+                          color: AppColors.accentCyan,
+                          fontSize: 11,
+                          fontWeight: FontWeight.w500,
+                        ),
+                      ),
+                    ),
+                    InkWell(
+                      onTap: _p.isBusy ? null : _p.resetParamsToDefaults,
+                      child: const Text(
+                        'Reset',
+                        style: TextStyle(
+                          color: AppColors.textMuted,
+                          fontSize: 10,
+                          decoration: TextDecoration.underline,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+
             _ParamSlider(
               label: 'BB Period',
               value: params.bbPeriod.toDouble(),
@@ -364,7 +408,7 @@ class _ConfigPanelState extends State<_ConfigPanel> {
               max: 50,
               divisions: 40,
               format: (v) => v.toInt().toString(),
-              onChanged: _p.isRunning ? null : (v) {
+              onChanged: _p.isBusy ? null : (v) {
                 _p.updateStrategyParams(BbRsiParams(
                   bbPeriod: v.toInt(),
                   bbStdDev: params.bbStdDev,
@@ -381,7 +425,7 @@ class _ConfigPanelState extends State<_ConfigPanel> {
               max: 3.0,
               divisions: 20,
               format: (v) => v.toStringAsFixed(1),
-              onChanged: _p.isRunning ? null : (v) {
+              onChanged: _p.isBusy ? null : (v) {
                 _p.updateStrategyParams(BbRsiParams(
                   bbPeriod: params.bbPeriod,
                   bbStdDev: v,
@@ -398,7 +442,7 @@ class _ConfigPanelState extends State<_ConfigPanel> {
               max: 30,
               divisions: 23,
               format: (v) => v.toInt().toString(),
-              onChanged: _p.isRunning ? null : (v) {
+              onChanged: _p.isBusy ? null : (v) {
                 _p.updateStrategyParams(BbRsiParams(
                   bbPeriod: params.bbPeriod,
                   bbStdDev: params.bbStdDev,
@@ -415,7 +459,7 @@ class _ConfigPanelState extends State<_ConfigPanel> {
               max: 40,
               divisions: 20,
               format: (v) => v.toInt().toString(),
-              onChanged: _p.isRunning ? null : (v) {
+              onChanged: _p.isBusy ? null : (v) {
                 _p.updateStrategyParams(BbRsiParams(
                   bbPeriod: params.bbPeriod,
                   bbStdDev: params.bbStdDev,
@@ -432,7 +476,7 @@ class _ConfigPanelState extends State<_ConfigPanel> {
               max: 80,
               divisions: 20,
               format: (v) => v.toInt().toString(),
-              onChanged: _p.isRunning ? null : (v) {
+              onChanged: _p.isBusy ? null : (v) {
                 _p.updateStrategyParams(BbRsiParams(
                   bbPeriod: params.bbPeriod,
                   bbStdDev: params.bbStdDev,
@@ -442,6 +486,70 @@ class _ConfigPanelState extends State<_ConfigPanel> {
                 ));
               },
             ),
+            const SizedBox(height: 10),
+
+            // Optimize Parameters button
+            SizedBox(
+              width: double.infinity,
+              height: 36,
+              child: OutlinedButton.icon(
+                onPressed: _p.isBusy
+                    ? null
+                    : () => _onOptimize(context),
+                icon: _p.isOptimizing
+                    ? const SizedBox(
+                        width: 14,
+                        height: 14,
+                        child: CircularProgressIndicator(
+                            strokeWidth: 2, color: AppColors.accentPurple))
+                    : const Icon(Icons.auto_awesome, size: 16),
+                label: Text(
+                  _p.isOptimizing ? 'Optimizing...' : 'Optimize Parameters',
+                  style: const TextStyle(fontSize: 12),
+                ),
+                style: OutlinedButton.styleFrom(
+                  foregroundColor: AppColors.accentPurple,
+                  side: const BorderSide(color: AppColors.accentPurple),
+                  shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(8)),
+                ),
+              ),
+            ),
+
+            // View last optimization results
+            if (_p.hasOptResult) ...[
+              const SizedBox(height: 6),
+              Center(
+                child: TextButton(
+                  onPressed: () => _showOptResults(context),
+                  child: const Text(
+                    'View optimization results',
+                    style: TextStyle(
+                      color: AppColors.accentPurple,
+                      fontSize: 11,
+                      decoration: TextDecoration.underline,
+                    ),
+                  ),
+                ),
+              ),
+            ],
+
+            // Reset to defaults
+            if (!_p.usingOptimizedParams) ...[
+              const SizedBox(height: 2),
+              Center(
+                child: TextButton(
+                  onPressed: _p.isBusy ? null : _p.resetParamsToDefaults,
+                  child: const Text(
+                    'Reset to defaults',
+                    style: TextStyle(
+                      color: AppColors.textMuted,
+                      fontSize: 10,
+                    ),
+                  ),
+                ),
+              ),
+            ],
           ],
 
           const SizedBox(height: 20),
@@ -451,7 +559,7 @@ class _ConfigPanelState extends State<_ConfigPanel> {
             width: double.infinity,
             height: 48,
             child: ElevatedButton.icon(
-              onPressed: _p.isRunning ? null : _p.runBacktest,
+              onPressed: _p.isBusy ? null : _p.runBacktest,
               icon: _p.isRunning
                   ? const SizedBox(
                       width: 18,
@@ -487,8 +595,86 @@ class _ConfigPanelState extends State<_ConfigPanel> {
               textAlign: TextAlign.center,
             ),
           ],
+
+          // Optimization status
+          if (_p.optStatusMessage.isNotEmpty && !_p.isOptimizing) ...[
+            const SizedBox(height: 6),
+            Text(
+              _p.optStatusMessage,
+              style: TextStyle(
+                color: _p.optState == OptimizationState.error
+                    ? AppColors.bearRed
+                    : AppColors.accentPurple,
+                fontSize: 10,
+              ),
+              textAlign: TextAlign.center,
+            ),
+          ],
         ],
       ),
+    );
+  }
+
+  Future<void> _onOptimize(BuildContext context) async {
+    // Show confirmation with estimated time
+    final totalCombs = DefaultRanges.totalCombinations;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: AppColors.surfaceCard,
+        title: const Text('Optimize Parameters'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              'This will test $totalCombs parameter combinations '
+              'on ${_p.config.symbol} ${_p.config.timeframe} data.',
+              style: const TextStyle(color: AppColors.textSecondary, fontSize: 13),
+            ),
+            const SizedBox(height: 12),
+            const Text(
+              'Estimated time: 1–5 minutes depending on data size.',
+              style: TextStyle(color: AppColors.textMuted, fontSize: 12),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Cancel'),
+          ),
+          ElevatedButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Start Optimization'),
+          ),
+        ],
+      ),
+    );
+
+    if (confirmed != true || !context.mounted) return;
+
+    // Start optimization
+    _p.optimizeParameters().then((_) {
+      if (_p.optState == OptimizationState.success &&
+          _p.optResult != null &&
+          _p.optResult!.topResults.isNotEmpty &&
+          context.mounted) {
+        OptimizationResultsDialog.show(
+          context,
+          result: _p.optResult!,
+          onApply: _p.applyOptimizedParams,
+        );
+      }
+    });
+  }
+
+  void _showOptResults(BuildContext context) {
+    if (_p.optResult == null) return;
+    OptimizationResultsDialog.show(
+      context,
+      result: _p.optResult!,
+      onApply: _p.applyOptimizedParams,
     );
   }
 
@@ -523,7 +709,7 @@ class _ConfigPanelState extends State<_ConfigPanel> {
       {required ValueChanged<String> onSubmit}) {
     return TextField(
       controller: ctrl,
-      enabled: !_p.isRunning,
+      enabled: !_p.isBusy,
       keyboardType: TextInputType.number,
       style: const TextStyle(color: AppColors.textPrimary, fontSize: 13),
       decoration: InputDecoration(
@@ -773,6 +959,11 @@ class _ResultsPanel extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    // Show optimization progress if optimizing and not running backtest
+    if (provider.isOptimizing && !provider.isRunning) {
+      return _OptimizingView(provider: provider);
+    }
+
     switch (provider.state) {
       case BacktestState.idle:
         return _IdlePlaceholder();
@@ -890,6 +1081,75 @@ class _ErrorView extends StatelessWidget {
             message,
             style: const TextStyle(color: AppColors.textSecondary, fontSize: 13),
             textAlign: TextAlign.center,
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _OptimizingView extends StatelessWidget {
+  final BacktestProvider provider;
+  const _OptimizingView({required this.provider});
+
+  @override
+  Widget build(BuildContext context) {
+    final totalCombs = DefaultRanges.totalCombinations;
+
+    return Container(
+      padding: const EdgeInsets.symmetric(vertical: 80),
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          const SizedBox(
+            width: 48,
+            height: 48,
+            child: CircularProgressIndicator(
+              color: AppColors.accentPurple,
+              strokeWidth: 3,
+            ),
+          ),
+          const SizedBox(height: 24),
+          const Text(
+            'Optimizing Parameters...',
+            style: TextStyle(
+              color: AppColors.textPrimary,
+              fontSize: 16,
+              fontWeight: FontWeight.w500,
+            ),
+          ),
+          const SizedBox(height: 8),
+          Text(
+            provider.optStatusMessage,
+            style: const TextStyle(color: AppColors.textMuted, fontSize: 13),
+            textAlign: TextAlign.center,
+          ),
+          const SizedBox(height: 16),
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
+            decoration: BoxDecoration(
+              color: AppColors.surfaceCard,
+              borderRadius: BorderRadius.circular(8),
+            ),
+            child: Column(
+              children: [
+                Text(
+                  '$totalCombs combinations',
+                  style: const TextStyle(
+                    color: AppColors.accentPurple,
+                    fontSize: 14,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+                const SizedBox(height: 4),
+                const Text(
+                  'Testing all BB + RSI parameter combinations.\n'
+                  'This may take 1–5 minutes.',
+                  style: TextStyle(color: AppColors.textMuted, fontSize: 11),
+                  textAlign: TextAlign.center,
+                ),
+              ],
+            ),
           ),
         ],
       ),

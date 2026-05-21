@@ -5,7 +5,7 @@ import 'package:trading_app/services/backtest_service.dart';
 void main() {
   group('BacktestService', () {
     // Generate synthetic candle data with a trend + mean-reversion pattern
-    List<CandleData> _generateCandles(int count, {double startPrice = 50000}) {
+    List<CandleData> generateCandles(int count, {double startPrice = 50000}) {
       final candles = <CandleData>[];
       double price = startPrice;
       final baseTs = DateTime(2024, 1, 1).millisecondsSinceEpoch;
@@ -29,7 +29,7 @@ void main() {
     }
 
     test('returns empty result for insufficient data', () {
-      final candles = _generateCandles(5);
+      final candles = generateCandles(5);
       final result = BacktestService.runBbRsi(
         candles: candles,
         initialBalance: 10000,
@@ -42,7 +42,7 @@ void main() {
     });
 
     test('runs successfully with sufficient candle data', () {
-      final candles = _generateCandles(500);
+      final candles = generateCandles(500);
       final result = BacktestService.runBbRsi(
         candles: candles,
         initialBalance: 10000,
@@ -56,7 +56,7 @@ void main() {
     });
 
     test('metrics fields are consistent', () {
-      final candles = _generateCandles(500);
+      final candles = generateCandles(500);
       final result = BacktestService.runBbRsi(
         candles: candles,
         initialBalance: 10000,
@@ -74,7 +74,7 @@ void main() {
     });
 
     test('custom params are respected', () {
-      final candles = _generateCandles(500);
+      final candles = generateCandles(500);
       final result1 = BacktestService.runBbRsi(
         candles: candles,
         initialBalance: 10000,
@@ -95,7 +95,7 @@ void main() {
     });
 
     test('fees are tracked correctly', () {
-      final candles = _generateCandles(500);
+      final candles = generateCandles(500);
       final result = BacktestService.runBbRsi(
         candles: candles,
         initialBalance: 10000,
@@ -110,7 +110,7 @@ void main() {
     });
 
     test('equity curve timestamps are monotonically increasing', () {
-      final candles = _generateCandles(200);
+      final candles = generateCandles(200);
       final result = BacktestService.runBbRsi(
         candles: candles,
         initialBalance: 10000,
@@ -124,7 +124,7 @@ void main() {
     });
 
     test('trade records have valid timestamps and prices', () {
-      final candles = _generateCandles(500);
+      final candles = generateCandles(500);
       final result = BacktestService.runBbRsi(
         candles: candles,
         initialBalance: 10000,
