@@ -1,47 +1,77 @@
-# Miscellaneous
+# ─── OS ───────────────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+
+# ─── IDE ──────────────────────────────────────────────────────────────────────
+.idea/
+.vscode/
+*.iml
+*.ipr
+*.iws
+.atom/
+
+# ─── Flutter / Dart ───────────────────────────────────────────────────────────
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+.pub-cache/
+.pub/
+build/
+/coverage/
+**/doc/api/
+**/ios/Flutter/.last_build_id
+*.g.dart
+*.freezed.dart
+*.mocks.dart
+
+# ─── Android ──────────────────────────────────────────────────────────────────
+android/.gradle/
+android/app/debug/
+android/app/profile/
+android/app/release/
+android/local.properties
+android/key.properties
+android/*.jks
+android/*.keystore
+
+# ─── iOS (future) ─────────────────────────────────────────────────────────────
+ios/Pods/
+ios/.symlinks/
+ios/Flutter/Flutter.framework
+ios/Flutter/Flutter.podspec
+ios/Runner.xcworkspace/
+**/ios/Flutter/.last_build_id
+
+# ─── Windows (future) ────────────────────────────────────────────────────────
+windows/flutter/ephemeral/
+
+# ─── Linux ────────────────────────────────────────────────────────────────────
+linux/flutter/ephemeral/
+
+# ─── Rust / Cargo ─────────────────────────────────────────────────────────────
+rust/trading_engine/target/
+rust/.logs/
+**/*.so
+**/*.dll
+**/*.dylib
+
+# ─── Build artifacts / binaries ───────────────────────────────────────────────
 *.class
 *.log
 *.pyc
-*.swp
-.DS_Store
-.atom/
+*.o
+*.a
+*.exe
+
+# ─── Misc ─────────────────────────────────────────────────────────────────────
 .build/
 .buildlog/
 .history
 .svn/
 .swiftpm/
 migrate_working_dir/
-
-# IntelliJ related
-*.iml
-*.ipr
-*.iws
-.idea/
-
-# The .vscode folder contains launch configuration and tasks you configure in
-# VS Code which you may wish to be included in version control, so this line
-# is commented out by default.
-#.vscode/
-
-# Flutter/Dart/Pub related
-**/doc/api/
-**/ios/Flutter/.last_build_id
-.dart_tool/
-.flutter-plugins-dependencies
-.pub-cache/
-.pub/
-/build/
-/coverage/
-
-# Symbolication related
 app.*.symbols
-
-# Obfuscation related
 app.*.map.json
-
-# Android Studio will place build artifacts here
-/android/app/debug
-/android/app/profile
-/android/app/release
-rust/trading_engine/target/
-rust/.logs/
