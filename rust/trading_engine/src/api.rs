@@ -158,6 +158,46 @@ pub fn run_bb_rsi_strategy(candles_json: String, params_json: String) -> String 
     serde_json::to_string_pretty(&results).unwrap_or_default()
 }
 
+// ─── Backtest API ────────────────────────────────────────────────────────────
+
+/// Run a full backtest of the BB+RSI strategy on historical candles.
+///
+/// `candles_json`    – JSON array of `Candle` objects.
+/// `params_json`     – JSON object with parameter overrides (e.g. `{"bb_period": 25}`).
+/// `initial_balance` – Starting account balance in quote currency (e.g. 10000.0 USDT).
+/// `fee_rate`        – Taker fee rate per side (e.g. 0.0006 for Bitunix VIP0 0.06 %).
+///
+/// Returns a JSON-serialised `BacktestResult` containing metrics, equity curve,
+/// trade log, and fee summary – ready for Flutter consumption.
+pub fn run_bb_rsi_backtest(
+    candles_json: String,
+    params_json: String,
+    initial_balance: f64,
+    fee_rate: f64,
+) -> String {
+    use crate::backtest::{BacktestConfig, BacktestEngine};
+
+    let candles: Vec<Candle> = match serde_json::from_str(&candles_json) {
+        Ok(c) => c,
+        Err(e) => return format!(r#"{{"error":"bad candles json: {}"}}"#, e),
+    };
+    let params: HashMap<String, f64> = match serde_json::from_str(&params_json) {
+        Ok(p) => p,
+        Err(e) => return format!(r#"{{"error":"bad params json: {}"}}"#, e),
+    };
+
+    let mut strategy = BbRsiStrategy::new();
+    if let Err(e) = strategy.validate_params(&params) {
+        return format!(r#"{{"error":"{}"}}"#, e);
+    }
+
+    let config = BacktestConfig::new(initial_balance, fee_rate, Timeframe::H1);
+    let mut engine = BacktestEngine::new(config);
+    let result = engine.run(&mut strategy, &candles, params);
+
+    serde_json::to_string(&result).unwrap_or_else(|e| format!(r#"{{"error":"{}"}}"#, e))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

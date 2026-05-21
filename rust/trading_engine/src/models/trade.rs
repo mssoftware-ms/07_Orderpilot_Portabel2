@@ -169,7 +169,7 @@ impl BacktestMetrics {
         let profit_factor = if gross_loss > 0.0 {
             gross_profit / gross_loss
         } else if gross_profit > 0.0 {
-            f64::INFINITY
+            999.99 // Cap for JSON serialization (no losses = effectively infinite)
         } else {
             0.0
         };
