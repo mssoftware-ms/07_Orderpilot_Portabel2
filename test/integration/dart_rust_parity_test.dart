@@ -136,6 +136,18 @@ void main() {
         final dartFinalEquity = initialBalance + dartResult.metrics.totalPnl;
         final rustFinalEquity = initialBalance + rustMetrics.totalPnl;
         expect(rustFinalEquity, closeTo(dartFinalEquity, 1e-9));
+
+        // F-03 (Plan §3.4): both engines now compute Sharpe over equity-
+        // curve returns with the same periodsPerYear table — the formula
+        // is bit-identical. The per-engine equity *series*, however, still
+        // diverges in mid-trade (see follow-up ticket; QA brief attached
+        // to F-03 PR), so a parity-tight Sharpe assert here would fail
+        // for reasons unrelated to F-03. We deliberately do not assert
+        // sharpe agreement on the fixture until the equity-recording bug
+        // is fixed; the per-engine F-03 unit tests
+        // (rust/.../tests/regression_f03_sharpe_annualization.rs,
+        //  test/regression/f03_sharpe_test.dart) pin the formula on both
+        // sides on synthetic input.
       },
     );
   });

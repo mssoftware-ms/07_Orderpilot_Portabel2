@@ -7,7 +7,9 @@ library;
 import 'dart:math' as math;
 
 import '../core/models/candle.dart';
+import '../core/models/timeframe.dart';
 import '../core/models/trade.dart';
+import 'sharpe.dart';
 
 // ─── Engine-specific result models ──────────────────────────────────────────
 // Trade and metrics types are imported from lib/core/models/trade.dart —
@@ -91,11 +93,16 @@ class _OpenPosition {
 
 class BacktestService {
   /// Run a BB+RSI backtest on the given candle data.
+  ///
+  /// `timeframe` defaults to [Timeframe.h1] for backward compatibility with
+  /// the parity fixture; pass the actual candle timeframe to get a correct
+  /// annualized Sharpe (Plan §3.4 F-03).
   static BacktestResult runBbRsi({
     required List<CandleData> candles,
     required double initialBalance,
     required double feeRate,
     BbRsiParams params = const BbRsiParams(),
+    Timeframe timeframe = Timeframe.h1,
   }) {
     if (candles.length < params.bbPeriod + 1) {
       return BacktestResult(
@@ -363,18 +370,11 @@ class BacktestService {
     if (profitFactor > 999.99) profitFactor = 999.99;
     if (grossLoss == 0 && grossProfit > 0) profitFactor = 999.99;
 
-    // Sharpe ratio (annualized)
-    double sharpe = 0;
-    if (returns.length > 1) {
-      final meanReturn = returns.reduce((a, b) => a + b) / returns.length;
-      final variance = returns.fold<double>(
-              0, (s, r) => s + (r - meanReturn) * (r - meanReturn)) /
-          returns.length;
-      final stdDev = math.sqrt(variance);
-      if (stdDev > 0) {
-        sharpe = (meanReturn / stdDev) * math.sqrt(252);
-      }
-    }
+    // Sharpe ratio (F-03): timeframe-aware annualization over equity-curve
+    // returns. Identical formula to rust/.../models/metrics.rs, so the two
+    // engines produce numerically equivalent Sharpe values on the same
+    // candle stream + timeframe.
+    final sharpe = annualizedSharpe(returns, timeframe);
 
     return BacktestResult(
       metrics: BacktestMetrics(

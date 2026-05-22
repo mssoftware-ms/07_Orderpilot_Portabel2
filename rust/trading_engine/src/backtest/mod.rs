@@ -242,7 +242,18 @@ impl BacktestEngine {
         }
 
         // ── Step 5: Compute metrics ──
-        let metrics = BacktestMetrics::from_trades(self.trades.clone(), self.config.initial_balance);
+        // F-03: Sharpe is computed over per-candle equity-curve returns and
+        // annualized by sqrt(periods_per_year(timeframe)). Pass the equity
+        // curve and timeframe so `from_trades` can do the canonical
+        // calculation (matching the Dart engine).
+        let equity_series: Vec<f64> =
+            self.equity_curve.iter().map(|p| p.equity).collect();
+        let metrics = BacktestMetrics::from_trades(
+            self.trades.clone(),
+            self.config.initial_balance,
+            &equity_series,
+            self.config.timeframe,
+        );
 
         BacktestResult {
             metrics,
