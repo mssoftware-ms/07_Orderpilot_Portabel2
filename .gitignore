@@ -75,3 +75,7 @@ rust/.logs/
 migrate_working_dir/
 app.*.symbols
 app.*.map.json
+
+# Excel lock files
+**/~$*.xlsx
+**/~$*.xls
