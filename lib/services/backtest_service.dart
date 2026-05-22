@@ -292,12 +292,12 @@ class BacktestService {
           final entryNotional = position.entryPrice * position.quantity;
           final pnlPct = entryNotional > 0 ? (netPnl / entryNotional) * 100 : 0.0;
 
-          balance = exitNotional - exitFee;
-          // For short: balance = initial notional + gross pnl - fees
-          if (!position.isLong) {
-            balance = position.entryPrice * position.quantity + grossPnl -
-                position.entryFee - exitFee;
-          }
+          // Direction-agnostic balance update (F-02c): return reserved margin
+          // (alloc = entry_notional + entry_fee) plus realised net P&L. For
+          // LONGs this collapses algebraically to `exitNotional - exitFee`;
+          // for SHORTs the previous branch missed one entry_fee per close.
+          final alloc = entryNotional + position.entryFee;
+          balance = alloc + netPnl;
 
           trades.add(ClosedTrade(
             entryTimestamp: position.entryTimestamp,
@@ -329,12 +329,10 @@ class BacktestService {
       final entryNotional = position.entryPrice * position.quantity;
       final pnlPct = entryNotional > 0 ? (netPnl / entryNotional) * 100 : 0.0;
 
-      if (!position.isLong) {
-        balance = position.entryPrice * position.quantity + grossPnl -
-            position.entryFee - exitFee;
-      } else {
-        balance = exitNotional - exitFee;
-      }
+      // Same direction-agnostic balance update as the in-loop exit branch
+      // (F-02c). Mirrors close_position in rust/.../backtest/mod.rs.
+      final alloc = entryNotional + position.entryFee;
+      balance = alloc + netPnl;
 
       trades.add(ClosedTrade(
         entryTimestamp: position.entryTimestamp,

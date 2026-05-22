@@ -286,11 +286,17 @@ impl BacktestEngine {
 
     /// Close the current position, computing net PnL after exit fee.
     ///
-    /// Balance accounting:
-    ///   - On entry we deducted `alloc` from balance.
-    ///   - `quantity = (alloc - entry_fee) / entry_price`
-    ///   - On exit we receive `proceeds = quantity * exit_price - exit_fee`.
-    ///   - Net PnL = gross_pnl - entry_fee - exit_fee.
+    /// Balance accounting (F-02c, direction-agnostic):
+    ///   - On entry we deducted `alloc` from balance, where
+    ///     `alloc = quantity * entry_price + entry_fee`.
+    ///   - `unrealized_pnl` already encodes side (Long: exit-entry, Short:
+    ///     entry-exit), so `net_pnl = gross_pnl - entry_fee - exit_fee` is
+    ///     correctly signed for both sides.
+    ///   - On close we return the reserved margin and add the realised P&L:
+    ///       `balance += alloc + net_pnl`
+    ///   For LONGs this collapses algebraically to the older
+    ///   `proceeds = exit_notional - exit_fee` expression; for SHORTs the
+    ///   older expression drained balance by ~`2 * gross_pnl_short`.
     fn close_position(&mut self, exit_price: f64, exit_time: i64, reason: ExitReason) {
         let pos = match self.position.take() {
             Some(p) => p,
@@ -311,9 +317,9 @@ impl BacktestEngine {
             0.0
         };
 
-        // Credit proceeds back to balance (alloc was already deducted on entry).
-        let proceeds = exit_notional - exit_fee;
-        self.balance += proceeds;
+        // Return reserved margin + realised net P&L (direction-agnostic).
+        let alloc = entry_notional + self.current_entry_fee;
+        self.balance += alloc + net_pnl;
 
         self.current_entry_fee = 0.0;
 
@@ -331,14 +337,22 @@ impl BacktestEngine {
     }
 
     /// Current equity = balance + mark-to-market of open position.
+    ///
+    /// Direction-agnostic (F-02c): equity is what the account would settle to
+    /// if the position closed at `current_price` right now. Using the same
+    /// algebra as `close_position`:
+    ///   equity = balance + alloc + net_unrealized_pnl
+    ///          = balance + alloc + (gross_unrealized - entry_fee - est_exit_fee)
+    /// For LONGs this collapses to the previous `balance + exit_notional -
+    /// est_exit_fee` formula; for SHORTs the old formula reported negative
+    /// unrealised P&L when the trade was in the money.
     fn current_equity(&self, current_price: f64) -> f64 {
         match &self.position {
             Some(pos) => {
-                let exit_notional = pos.quantity * current_price;
-                let est_exit_fee = exit_notional * self.config.fee_rate;
-                // Balance already has alloc removed; add back what we'd get if we closed now
-                self.balance + exit_notional - est_exit_fee
-                    // minus entry fee already accounted (deducted from balance via alloc)
+                let alloc = pos.entry_price * pos.quantity + self.current_entry_fee;
+                let unrealized = pos.unrealized_pnl(current_price);
+                let est_exit_fee = pos.quantity * current_price * self.config.fee_rate;
+                self.balance + alloc + unrealized - self.current_entry_fee - est_exit_fee
             }
             None => self.balance,
         }

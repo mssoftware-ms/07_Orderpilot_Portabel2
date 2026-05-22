@@ -137,23 +137,6 @@ void main() {
         final rustFinalEquity = initialBalance + rustMetrics.totalPnl;
         expect(rustFinalEquity, closeTo(dartFinalEquity, 1e-9));
       },
-      skip: 'F-02b closed the RSI windowing gap — both engines now produce '
-          'identical entry/exit indices and prices on this 200-candle fixture '
-          '(verified by trade-log probe). The remaining ~4776 totalPnl drift '
-          'comes from a THIRD, independent divergence: Rust BacktestEngine '
-          'close_position (rust/.../backtest/mod.rs:294-331) updates balance '
-          'with proceeds = exit_notional - exit_fee for BOTH long and short '
-          'positions. That is correct only for longs (you buy at entry, sell '
-          'at exit). For shorts the correct accounting is balance_after = '
-          'balance_before_entry + net_pnl (margin returns, no buy-back drain). '
-          'Dart has a smaller related accounting issue (double-counts entry_fee '
-          'on short exit, ~6 USD per trade). Each trade record carries the '
-          'correct net_pnl, but the balance-for-next-trade discrepancy causes '
-          'compounding divergence in subsequent quantity sizing. Closing this '
-          'is a separate F-02c-style sprint item; F-02b owns RSI windowing '
-          'only (see 260522_Gesamtplan_Phase1-3.md §3.4 F-02b). Do NOT widen '
-          'the 1e-9 tolerance — it is correct for what this assertion is '
-          'supposed to prove.',
     );
   });
 }
