@@ -62,6 +62,46 @@ pub fn annualized_sharpe(returns: &[f64], tf: Timeframe) -> f64 {
     (mean / stdev) * periods_per_year(tf).sqrt()
 }
 
+/// Compute the maximum drawdown and maximum drawdown percentage from an
+/// equity curve, using the industry-standard running-peak convention.
+///
+/// Returns `(max_drawdown, max_drawdown_percent)`:
+///
+///   peak_at(i)   = max(equity[0..=i])
+///   dd_at(i)     = peak_at(i) - equity[i]
+///   pct_at(i)    = peak_at(i) > 0 ? dd_at(i) / peak_at(i) * 100 : 0
+///   max_dd       = max(dd_at(i))      for i in 0..equity.len()
+///   max_dd_pct   = max(pct_at(i))     for i in 0..equity.len()
+///
+/// Both maxima walk the **running** peak, not the final peak — that way
+/// an early deep excursion that later fully recovers is still recorded
+/// as the worst drawdown of the run. This mirrors the Dart engine
+/// bit-exact (lib/services/backtest_service.dart:322-326).
+///
+/// For an empty curve, returns `(0, 0)`.
+pub fn max_drawdown_from_equity_curve(equity: &[f64]) -> (f64, f64) {
+    if equity.is_empty() {
+        return (0.0, 0.0);
+    }
+    let mut peak = equity[0];
+    let mut max_dd = 0.0_f64;
+    let mut max_dd_pct = 0.0_f64;
+    for &point in equity {
+        if point > peak {
+            peak = point;
+        }
+        let dd = peak - point;
+        let dd_pct = if peak > 0.0 { dd / peak * 100.0 } else { 0.0 };
+        if dd > max_dd {
+            max_dd = dd;
+        }
+        if dd_pct > max_dd_pct {
+            max_dd_pct = dd_pct;
+        }
+    }
+    (max_dd, max_dd_pct)
+}
+
 /// Convert an equity curve (one value per candle close) into per-candle
 /// returns. Output length is `equity.len() - 1`. For an empty or
 /// single-point curve, returns an empty vector.

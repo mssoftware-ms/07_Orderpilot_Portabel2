@@ -149,17 +149,31 @@ void main() {
               'equivalence — both engines must produce identical equity '
               'series and run them through the same annualizedSharpe',
         );
-        // maxDrawdown is intentionally NOT asserted in F-03b. The engines
-        // use different *definitions*: Dart tracks max drawdown against
-        // the per-candle equity curve (intra-trade drawdowns counted),
-        // Rust tracks it against per-trade settled equity in
-        // BacktestMetrics::from_trades (only post-trade values). This is
-        // a definition-level divergence surfaced by F-03b, not an equity-
-        // series mismatch. See F-03b QA brief / follow-up ticket F-03c.
-        // Sanity: Sharpe must be non-trivial on this fixture so the parity
-        // check is not a tautology of 0 == 0.
+        // F-03c (Plan-rev3 §3.4): maxDrawdown / maxDrawdownPercent now
+        // share a single definition across engines — the industry-standard
+        // running-peak formula over the per-candle equity curve. Before
+        // F-03c, Rust walked settled trade PnL only (ignoring intra-trade
+        // excursions) and produced ~33x smaller values than Dart on this
+        // fixture. 1e-9 tolerance — identical f64 operations on the same
+        // equity series, no sqrt or accumulated rounding involved.
+        expect(
+          rustMetrics.maxDrawdown,
+          closeTo(dartResult.metrics.maxDrawdown, 1e-9),
+          reason: 'maxDrawdown divergence > 1e-9 indicates the engines '
+              'are no longer running the same running-peak drawdown on '
+              'the same equity series — investigate F-03b equity parity '
+              'or F-03c drawdown helper, do NOT widen the tolerance',
+        );
+        expect(
+          rustMetrics.maxDrawdownPercent,
+          closeTo(dartResult.metrics.maxDrawdownPercent, 1e-9),
+        );
+        // Sanity: Sharpe and drawdown must be non-trivial on this fixture
+        // so the parity checks are not tautologies of 0 == 0.
         expect(dartResult.metrics.sharpeRatio.abs(), greaterThan(0.0));
         expect(rustMetrics.sharpeRatio.abs(), greaterThan(0.0));
+        expect(dartResult.metrics.maxDrawdown, greaterThan(0.0));
+        expect(rustMetrics.maxDrawdown, greaterThan(0.0));
       },
     );
   });
