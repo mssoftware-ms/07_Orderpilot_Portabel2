@@ -1,0 +1,309 @@
+Intro
+ich habe vor ca eineinhalb Jahren als
+drittes Video auf diesem Kanal eine
+Ichimoku Cloud tradingstategie
+vorgestellt hier erhalte ich noch
+regelmäßig Kommentare und wurde von
+Chris und Gregor gefragt ob ich nicht
+mal einen retest dieser Strategie aber
+mit zusätzlichen Verbesserung vornehmen
+kann na klar kann ich das machen Leute
+die Strategie kam damals für nur ein
+Indikator auf ein ziemlich
+beeindruckendes Ergebnis von 94% Profit
+nach 100 Trades was es in diesem Video
+zu schlagen gilt in jedem Fall werden
+wir prüfen ob wir die ichimuku Strategie
+durch Analyse der Trades weiter
+optimieren können wir starten direkt
+Trading Setup und Vorstellung des Ichimoku ClIndikators
+wieder auf Trading viw und wen hier oben
+unser Symbol aus analog zum alten Video
+sind auf dem Euro US-Dollar im Forex
+Markt unterwegs ihr könnt die Strategie
+aber in jedem Markt anwenden wo der
+chimoko geladen werden kann auch beim
+timeframe lassen wir uns wieder
+stundenkerzen anzeigen wobei ihr auch
+hier völlig flexibel sein könnt klickt
+dann schließend hier oben auf
+Indikatoren und sucht nach Ichimoku
+Cloud wir bedienen uns am Standard von
+Trading view geht direkt über einen
+Doppelklick in die Einstellung des
+Indikators wobei wir in der Input
+Section die Werte beibehalten aber in
+der Style section die Dicke und Farbe
+der Conversion line auf Grün ändern auch
+die Baseline und die Leggings B heben
+wir zusätzlich hervor letzterer erhält
+von mir eine gelbe Farbe und das sch
+übersichtlicher zu halten entferne ich
+die beiden leading spans erhöhe aber
+gleichzeitig die Transparenz der grünen
+und roten Wolken auf ca 30%. der
+Ichimoku Cloud Indikator wurde vom
+Japaner guichiho Soda entwickelt und
+umfasst verschiedene technische
+Indikatoren die Support und resistance
+Level Anzeigen sowie bei der Bestimmung
+von Momentum und Trendrichtung helfen
+unmittelbar dem Preis folgend haben wir
+die rote baseline und die grüne
+conversion Linie welche uns kurz bzw
+langfristige markteinstiege liefern die
+Idee ist wenn die grüne Linie über der
+roten liegt haben wir ein Kaufsignal
+vorliegen und wenn umgekehrt die rote
+Linie über der grünen Linie liegt
+spricht das für ein Verkaufsignal die
+Wolke die sich aus den beiden entfernten
+leadingspans zusammensetzt läuft 26
+Perioden vor dem Preis und bestätigt den
+Trend grün für ein Aufwärtstrend und Rot
+für ein Abwärtstrend zum Schluss haben
+wir noch den gelben Leggings span der
+wie der Name schon vermuten lässt 26
+Perioden hinter dem Preis herläuft und
+als zusätzliche Bestätigung des Trends
+dient wie alle diese Komponenten im
+Zusammenspiel verwendet werden können
+schauen wir uns jetzt an zwei Beispielen
+Signale und Entries für Kaufsignale
+an für einalides Kaufsignal muss der
+Preis zunächst über dem Ichimoku Cloud
+schließen das ist hier gegeben
+anschließend muss die 26 Perioden
+vorauslaufende Wolke grün gefärbt sein
+um uns auf einen potentiellen
+Aufwärtstrend hinzuweisen im Moment sind
+beide Bedingungen erfüllt wobei wir hier
+noch die grüne conversion line über der
+roten baseline liegen muss das kann
+häufig schon vorher der Fall sein zum
+Schluss lassen wir uns durch den gelben
+Legging span den Trend bestätigen
+welcher oberhalb der Wolke schließen
+muss alle vier Kriterien sind erfüllt so
+dass wir beim Open der nächsten Kerze
+mit unserer byyorder in den Trade
+einsteigen können beim Platzieren des
+stoplosses müsst ihr flexibel sein
+dieser richtet sich entweder an der
+roten baseline oder der Wolke aus er
+sollte nicht zu groß gew werden und es
+hilft sich an der vorherigen
+Preisstruktur zu orientieren hier ist
+die Baseline inklusive Wolke ein guter
+Punkt den Take Profit ziehen wir auf ein
+risk reward von ein Z2 ab übertragen die
+Preisdaten in unserem Broker und werden
+beim Erreichen eines einfachen risk
+rewards den stopl auf dem Brick even
+ziehen das ist ja der Fall lasst uns
+daraus ein verlustfreien trade
+machen der Preis läuft aber weiter in
+unseren Take Profit der das relativ
+Signale und Entries für Verkaufssignale
+komplex war noch ein Verkaufsignal der
+Preis befindet sich deutlich unterhalb
+der Wolke wobei diese bei der aktuellen
+Kerze aber für wichtiger nach 26
+Perioden wieder rot gefärbt ist die rote
+baseline liegt seit einigen Kerzen
+bereits über der Conversion Line und
+auch der leingsb befindet sich unterhalb
+der Wolke damit eröffnen wir beim Open
+der nächsten Kerze unsere cellorder
+damit der StopLoss oberhalb der Wolke zu
+weit weg vom Einstieg liegt platziere
+ich diesen leicht oberhalb der roten
+baseline analog Zehen wir für den Take
+Profit wieder auf das Zweifache Risiko
+ab betragen die Preisdaten in unserem
+Broker und werden beim Erreichen eines
+ein Z ein risk rewards den StopLoss auf
+dem Break Even
+ziehen das Gedachte Ziel ist erreicht
+StopLoss of Break
+Even und der Trade ging erfolgreich auf
+vor den 100 Trades noch ein Hinweis
+100 Trades mit Sessions-Indikator
+dadurch dass die Wolke 26 Perioden vor
+und der Leggings Band 26 Perioden hinter
+dem Preis läuft ist es durch einfaches
+Scrollen auf dem Chart nicht möglich die
+exakten Einstiegssignale auszumachen
+deshalb werde ich für alle Trades mit
+dem Bar Replay Feature von tradingvw
+arbeiten das macht zwar Arbeit wird sich
+aber hoffentlich lohnen denk daran dass
+bei der kostenlosen Version von Trading
+viiew das Bar Replay Feature nicht für
+intrad Kerzen zur Verfügung steht ihr
+kommt aber z.B über meinen Link in der
+Videobeschreibung über eine Anmeldung
+bei pepperstone kostenlos an eine
+essential Version für das Szenario mit
+den 100 Trades habe ich mir diesmal
+zusätzlich ein Sessions Indikator auf
+den Chart geladen das heißt ich werde
+nur entries suchen die zwischen 9 und 23
+Uhr liegen also während der
+volumenstarken London und New York
+Session und wenn wir üblicherweise
+selbst tren würden dann legen wir mal
+[Musik]
+los ca ein Jahr und 4 Monate hat hat es
+Breakdown der Strategie
+gedauert um alle 100 Trades auf Euro
+US-Dollar zu finden wie auch schon in
+meinem letzten Test können wir ein
+stetig wachsendes Performance Chart mit
+kleineren ranging Phasen erkennen und
+das trotz anderem Zeitraum durch die
+Anpassung im Risikomanagement haben wir
+nicht nur die Winrate um 3 % steigern
+können auch der Profit liegt jetzt bei
+112%. hier müssen wir aber noch Gebühren
+abziehen so dass wir immer noch bei über
+100% landen würden der maximale Drawdown
+liegt mit 14 % ebenfalls noch im Rahmen
+beim Vorbereiten auf dieses Video habe
+Analyse des Ergebnisses
+ich gemerkt dass mein eigener Ansatz
+beim Setzen des stoplosses also diesen
+möglichst knapp beim Einstieg zu setzen
+wenig erfolgsversprechend war wenn ich
+aber den Indikator ausblende dann sieht
+man auch schon dass die Einstiege
+relativ weit innerhalb eines Trends
+starten das heißt die Wahrscheinlichkeit
+für einen unmittelbaren Pullback ist
+vergleichsweise hoch deshalb bin ich auf
+Youtube gegangen und wollte erst eine
+andere ichimoko Strategie testen bis ich
+auf das Video von tradepr gestoßen bin
+wo ich ursprünglich die Strategie
+entdeckt hatte und hier weistß er darauf
+hin dass der stopl großzügiger an der
+Baseline bzw der Wolke gesetzt werden
+sollte das hat wie ihr am Performance
+Chart gesehen habt gepart mit dem
+verbesserten Risikomanagement zu einem
+sehr guten Ergebnis geführt aber ist da
+Verbesserung der Strategie
+noch Luft nach oben dazu habe ich mit
+einem sehr einfach gehaltenen prompt die
+perplexity ai befragt und nach mehreren
+Versuchen mit den vorgestellten Optionen
+abseits dieses Videos bin ich beim
+Ichimoku Score Indikator gelandet diesen
+holen wir über Indikatoren auf den Chart
+sucht nach Ichimoku Score und holt euch
+zunächst zweimal die multitime frrame
+Version von dreams defined auf den Chart
+wir gehen über einen Doppelklick in die
+Einstellung des ersten Indikators und
+ihr seht schon dass es neben den
+bekannten Einstellungen eine Menge
+Kriterien mit Wichtung gibt wie crosses
+breakouts Farben oder relative
+Entfernungen die die Qualität unserer
+ichimoko Signale bewerten wir belassen
+die Werte in ihren Standardeinstellungen
+da ich aber den Score für das höhere 4
+Stunden timeframe verwenden möchte werde
+ich die Perioden und das displacement
+des Ichimoku um den Faktor 4 erhöhen
+warum so kompliziert und nicht einfach
+die Funktionsweise des Indikators hier
+unten verwenden ganz einfach wenn ich
+einmal in den unteren Indikator gehe und
+den Haken dort entferne um die
+Standardeinstellung auf dem vier Stunden
+timeframe anzeigen zu lassen dann
+verlaufen beide Indikatoren hinreichend
+identisch das Problem mit multitimeframe
+t ist häufig wenn nicht sogar fast immer
+dass sich der Wert immer erst wie in
+diesem Fall nach vier einstundenkerzen
+final berechnet hat innerhalb dieser
+Zeitspanne kann es noch zu Schwankungen
+kommen deshalb entferne ich den
+Indikator wieder vom Chart und nutze nur
+noch diesen einen mit angepassten
+Perioden die Idee ist dass der
+scoreindikator uns dabei helfen wird
+qualitativ schlechtere Signale
+herauszufiltern indem wir ichimoko Werte
+des höheren Timeframes in die Strategie
+mit einbinden an einem verbesserten
+Kaufsignal würde sich nicht viel ändern
+außer dass ein fünfter Punkt hinzukommt
+bei dem der Score im grünen Bereich
+liegen muss die Order entries finden
+dann wieder analogstatt wie vorher schon
+im Video gezeigt bei verbesserten cell
+signignalen geht das gleiche und der
+scoreindikator muss ich im roten Bereich
+zum Zeitpunkt des Signals befinden wenn
+alle Kriterien erfüllt sind können wir
+auch hier mit unserer sellorder und dem
+Break Even Ansatz arbeiten da ich
+bereits alle Signale auf dem Chart habe
+und für nur einen zusätzlichen wiitter
+ergänzt haben kann ich so noch mal
+relativ zügig über die 100 Trades gehen
+Breakdown der verbesserten Strategie
+wenn wir uns jetzt den breakdown ansehen
+dann hat sich das doch mehr als gelohnt
+denn die Winrate liegt jetzt bei glatten
+60%. fairerweise müssen wir beachten
+dass 35 Trades herausgefiltert wurden
+und damit fällt der Profit rechnerisch
+geringer aus ich habe aber keine Kosten
+und Mühen gescheut und innerhalb von
+eineinhalb Stunden diese 35 Trades
+zusätzlich identifiziert damit erstreckt
+sich der Testzeitraum über zwei Jahre
+und ein Monat für die 100 Trades welche
+ich alle protokolliert habe mit Blick
+auf das Performance Chart ist dieses
+weiterhin stetig wachsend wobei gerade
+zum Start der Testreihe zwei kürzere
+konsolidierungsphasen eintraten wir sind
+bei der Winrate nicht mehr bei den 60%
+geblieben liegen aber 3 % über dem
+ersten Ergebnis also definitiv eine
+Steigerung das macht sich auch am Profit
+bemerkbar der bei einem Fest risk reward
+von 1 Z2 und bei 2% Risiko pro Trade bei
+starken 130% liegt nach Abzug von
+Gebühren bleiben davon noch ca 120%
+übrig freulicherweise konnten wir mit
+dem Filter den maximalen troder um 4%
+Punkte verringern was bei solchen
+Fazit und Einordnung im Gesamtranking
+Filtern immer ärgerlich ist ist das
+nicht nur negative sondern auch
+erfolgreiche Trades wie in diesem Fall
+herausgefiltert worden sind das Ergebnis
+spricht für sich aber wir haben in der
+direkten Gegenüberstellung so auch 9
+Monate länger für die 100 Trades
+gebraucht ich überlasse es euch zu
+bewerten ob ihr das ganze als
+Verbesserung wertet denn dadurch ist
+auch der Profit über die Zeitachse
+gesunken wenn wir das aber einmal außer
+Acht lassen schafft es die verbesserte
+Strategie zwar nicht ganz unter die Top
+5 reit sich aber unter die Top 10 auf
+Platz 8 ein mit 130% Profit hat sie
+damit deutlich die originale Strategie
+auf Platz 22 geschlagen hier sieht man
+mal wieder dass nicht viele Indikatoren
+oder komplexe Anpassung für eine
+erfolgreiche Strategien nötig sind
+

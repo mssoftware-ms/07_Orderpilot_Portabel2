@@ -1,0 +1,368 @@
+ich habe unter meinem letzten Video von
+Aaron Müller TV die Challenge erhalten
+ob ich nicht mal eine profitable
+Strategie nur mit klassischen
+standardindikatoren vorstellen kann na
+klar kann ich das machen Aron Müller TV
+bevor ich mir selbst eine Strategie
+ausdenke bin ich erstmal wieder in
+üblicher Manier auf Youtube gegangen und
+habe mir angesehen welche Strategien mit
+rein Standard in die Katon andere
+Youtuber vorstellen dabei ist mir dieses
+Video vom großen Kanal Trading laap ins
+Auge gesprungen welcher die einfachen
+Bollinger Bänder mit dem RSI kombiniert
+hat leider hat er für diese Strategie
+kein Backtest bereitgestellt die seine
+These dass die Strategie funktioniert
+belegt deshalb übernehme ich das und
+werde diesen über 100 trads auf ihre
+Performance prüfen im Anschluss
+analysieren wir ob wir die Strategie
+nicht sogar noch weiter verbessern
+können wir befinden uns vi mal auf
+Trading Setup und Vorstellung der Indikatoren
+tradingvw und wen zunächst hier oben
+unser Symbol aus da wir mit
+standardindikatoren arbeiten kann die
+Strategie in jedem Markt angewendet
+werden auf wunds schon Aaron sind wir
+erstmal auf dem nestic im Futures Markt
+unterwegs beim timeframe könnt ihr
+ebenfalls flexibel sein wir entscheiden
+uns für stundenkerzen geht anschließend
+hier oben auf Indikatoren und sucht nach
+den Bollinger Bändern B nehmen den
+Standard von tradingvw und dann brauchen
+wir noch einen einfachen RSI auch hier
+bedienen wir uns vom Standard geht
+direkt über ein Doppel Klick in die
+Einstellung der Bollinger Bänder und
+ändert in der Input Section die Länge
+von 20 auf 30 bei Bedarf könnt ihr noch
+in der Style section so wie ich für eine
+bessere Sichtbarkeit die Farbe der Basis
+auf weiß ändern die Dicke des oberen und
+unteren Bandes erhöhen und den
+Hintergrund entfernen die weiße Basis
+unserer Bollinger Bänder bildet also
+einen einfachen moving average der immer
+die letzten 30 Kerzen in die Kalkulation
+einbezieht wir legen die Annahme
+zugrunde dass sich der Preis um diese
+Basis bewegt und magnetartig immer
+wieder von diesem angezogen wird wenn
+wir eine große Abweichung von diesem
+Standard haben was durch diese Bänder
+dargestellt wird spekulieren wir auf
+eine Trendumkehr zurück zu diesem Preis
+würden wir aber blint einen solchen
+trade ohne zusätzlich Bestätigung
+eröffnen dann erleiden wir schneller
+einen Verlust als uns lieb ist genau
+dafür haben wir noch den RSI mit auf den
+Chart geladen und passen auch diesen
+über einen Klick auf das Zahnrad an in
+der Input Section reduzieren wir der
+Trading Laab die Länge nur um ein Punkt
+und in der Style section könnt ihr noch
+den RSI zu einer Farbe eurer Wahl ändern
+meiner wird gelb und etwas dicker
+entfernt die Haken für den moving
+average sowie für den Background fill
+und die Gradienten die Level stellen wir
+jeweils noch weiß um und wir passen das
+obere Band von 70 auf 75 an und das
+untere von 30 auf 25 tatsächlich schlägt
+Vorstellung der ersten Strategie
+tradinglp in seinem Video zwei
+unterschiedliche Varianten für die
+Strategie vor und wir werden direkt die
+seiner Meinung nach bessere ausprobieren
+dabei geht es darum divergenzenen Preis
+mitittels RSI auswendig zu machen ein
+Beispiel hätten wir direkt hier der
+Preis bildet tiefere Tiefs aus und liegt
+sogar außerhalb der Bollinger Bänder
+aber gleichzeitig zeigt uns der RI
+höhere Hochs an wir unterscheiden dabei
+grundsätzlich zwei Arten von Divergenzen
+bärisch und bullisch beide Typen haben
+zwei Formen regulär und versteckt in
+unserem Beispiel gerade haben wir eine
+bullische reguläre Divergenz vorliegen
+wir können die Divergenzen entweder
+selbst an zeichnen aber um es gerade
+noch für tradingeinsteer leichter und
+für den Test gleichzeitig objektiver und
+reproduzierbarer zu gestalten nutze ich
+die m RSI vorhandene Funktion und
+Scheide über diesen Haken die
+Divergenzen an das erleichtert uns die
+Suche nach den richtigen entries
+ungemein doch lasst euch beim Scrollen
+durch den Chart bitte nicht von diesen
+bilderbuchsignalen täuschen denn wenn
+wir uns das Ganze einmal mit dem Bar
+Replay Feature von tradingvw ansehen
+dann müssen wir leider feststellen dass
+ich das Signal erst fünf Kerzen später
+bildet es dann aber immerhin fest auf
+dem chartpad und nicht repainted wie
+andere Indikatoren ob das zum Problem
+werden kann sehen wir gleich schauen wir
+uns aber erstmal die Regeln für die
+entries an für ein valides Kaufsignal
+Signale und Entries für Kaufsignale (Strategie 1)
+muss der Preis einimal außerhalb der
+unteren Bollinger Bänder geschlossen
+haben gleichzeitig muss RSI einmal im
+überverkauften Bereich also unter dem
+25er Level schließen jetzt warten wir
+noch darauf dass sich ein bullsignal im
+RSI bildet das ist hier der Fall so dass
+wir direkt beim Open der nächsten Kerze
+in den Trade einsteigen können setz den
+StopLoss unter dem letzten sin von
+Tiefpunkt und für den Take Profit Zen
+wir auf ein risk reward von 1 Z2 ab
+perfekt wir konnten einen Profit
+erzielen für Verkaufsignale muss der
+Signale und Entries für Verkaufssignale (Strategie 1)
+Preis einmal über dem oberen
+bollingerband schließen und auch der RSI
+muss im überkauften Bereich also über
+dem 75er Level befinden unser Trigger
+wird dann die Kerze sein sobald ein
+bärignal im RSI erscheint eröffnet beim
+Open der nächsten Kerze ein sellorder
+und setz den StopLoss über dem letzten
+sinnvollen Hochpunkt für den Take Profit
+ziehen wir wieder auf das Doppelte
+Risiko ab und auch hier konnten wir ein
+Profit erzielen für die 100 Trades habe
+100 Trades mit Sessions-Indikator
+ich mir wieder zusätzlich ein Sessions
+Indikator auf den Chart geladen das
+heißt ich werde nur entries suchen die
+zwischen 9 und 23 Uhr liegen also wähend
+der volumenstarken London und New York
+Session und wenn wir üblicher we selbst
+traden würden dann legen wir mal
+[Musik]
+los etwas über dre Jahre hat es gedauert
+Breakdown der ersten Strategie
+um alle 100 Trades zu finden und mit
+Blick auf den Grafen hier rechts könnte
+man denken dass wir immer noch einen
+Preis sehen der um sein Durchschnitt
+oszilliert doch leider ist das unser
+Performance Chart welches gerade in der
+ersten Hälfte des Tests ziemlich
+schlecht abgeschnitten hat die Winrate
+liegt gerade einmal bei 32% womit wir
+bei 2% Risiko pro Trade und unserem
+festen risk reard von 1 Z2 bei 8%
+Verlust herauskommen berücksichtigen wir
+noch Gebühren die bei jedem Trade
+anfallen wird das Bild nicht besser auch
+der maximale Drawdown ist mit 22%
+vergleichsweise hoch wie bereits
+Analyse des Ergebnisses (Strategie 1)
+eingangsvermutet ist die Ursache für das
+schlechte Abschneiden des Ergebnisses
+die späte Bestätigung der Divergenz im
+RSI ärgerlicherweise ist der Preis
+bereits sehr häufig in unsere Richtung
+gelaufen war dann aber schon soweit dass
+sich kein vorteilhaftes chancenrisiko
+mehr ergeben hat und der Preis wieder
+gegen uns gelaufen ist schade ist es
+also doch nicht möglich mit
+standardindikatoren Gewinne zu erzielen
+natürlich ist es das denn wir haben noch
+Taus und mehr Möglichkeiten diese
+Indikatoren zu kombinieren und
+anzupassen was passiert z.B wenn wir uns
+Vorstellung der zweiten Strategie
+einfach des anderen Ansatzes von
+tradinglab für die Strategie bedienen
+vielleicht wird es uns ja überraschen
+dazu entfen wir ganz einfach wieder den
+Haken für die Divergenz im ri bei den
+Regeln für die entries werden wir wieder
+leicht von den Vorgaben von tradinglab
+abweichen denn er ist in seinen
+Ausführung leider unfassbar unpräzise
+laut ih er gibt sich ein longtrade z.B
+wenn der Preis einmal außerhalb des
+unteren bollingerbandes schließt und
+sich der RSI unterhalb des 25 Levels
+befindet aber hier ist die Kooks dass
+der Preis tiefer und tiefer und tiefer
+tippen kann deshalb gehen wir wie folgt
+vor für ein long Signal warten wir
+Signale und Entries für Kaufsignale (Strategie 2)
+darauf dass der Preis außerhalb des
+unteren bollingerbandes schließt
+zusätzlich muss der RSI unter dem 25er
+Level schließen und sobald dieser wieder
+über diesem Level kreuzt haben wir unser
+entry dabei öffnen wir beim Open der
+nächsten K unserem Brade der stopl kommt
+wieder unter den letzten sind Tiefpunkt
+und für den Tech Profit nehmen wir ein
+risk RE von 1 Z2
+an unter ging erfolgreich auf für
+Verkaufsignale nutzt ja wieder die
+umgekehrte Logik dann stürzen wir uns
+jetzt noch mal in die nächsten 100
+Trades auf
+[Musik]
+geht's diesmal hat es nur etwas über ein
+Breakdown der zweiten Strategie
+Jahr gedauert um alle 100 Trades zu
+finden aufgrund der leichten Abänderung
+von der originalen Strategie erhalten
+mir diesmal ein vergleichsweise besseres
+wachsendes Performance Chart wir könnten
+die Winrate um 8% steigern was ich auf
+dem Profit niederschlgt der jetzt bei
+33,8% vorgebühren bzw nach Abzug eben
+dieser bei 23,8% liegt leider hatten wir
+zum Schluss der Testreihe einen starken
+Rücksetzer wodurch auch der hohe
+maximale Drawdown von 20% zustande
+gekommen ist in jedem Fall haben wir ein
+Profit factaktor größer als eins womit
+wir die Strategie grundsätzlich
+profitabel nennen können Aaron wir haben
+Analyse des Ergebnisses (Strategie 2)
+es geschafft auch wenn die Strategie
+profitabel ist hätten wir im gleichen
+Zeitraum den nestch bei weitem nicht
+outperformt dieser ist mit rund 50% gut
+doppelt so hoch wir können uns also
+entweder gleich den Stress mit den 100
+trad sparen oder wir schauen uns noch
+wie eingangsversprochen an wie ich die
+Strategie verbessern würde dazu gehen
+Verbesserung der Strategie
+wir wieder zurück zu Trading view beide
+Indikatoren behalten wir auf dem Chart
+und gehen als erstes in die Einstellung
+des RSI statt der sehr hohen Länge von
+13 reduzieren wir diese auf 3 um mehr
+Einstiegssignale zu erhalten das dadurch
+höhere Rauschen kompensieren wir wieder
+indem wir die Level in der Style section
+Jewes auf 80 und 20 einstellen in der
+ursprünglichen Strategie wurden die
+Bollinger Bänder analog zum er als z
+Bestimmung extremer Preisbewegung
+genommen statt zweimal auf die gleiche
+Bestätigung zu setzen ändern wir unsere
+Bollinger Banner wie folgt ab erhöt die
+Länge in der inputsection von 30 auf 200
+und wird als moving average Typ den EMA
+aus die Standardabweichung reduzieren
+wir auf 0,2 die Bollinger Bänder
+verwenden wir nun zur trendbestimmung
+wobei die Bänder unsere nicht Trading
+Zone darstellt das heißt für ein malides
+Signale und Entries für verbesserte Kaufsignale
+Kaufsignal muss der Preis über den
+Bollinger Bändern schließen um uns auf
+einen übergeordneten Aufwärtstrend
+hinzuweisen dann warten wir nur noch
+darauf dass der RSI das 20er Level von
+unten nach oben kreuzt jetzt können wir
+wieder beim Open der nächsten Kerze
+unseren byrade eröffnen der stopl kommt
+unter den letzten sin von Tiefpunkt bzw
+Swing low und für den Tech Profit ziehen
+wir auf ein risk reward von 1:3 ab
+übertragt diese Preisdaten in neen
+Broker sobald der Preis ein einfaches
+risk reward von ein Z ein erreicht hat
+werden wir den StopLoss auf dem Break
+Even ziehen um kein Verlust mer mit dem
+Trade einfahren zu können das ist ja der
+Fall setzt den StopLoss auf dem
+Breakeven und der Trade ging erfolgreich
+auf bei verkaufsignalen befindet sich
+Signale und Entries für verbesserte Verkaufssignale
+der Preis unter den Bollinger Bändern
+und der RSI muss das 80er Level von oben
+nach unten kreuzen dann eröffnen wir
+wieder beim Open der nächsten Kerze ein
+sellTrade und setzen den stopl beim sind
+von Hochpunkt bzw Swing high für den
+Take Profit wiieren wir wieder das
+Dreifache Risiko an werden aber bei
+Erreichen eines einfachen risk rewards
+den StopLoss auf den prak even setzen
+das ist ja der Fall setzt den stopl auf
+dem Break Even und wir haben ein Profit
+erzielt dann gehen wir jetzt noch mal
+mit neuen Voraussetzungen aber gleichen
+Bedingungen über die 100 Trades und los
+[Musik]
+Breakdown der verbesserten Strategie
+deutlich kürzer hat es diesm nur knapp 9
+Monate gedauert um alle 100 Trades zu
+finden mit direkten Blick auf das
+Performance Chart erkennen wir einen
+stetig steigenden Grafen der von immer
+wieder leichten rücksätzern gezeichnet
+ist die windnrate ist mit 38%
+vergleichsweise niedrig und damit fast
+so hoch wie beim letzten breakdown aber
+wir arbeiten jetzt mit einem höheren
+riskward von 1 Z3 wodurch sich der
+Profit auf 108% erhöht hat Nachgebühren
+von 0,1% pro Trade liegen wir
+entsprechend 10% darunter wer sich
+übrigens fragt woher die Krumen Zahlen
+kommen diese sind den gaps Mark geschüet
+so dass wir bei diesem beispielhaften
+trade auf ein für uns vorteilhaftes risk
+reward von 1 Z 4,7 kommen außerdem haben
+wir es geschafft den nestic in diesem
+kurzen Zeitraum deutlich zu outperformen
+dieser hatte vom 18 Dezember 23 bis 30
+September 24 eine Performance von ca
+20%. in diesem Sinne Aron TV ja es ist
+mehr als möglich rein mit klassischen
+standardindikatoren eine profitable
+Strategie zu entwickeln ich will an der
+Erfolg im Trading
+Stelle aber auch betonen dass eine
+Strategie alleine ein Trader nicht
+erfolgreich macht was denkt ihr wan es
+liegt wenn ihr mit dem exakt gleichen
+Setup auf ein ganz anderes Ergebnis
+kommt ich sage es euch es ist das
+richtige Risikomanagement und in diesem
+Fall die Erfahrung wo der StopLoss
+platziert werden muss und wenn wir noch
+auf das Live Trading schauen kommt der
+psychologische Aspekt hinzu denn man
+muss akzeptieren können dass man auch
+mal sieben Trades in Folge verlieren
+kann ohne gleich wieder die Strategie zu
+wechseln versucht beim Trading immer ein
+Wahrscheinlichkeiten zu denken um eure
+Erwartungen und emotionalen Reaktion auf
+Gewinne und Verluste besser zu managen
+aber genug des sekurses im Gesamtranking
+Einordnung im Gesamtranking
+schafft es diese einfache Strategie auf
+die vorderen Plätze und kliegt mit 108%
+Profit unter den Top 10 damit sollten
+aus meiner Sicht die Kriterien für die
+Herausforderung erfüllt sein mit welchen
+Indikatoren soll ich die nächste
+Strategie unter die Lupe nehmen
+

@@ -1,0 +1,313 @@
+Intro
+ich wurde vom Zuschauer Justus gefragt
+ob ich nicht mal die utbard Alert
+Strategie vom Kanal Trades beim Mo
+testen kann na klar kann ich das Justus
+am Ende des Videos präsentiert mosugor
+das ziemlich beeindruckende Ergebnis der
+Strategie welche nach gerade mal einem
+Monat bei einer Winrate von über 66% und
+einem Profit von über 13% liegt ob wir
+ebenfalls solche eine gute Performance
+erziieren können prüfen wir im heutigen
+Video indem ich euch wie immer kurz die
+Strategie vorstelle und diese
+anschließend mittels 100 Trades auf dem
+Prüfstand Stelle das Ergebnis
+präsentiere ich euch im Anschluss wie
+mal ehrlich und transparent und wir
+schauen ob das Ergebnis eventuell sogar
+noch verbessern können geht zuur
+Trading Setup und Einstellung der Indikatoren
+allererst auf Trading und lasst uns hier
+oben unser Symbol auswählen wir befinden
+uns im Futures Markt auf dem Nest 100
+die Strategie funktioniert aber genauso
+gut im Krypto oder Forex Markt wie im
+originalen Video sind wir auf dem 5
+Minuten timeframe unterwegs hast dieses
+aber gerne nach eurem persönlichen
+Trading steel an klickt als nächstes
+hier oben auf Indikatoren und sucht nach
+utibot alerts wir nehmen diesen hier von
+quant Nomad dann brauchen wir noch die
+linear regression candless von ugu und
+zum Schluss den häufig auf meinem Kanal
+verwendeten Sessions Indikator von aurox
+da unser Chart jetzt noch so aussieht
+als gebe es ein Fehler in der Matrix
+lasst uns einige Einstellungen vornehmen
+als erstes gehen wir hier oben über das
+zahnad in die Einstellung des Sessions
+Indikators und entfernt in der Input
+Section den Haken für die London und
+Tokyo Session dieser Indikator wird uns
+visuell dabei unterstützen nur während
+de New York Session zu traden als
+nächstes kümmern wir uns um die linear
+regression candles und da dieser
+Indikator bereits geglättete Kerzen auf
+dem Chart printet machen wir ein
+Rechtsklick auf unseren Chart und gehen
+hier unten in die Einstellungen nehmt
+unter Symbol alle Haken für die Kerzen
+heraus unser Chart sollte nun etwas
+übersichtlicher Aussehen geht noch mal
+über das zahnad in die Einstellung des
+Indikators und ändert in der Input
+Section die thckness moving von 11 auf 7
+und in der Style section heben wir den
+weißen moving average für eine bessere
+Sichtbarkeit noch etwas hervor dieser
+Indikator wird uns dabei helfen
+Trendbewegung durch die klettung besser
+zu erkennen zum Schluss machen wir noch
+ein Doppelklick auf den uty Bot alerts
+Indikator und ändern in der Input
+Section den key value von 1 auf 2 und
+die ETA Periode reduzieren wir von 10
+auf 1 dieser Indikator wird uns die
+Signale liefern aber lasst uns jetzt
+direkt ansehen wie alle Indikatoren im
+Zusammenspiel funktionieren für ein
+Signale und Entries für Kaufsignale
+valides kaossignal müssen wir uns
+innerhalb der New York Session befinden
+welche uns durch den Indikator rot
+hervorgehoben wird dann warten wir
+darauf dass uns der ut bot Alert
+Indikator ein neues bignal ausgibt das
+ist ja der Fall und jetzt warten wir
+noch darauf dass der Körper der linear
+regression candle oberhalb des weißen
+moving averages schließt wir haben hier
+unsere signalkerze und dadurch die
+klätung der aktuelle Preis nicht einfach
+auszumachen ist lasse ich mir hier
+zusätzlich die preislinie Anzeigen so
+können wir exakt beim Open der nächsten
+Kerze unseren trade eröffnen den stopl
+setzen wir dabei beim letzten Swing low
+und wir schließen die Order erst wieder
+wenn sich ein roter Kerzenkörper
+unterhalb des weißen moving averages
+bildet wenn wir in diesem F der Trade
+noch nicht im Profit liegt dann sitzen
+wir diesen
+aus und gut dass wir das getan haben
+denn wir können uns so über einen
+erfolgreichen trade mit einem risk
+reward von 1 zu 2,2 freollen für
+Signale und Entries für Verkaufssignale
+Verkaufsignale sind wir ebenfalls in der
+New York Session unterwegs und haben
+hier bereits unser cell signignal da der
+Körper der linear regression candle
+unterhalb des weißen moving averages
+geschlossen hat wir eröffnen wieder beim
+Open der nächsten Kerze unsere sellorder
+und platzieren stopl beim letzten Swing
+high jetzt warten wir noch darauf dass
+die linear regression candle wieder
+oberhalb des weißen moving averages
+schließt ist ja der Fall und wir können
+ein Take Profit mit einem risk reward
+von 1 Z 1,2 einstreichen laut Strategie
+100 Trades
+werden wir immer nur die ersten drei
+Trades einer jeden Session mitnehmen und
+dann wage ich mich mal an die 100 Trades
+auf
+[Musik]
+geht's
+Breakdown der originalen Strategie
+ich bin nach bereits 45 Tagen zurück für
+euch mit dem Ergebnis der 100 Trades
+doch mit direkten Blick auf das
+Performance Chart gibt diese Strategie
+überraschenderweise leider gar keine
+gute Figur ab wir haben zwar eine
+ziemlich gute Winrate von fast 60%
+erzielt doch das nützt nicht viel wenn
+wir Prot trade mehr verlieren als wir
+gewinnen der durchschnittliche Verlust
+liegt natürlich glatt bei -1r doch durch
+den variablen stoplus schließen wir die
+Trades teilweise so ungünstig dass wir
+hier nur einen durchschnittlichen Gewinn
+von 0,74r verbuchen diese Problematik
+schlägt sich auch auf dem gewinneder der
+bei mageren 5% liegt und wenn wir noch
+Gebühren hinzunehmen ist die Strategie
+endgültig unprofitabel doch warum
+Analyse des Ergebnisses
+unterscheiden sich unsere Ergebnisse so
+gravierend 5% ver 123% Profit ist nicht
+marginal und lässt sich auch nicht mit
+dem Zeitrum der Testserie begründen
+tatsächlich ist es aber ziemlich
+offensichtlich und das ist nicht nur mir
+aufgefallen sondern auch den findigen
+Zuschauer Travis Cooper ich hatte es
+bereits bei den Einstiegen angedeutet
+die linear regression C gletten den
+Preis so sehr dass der aktuelle Preis
+grundsätzlich nicht mehr korrekt
+ausgemacht werden kann dadurch steckt Mo
+in seinem originalen Video nicht noch
+frühzeitiger in die Trades ein son und
+verlässt diese auch zu einem optimalen
+Zeitpunkt so kommen natürlich auch
+utopisch gute risk rewards von über ein
+zu 10 Zustande bitte passt deshalb bei
+solchen Indikatoren auf und schaut
+lieber zweimal hin denn bei meiner
+Recherche habe ich viele ähnliche Videos
+gefunden die den ut B alerts Indikator
+mit den linear regression cands
+kombinieren und euch so versprechen aus
+1000 über 76 000 zu machen danke auch an
+dich paski für den Vorschlag aber auch
+dieses Video ziiert auf Trading Anfänger
+ab und man wird nur übers Ohr gehauen
+Verbesserung der Strategie
+aber lass uns mal überlegen ob diese
+Strategie noch zu retten ist zu
+allererst ein Mal entfernen wir die
+linear regression cands und lassen uns
+wieder die normalen Herzen auf dem Chart
+anzeigen um ein besseres Bild von den
+tatsächlich aktuellen preispunkten zu
+erhalten so gut ich die Idee mit dem
+Sessions Indikator und den drei Trades
+pro Tag finde um overtrading zu
+vermeiden aber ich persönlich bevorzuge
+es auch die London Session mit zu
+inkludieren und schalte diese deset mit
+hinzu den kernindikator der Strategie
+den Duty bot alerts Indikator behalten
+wir bei allerdings war mir persönlich
+der signalanstieg zu spät weshalb wir
+diesen nicht mehr als signalindikator
+verwenden sondern für die unmittelbare
+Trendrichtung ausnutzen werden dazu
+reduzieren wir noch die Sensitivität und
+erhöhen über einen Doppelklick in der
+Input Section den keyvue von z auf und
+entfernt in der Style section die beiden
+barcors Trendrichtung ist ein gutes
+Stichwort denn dem übergord in Trend gar
+keine Beachtung das ändern wir indem wir
+hier oben auf Indikatoren klicken und
+nach einem einfachen exponential moving
+average suchen nimmt den Standard von
+Trading view außerdem brauchen wir noch
+ein Indikator für die entries dazu
+suchen wir nach einem stochastic
+Momentum Indikator nehmt diesen hier von
+Uday geht direkt über ein Doppelklick in
+die Einstellung des moving averages und
+ändert in der Input Section die Länge
+von 9 auf 200 und in der Style section
+wird ihr noch eine prominente Farbe
+eurer Wahl meiner wird gelb und etwas
+dicker anschließend gehen wir noch in
+die Einstellung des stochastics
+Indikator behaltet die Werte in der
+inputsection bei und in der Style
+section entfernen wir die beiden extrem
+Level ändern die Farbe des Indexes auf
+grün und machen diese noch etwas dicker
+die Signallinie heben wir ebenfalls noch
+etwas hervor und die zeroine wird bei
+mir weiß und ebenfalls etwas dicker das
+verbesserte Trading Setup ist damit
+komplett so dass wir uns jetzt die
+Signale für die entries anschauen können
+Signale und Entries für Kaufsignale 2.0
+für ein verbessertes Kaufsignal muss ich
+der Preis oberhalb des 200 dmas befinden
+um uns auf ein übergeordneten
+Aufwärtstrend hinzuweisen dann warten
+wir für die unmittelbare Trend Richtung
+darauf dass uns der ut bot alers
+Indikator ein neues bignal ausgibt das
+ist hier der Fall so dass wir jetzt nach
+einem entry suchen können bei dem wir
+ein crostes stochastic
+momentumindexindikators wichtig
+unterhalb der Nullinie erhalten das
+sieht gut aus so dass wir beim Open der
+nächsten Kerze unseren trade eröffnen
+und den StopLoss beim letzten sin von
+Tiefpunkt bzw lokalen Swing low setzen
+können unser erstes Zier liegt dabei bei
+einem einfachen risk RE von ein zu
+ein pris hat dieses erreicht so dass wir
+den Tech Profit auf das Doppelte Risiko
+ziehen und den StopLoss auf den Brick
+even setzen könen können wir haben nun
+einen verlustfreien trade und dieser
+ging erfolgreich auf bei
+Signale und Entries für Verkaufssignale 2.0
+verkaufssignalen befindet sich der Preis
+unterhalb des 200 as und der
+unmittelbare Trend ist beish was uns
+durch ein zilsignal des ut body alerts
+Indikators angezeigt wird jetzt warten
+wir noch darauf dass ich der grste
+stochastic Indikators oberhalb der
+Nullinie bildet wir haben hier unser
+valides Signal und eröffnen beim Open
+der nächsten Kerze unseren celltrade den
+stopl setzen wir beim letzten sinnvollen
+Hochpunkt bzw Swing high und als erstes
+Preisziel orientieren wir uns an einem
+risk reward von ein Z ein
+der Preis hat dieses getriggert so dass
+wir den Take Profit auf ein risk RE von
+ein Z2 ziehen und den StopLoss auf den
+briak even
+setzen perfekt und wir könnten auch hier
+ein Profit erzielen diesmal nehme ich
+100 Trades
+die gesamte London und New York Session
+mit und wir stürzen uns jetzt noch
+einmal mit neu Voraussetzung in die 100
+Trades los
+[Musik]
+Breakdown der verbesserten Strategie
+geht's diesmal hat es über zwei Monate
+gedauert um alle 100 Trades zu finden
+doch von dieser starken Verbesserung bin
+selbst ich überrascht wir könnten mehr
+als jeden zweiten trade für uns gewinnen
+und kommen so bei 2% Risiko pro Trade
+auf ein Profit von sag und schreibe
+123%. erst jetzt bei der Aufnahme fällt
+mir auf dass wir damit die Versprechung
+des originalen Videos erfüllen können
+bedenkt aber natürlich dass wir Gebühren
+für jeden trade abziehen müssen so dass
+sich auch unser Profit entsprechend
+reduziert der durchschnittliche Gewinn
+trotz des festen risk rewards lag etwas
+über ein Z2 da in meiner Testreihe eine
+uns wohlgesonnene GAP aufgetreten ist
+die uns aber in diesem Einfeld zu einem
+risk rewardward von 1 Z 4,5 verholfen
+hat ansonsten liegt auch der maximale
+drawer mit 12 % mehr als im Rahmen und
+das Performance shot wächst nun stetig
+Einordnung im Gesamtranking
+die verbesserte Strategie liegt damit im
+Gesamtranking ganz weit vorne auf dem
+sechsten Platz das ist ziemlich solide
+und eine starke Steigerung zur
+originalen Strategie welche nur auf dem
+27 Platz gelandet wäre achtet bitte wie
+immer auf die Hinweise hier unten und
+schickt mir gerne weitere Vorschläge für
+Strategien zu die ich einmal für euch
+analysieren soll
+
