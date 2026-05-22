@@ -137,10 +137,21 @@ void main() {
         final rustFinalEquity = initialBalance + rustMetrics.totalPnl;
         expect(rustFinalEquity, closeTo(dartFinalEquity, 1e-9));
       },
-      skip: 'F-01 establishes parity test infrastructure. PnL/WR/Equity '
-          'asserts are expected RED until F-02 implements Dart-side SL/TP '
-          'tracking (see 260522_Gesamtplan_Phase1-3.md §3.4 F-02). F-02 '
-          'will remove this skip and make the test green.',
+      skip: 'F-02 fixed the SL/TP gap (intra-candle StopLoss/TakeProfit exits '
+          'now match Rust); the remaining ~31.75 totalPnl drift on this 200-'
+          'candle fixture comes from a SECOND, independent divergence in the '
+          'RSI computation: Rust BbRsiStrategy::on_candle calls calc_rsi on a '
+          'rolling 20-close window (ctx.closes(20)), while Dart BacktestService '
+          '_computeRsi runs cumulative Wilder smoothing across the full close '
+          'history. The two implementations agree only after the smoothing has '
+          'converged — for short fixtures and trend reversals they diverge by '
+          'a few RSI points, which causes Rust to take one extra LONG entry at '
+          'index 20 that Dart misses, plus a 2-candle SHORT-entry offset every '
+          'cycle. Closing that gap is out of scope for F-02 (which owns SL/TP '
+          'wiring, see 260522_Gesamtplan_Phase1-3.md §3.4) and must land via a '
+          'separate sprint item that aligns the RSI windowing strategy across '
+          'engines. Do NOT widen the 1e-9 tolerance — it is correct for what '
+          'this assertion is supposed to prove.',
     );
   });
 }

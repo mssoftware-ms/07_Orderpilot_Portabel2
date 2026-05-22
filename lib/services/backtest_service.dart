@@ -68,12 +68,22 @@ class _OpenPosition {
   final int entryTimestamp;
   final double entryFee;
 
+  /// Absolute stop-loss price (null = no SL attached at entry).
+  /// Mirrors `Position::stop_loss` in the Rust engine.
+  final double? stopLoss;
+
+  /// Absolute take-profit price (null = no TP attached at entry).
+  /// Mirrors `Position::take_profit` in the Rust engine.
+  final double? takeProfit;
+
   _OpenPosition({
     required this.isLong,
     required this.entryPrice,
     required this.quantity,
     required this.entryTimestamp,
     required this.entryFee,
+    this.stopLoss,
+    this.takeProfit,
   });
 }
 
@@ -188,6 +198,9 @@ class BacktestService {
 
       if (position == null) {
         // Entry: price below lower BB AND RSI oversold → LONG
+        // SL/TP mirror Rust BbRsiStrategy::on_candle (bb_rsi.rs:224):
+        //   long SL = lower - (middle - lower) = 2*lower - middle
+        //   long TP = middle
         if (close <= lower && rsi < params.rsiOversold) {
           final fee = balance * feeRate;
           final availableBalance = balance - fee;
@@ -198,11 +211,16 @@ class BacktestService {
             quantity: qty,
             entryTimestamp: candle.timestamp,
             entryFee: fee,
+            stopLoss: 2 * lower - middle,
+            takeProfit: middle,
           );
           balance = 0;
           totalFees += fee;
         }
         // Entry: price above upper BB AND RSI overbought → SHORT
+        // SL/TP mirror Rust BbRsiStrategy::on_candle (bb_rsi.rs:232):
+        //   short SL = upper + (upper - middle) = 2*upper - middle
+        //   short TP = middle
         else if (close >= upper && rsi > params.rsiOverbought) {
           final notional = balance;
           final fee = notional * feeRate;
@@ -213,30 +231,63 @@ class BacktestService {
             quantity: qty,
             entryTimestamp: candle.timestamp,
             entryFee: fee,
+            stopLoss: 2 * upper - middle,
+            takeProfit: middle,
           );
           balance = 0;
           totalFees += fee;
         }
       } else {
-        // Exit conditions
+        // Exit logic — F-02 priority: intra-candle SL/TP first, then the
+        // indicator-based BB-middle / RSI exits. Mirrors the step order in
+        // Rust BacktestEngine::run (backtest/mod.rs:158-217).
         String? exitReason;
+        double exitPrice = close;
 
         if (position.isLong) {
-          if (close >= middle) exitReason = 'BB Middle';
-          if (rsi > params.rsiOverbought) exitReason = 'RSI Overbought';
+          // Long SL = candle.low ≤ SL; ambiguous SL+TP → SL wins (conservative).
+          final slHit =
+              position.stopLoss != null && candle.low <= position.stopLoss!;
+          final tpHit = position.takeProfit != null &&
+              candle.high >= position.takeProfit!;
+          if (slHit) {
+            exitReason = 'StopLoss';
+            exitPrice = position.stopLoss!;
+          } else if (tpHit) {
+            exitReason = 'TakeProfit';
+            exitPrice = position.takeProfit!;
+          } else if (close >= middle) {
+            exitReason = 'BB Middle';
+          } else if (rsi > params.rsiOverbought) {
+            exitReason = 'RSI Overbought';
+          }
         } else {
-          if (close <= middle) exitReason = 'BB Middle';
-          if (rsi < params.rsiOversold) exitReason = 'RSI Oversold';
+          // Short SL = candle.high ≥ SL; short TP = candle.low ≤ TP.
+          final slHit =
+              position.stopLoss != null && candle.high >= position.stopLoss!;
+          final tpHit = position.takeProfit != null &&
+              candle.low <= position.takeProfit!;
+          if (slHit) {
+            exitReason = 'StopLoss';
+            exitPrice = position.stopLoss!;
+          } else if (tpHit) {
+            exitReason = 'TakeProfit';
+            exitPrice = position.takeProfit!;
+          } else if (close <= middle) {
+            exitReason = 'BB Middle';
+          } else if (rsi < params.rsiOversold) {
+            exitReason = 'RSI Oversold';
+          }
         }
 
         if (exitReason != null) {
-          final exitNotional = position.quantity * close;
+          final exitNotional = position.quantity * exitPrice;
           final exitFee = exitNotional * feeRate;
           totalFees += exitFee;
 
           final grossPnl = position.isLong
-              ? (close - position.entryPrice) * position.quantity
-              : (position.entryPrice - close) * position.quantity;
+              ? (exitPrice - position.entryPrice) * position.quantity
+              : (position.entryPrice - exitPrice) * position.quantity;
           final netPnl = grossPnl - position.entryFee - exitFee;
           final entryNotional = position.entryPrice * position.quantity;
           final pnlPct = entryNotional > 0 ? (netPnl / entryNotional) * 100 : 0.0;
@@ -253,7 +304,7 @@ class BacktestService {
             exitTimestamp: candle.timestamp,
             direction: position.isLong ? 'LONG' : 'SHORT',
             entryPrice: position.entryPrice,
-            exitPrice: close,
+            exitPrice: exitPrice,
             quantity: position.quantity,
             pnl: netPnl,
             pnlPercent: pnlPct,
