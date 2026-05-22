@@ -83,3 +83,9 @@ app.*.map.json
 # Excel lock files
 **/~$*.xlsx
 **/~$*.xls
+
+# Aider AI runtime database
+agentdb.rvf
+agentdb.rvf.lock
+**/agentdb.rvf
+**/agentdb.rvf.lock
