@@ -58,6 +58,10 @@ rust/.logs/
 **/*.dll
 **/*.dylib
 
+# ─── Runtime databases ────────────────────────────────────────────────────────
+ruvector.db
+**/ruvector.db
+
 # ─── Build artifacts / binaries ───────────────────────────────────────────────
 *.class
 *.log
