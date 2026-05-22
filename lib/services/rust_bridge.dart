@@ -10,8 +10,14 @@
 library;
 
 import 'dart:convert';
+import 'dart:io' show File, Platform;
 
+import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
+
+import '../core/models/candle.dart';
 import '../core/models/trade.dart';
+import '../src/bridge/api.dart' as rust;
+import '../src/bridge/frb_generated.dart';
 
 // ─── Data Models (mirrors Rust structs) ──────────────────────────────────────
 
@@ -201,23 +207,59 @@ class RustBridge {
   static bool _nativeAvailable = false;
 
   /// Initialize the Rust bridge.
-  /// Call this once at app startup (e.g., in main.dart).
+  ///
+  /// Idempotent — calling more than once is a no-op. After return,
+  /// [isNativeAvailable] reflects whether subsequent calls will hit the
+  /// native engine (true) or the pure-Dart fallback (false). Initialisation
+  /// never throws; FFI failures degrade silently to the fallback path so
+  /// the app still boots when running on a host without the cdylib.
   static Future<void> initialize() async {
     if (_initialized) return;
 
     try {
-      // In production, this would load the native library:
-      // await RustLib.init();
-      _nativeAvailable = false; // Will be true when native lib is linked
+      final ext = _findDevLibrary();
+      if (ext != null) {
+        await RustLib.init(externalLibrary: ext);
+      } else {
+        await RustLib.init();
+      }
+      // Probe with the cheapest possible call. If the symbol resolves and
+      // returns a non-empty string, the engine is wired correctly.
+      final pong = await rust.ping();
+      _nativeAvailable = pong.isNotEmpty;
       _initialized = true;
       // ignore: avoid_print
-      print('[RustBridge] Initialized (native: $_nativeAvailable)');
+      print('[RustBridge] Native engine active: $pong');
     } catch (e) {
       _initialized = true;
       _nativeAvailable = false;
       // ignore: avoid_print
-      print('[RustBridge] Fallback mode - native library not available: $e');
+      print('[RustBridge] Native engine not available, '
+          'falling back to Dart: $e');
     }
+  }
+
+  /// Locate the cargo-built `libtrading_engine.{so,dylib,dll}` for dev/test
+  /// runs. Production `flutter build` uses the cargokit-bundled library and
+  /// gets `null` here, falling through to [RustLib.init]'s default lookup.
+  static ExternalLibrary? _findDevLibrary() {
+    String? name;
+    if (Platform.isLinux) {
+      name = 'libtrading_engine.so';
+    } else if (Platform.isMacOS) {
+      name = 'libtrading_engine.dylib';
+    } else if (Platform.isWindows) {
+      name = 'trading_engine.dll';
+    }
+    if (name == null) return null;
+
+    for (final profile in const ['release', 'debug']) {
+      final path = 'rust/trading_engine/target/$profile/$name';
+      if (File(path).existsSync()) {
+        return ExternalLibrary.open(path);
+      }
+    }
+    return null;
   }
 
   /// Check if the native Rust library is available.
@@ -225,25 +267,19 @@ class RustBridge {
 
   /// Ping the Rust engine to verify connectivity.
   static Future<String> ping() async {
-    if (_nativeAvailable) {
-      // return await api.ping();
-    }
+    if (_nativeAvailable) return rust.ping();
     return 'pong from Dart fallback (Rust engine not yet linked)';
   }
 
   /// Get the Rust engine version.
   static Future<String> getVersion() async {
-    if (_nativeAvailable) {
-      // return await api.getVersion();
-    }
+    if (_nativeAvailable) return rust.getVersion();
     return '0.1.0 (Dart fallback)';
   }
 
   /// Get supported timeframes from the Rust engine.
   static Future<List<String>> getSupportedTimeframes() async {
-    if (_nativeAvailable) {
-      // return await api.getSupportedTimeframes();
-    }
+    if (_nativeAvailable) return rust.getSupportedTimeframes();
     return ['1m', '5m', '15m', '30m', '1h', '4h', '1d', '1w'];
   }
 
@@ -289,18 +325,59 @@ class RustBridge {
 
   // ─── Future API (will be implemented with full Rust bridge) ──────────────
 
-  /// Run a backtest with the given parameters.
-  /// Will delegate to Rust engine once native library is linked.
-  static Future<RustBacktestMetrics> runBacktest({
-    required String symbol,
-    required String timeframe,
-    required int candleCount,
-    required double initialCapital,
+  /// Run a BB+RSI backtest on the given candles.
+  ///
+  /// Delegates to the Rust `run_bb_rsi_backtest` FFI function when the native
+  /// engine is available; returns an empty [BacktestMetrics] with a logged
+  /// warning otherwise. The returned [BacktestMetrics] is the canonical type
+  /// from `lib/core/models/trade.dart` (F-06) — same type the pure-Dart
+  /// `BacktestService.runBbRsi` produces, so callers can swap engines without
+  /// adapting downstream consumers.
+  ///
+  /// [strategyParams] is a JSON-compatible parameter override map (e.g.
+  /// `{'bb_period': 25, 'rsi_oversold': 28}`). Empty = use Rust defaults.
+  ///
+  /// `totalFees` and `candlesProcessed` are read from the BacktestResult
+  /// top-level (not from BacktestMetrics) — see the FFI wrapper rationale
+  /// at [RustBacktestMetrics].
+  static Future<BacktestMetrics> runBacktest({
+    required List<CandleData> candles,
+    required double initialBalance,
     required double feeRate,
-    required Map<String, double> strategyParams,
+    Map<String, double> strategyParams = const {},
   }) async {
-    // TODO: Delegate to Rust engine
-    return RustBacktestMetrics.empty();
+    if (!_nativeAvailable) {
+      // ignore: avoid_print
+      print('[RustBridge] runBacktest called without native engine — '
+          'returning empty metrics');
+      return BacktestMetrics.empty();
+    }
+
+    final candlesJson =
+        jsonEncode(candles.map((c) => c.toRustJson()).toList());
+    final paramsJson = jsonEncode(strategyParams);
+
+    final responseJson = await rust.runBbRsiBacktest(
+      candlesJson: candlesJson,
+      paramsJson: paramsJson,
+      initialBalance: initialBalance,
+      feeRate: feeRate,
+    );
+
+    final decoded = jsonDecode(responseJson) as Map<String, dynamic>;
+    if (decoded.containsKey('error')) {
+      throw Exception('Rust backtest failed: ${decoded['error']}');
+    }
+
+    final metricsJson = decoded['metrics'] as Map<String, dynamic>;
+    final totalFees = (decoded['total_fees'] as num).toDouble();
+    final candlesProcessed = decoded['candles_processed'] as int;
+
+    final rustMetrics = RustBacktestMetrics.fromJson(metricsJson);
+    return rustMetrics.toBacktestMetrics(
+      totalFees: totalFees,
+      candlesProcessed: candlesProcessed,
+    );
   }
 
   /// Start paper trading with live data.
