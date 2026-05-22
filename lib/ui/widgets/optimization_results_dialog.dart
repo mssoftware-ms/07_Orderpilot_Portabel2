@@ -227,28 +227,31 @@ class _OptimizationResultsDialogState
                           )),
                           DataCell(Text('${t.totalTrades}')),
                           DataCell(
-                            TextButton(
-                              onPressed: () {
-                                widget.onApply(t.params);
-                                Navigator.pop(context);
-                              },
-                              style: TextButton.styleFrom(
-                                padding: const EdgeInsets.symmetric(
-                                    horizontal: 12, vertical: 4),
-                                backgroundColor:
-                                    AppColors.accentCyan.withAlpha(20),
-                                shape: RoundedRectangleBorder(
-                                  borderRadius: BorderRadius.circular(6),
-                                  side: const BorderSide(
-                                      color: AppColors.accentCyan, width: 0.5),
+                            Tooltip(
+                              message:
+                                  'Optimizer wartet auf Phase 2-Abschluss '
+                                  '(siehe 260522_Gesamtplan_Phase1-3.md §3.3)',
+                              child: TextButton(
+                                onPressed: null,
+                                style: TextButton.styleFrom(
+                                  padding: const EdgeInsets.symmetric(
+                                      horizontal: 12, vertical: 4),
+                                  backgroundColor:
+                                      AppColors.accentCyan.withAlpha(20),
+                                  shape: RoundedRectangleBorder(
+                                    borderRadius: BorderRadius.circular(6),
+                                    side: const BorderSide(
+                                        color: AppColors.accentCyan,
+                                        width: 0.5),
+                                  ),
                                 ),
-                              ),
-                              child: const Text(
-                                'Use',
-                                style: TextStyle(
-                                  color: AppColors.accentCyan,
-                                  fontSize: 11,
-                                  fontWeight: FontWeight.bold,
+                                child: const Text(
+                                  'Use',
+                                  style: TextStyle(
+                                    color: AppColors.accentCyan,
+                                    fontSize: 11,
+                                    fontWeight: FontWeight.bold,
+                                  ),
                                 ),
                               ),
                             ),

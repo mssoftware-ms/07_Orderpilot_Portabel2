@@ -8,6 +8,13 @@ library;
 import '../core/models/candle.dart';
 import 'backtest_service.dart';
 
+// =============================================================================
+// FROZEN: Phase 1+2 NOT COMPLETE.
+// Engine bugs (F-02..F-04) and strategy verification (Phase 2) are open.
+// Any results from this service are unreliable until Gesamtplan section 5 unlocked.
+// DO NOT delete, DO NOT use in UI. Re-enable per checklist in Gesamtplan section 5.
+// =============================================================================
+
 // ─── Parameter Range Definition ─────────────────────────────────────────────
 
 /// Defines a range of values for a single parameter.
