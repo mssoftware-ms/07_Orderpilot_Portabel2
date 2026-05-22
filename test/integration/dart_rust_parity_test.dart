@@ -137,17 +137,29 @@ void main() {
         final rustFinalEquity = initialBalance + rustMetrics.totalPnl;
         expect(rustFinalEquity, closeTo(dartFinalEquity, 1e-9));
 
-        // F-03 (Plan §3.4): both engines now compute Sharpe over equity-
-        // curve returns with the same periodsPerYear table — the formula
-        // is bit-identical. The per-engine equity *series*, however, still
-        // diverges in mid-trade (see follow-up ticket; QA brief attached
-        // to F-03 PR), so a parity-tight Sharpe assert here would fail
-        // for reasons unrelated to F-03. We deliberately do not assert
-        // sharpe agreement on the fixture until the equity-recording bug
-        // is fixed; the per-engine F-03 unit tests
-        // (rust/.../tests/regression_f03_sharpe_annualization.rs,
-        //  test/regression/f03_sharpe_test.dart) pin the formula on both
-        // sides on synthetic input.
+        // F-03b (Plan-rev3 §3.4): Sharpe must match bit-for-bit between
+        // engines now that the equity series itself is identical at 1e-9
+        // (see test/regression/f03b_mid_trade_equity_test.dart). 1e-9
+        // tolerance — wider drift indicates a real divergence and MUST be
+        // investigated rather than papered over.
+        expect(
+          rustMetrics.sharpeRatio,
+          closeTo(dartResult.metrics.sharpeRatio, 1e-9),
+          reason: 'sharpeRatio divergence > 1e-9 violates F-03b numerical '
+              'equivalence — both engines must produce identical equity '
+              'series and run them through the same annualizedSharpe',
+        );
+        // maxDrawdown is intentionally NOT asserted in F-03b. The engines
+        // use different *definitions*: Dart tracks max drawdown against
+        // the per-candle equity curve (intra-trade drawdowns counted),
+        // Rust tracks it against per-trade settled equity in
+        // BacktestMetrics::from_trades (only post-trade values). This is
+        // a definition-level divergence surfaced by F-03b, not an equity-
+        // series mismatch. See F-03b QA brief / follow-up ticket F-03c.
+        // Sanity: Sharpe must be non-trivial on this fixture so the parity
+        // check is not a tautology of 0 == 0.
+        expect(dartResult.metrics.sharpeRatio.abs(), greaterThan(0.0));
+        expect(rustMetrics.sharpeRatio.abs(), greaterThan(0.0));
       },
     );
   });

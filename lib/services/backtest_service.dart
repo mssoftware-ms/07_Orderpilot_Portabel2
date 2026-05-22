@@ -9,6 +9,7 @@ import 'dart:math' as math;
 import '../core/models/candle.dart';
 import '../core/models/timeframe.dart';
 import '../core/models/trade.dart';
+import 'equity.dart';
 import 'sharpe.dart';
 
 // ─── Engine-specific result models ──────────────────────────────────────────
@@ -163,47 +164,22 @@ class BacktestService {
     for (int i = 0; i < candles.length; i++) {
       final candle = candles[i];
 
-      // Current equity (mark-to-market)
-      double equity = balance;
-      if (position != null) {
-        final unrealizedPnl = position.isLong
-            ? (candle.close - position.entryPrice) * position.quantity
-            : (position.entryPrice - candle.close) * position.quantity;
-        equity += unrealizedPnl;
-      }
+      // F-03b: trade/strategy logic runs FIRST in each bar, then equity is
+      // recorded against the post-trade position state — mirrors Rust
+      // BacktestEngine::run step order (rust/.../backtest/mod.rs:154-235:
+      // SL/TP → strategy → record equity). The pre-F-03b Dart loop sampled
+      // equity at bar-start, which silently diverged from Rust on any bar
+      // where SL/TP closed a position.
+      //
+      // --- Strategy logic (skipped during indicator warm-up) ---
+      if (i >= startIdx) {
+        final close = candle.close;
+        final rsi = rsiValues[i];
+        final lower = bbLower[i];
+        final middle = bbMiddle[i];
+        final upper = bbUpper[i];
 
-      // Track drawdown
-      if (equity > peakEquity) peakEquity = equity;
-      final dd = peakEquity - equity;
-      final ddPct = peakEquity > 0 ? (dd / peakEquity) * 100 : 0.0;
-      if (dd > maxDrawdown) maxDrawdown = dd;
-      if (ddPct > maxDrawdownPct) maxDrawdownPct = ddPct;
-
-      equityCurve.add(EquityPoint(
-        timestamp: candle.timestamp,
-        equity: equity,
-        drawdown: dd,
-        drawdownPct: ddPct,
-      ));
-
-      // Track returns for Sharpe
-      if (i > 0) {
-        final ret = prevEquity > 0 ? (equity - prevEquity) / prevEquity : 0.0;
-        returns.add(ret);
-      }
-      prevEquity = equity;
-
-      // Skip until indicators are warmed up
-      if (i < startIdx) continue;
-
-      // --- Strategy logic ---
-      final close = candle.close;
-      final rsi = rsiValues[i];
-      final lower = bbLower[i];
-      final middle = bbMiddle[i];
-      final upper = bbUpper[i];
-
-      if (position == null) {
+        if (position == null) {
         // Entry: price below lower BB AND RSI oversold → LONG
         // SL/TP mirror Rust BbRsiStrategy::on_candle (bb_rsi.rs:224):
         //   long SL = lower - (middle - lower) = 2*lower - middle
@@ -321,6 +297,46 @@ class BacktestService {
           position = null;
         }
       }
+      } // end: if (i >= startIdx) — strategy block
+
+      // --- Equity, drawdown, returns: recorded against POST-trade state ---
+      // F-03b mirror of Rust BacktestEngine::current_equity. When the
+      // position is open, equity restores the reserved margin and deducts
+      // an estimated exit fee at the current mark, matching the Rust
+      // engine bit-for-bit (rust/.../backtest/mod.rs:349-359).
+      final double equity;
+      if (position == null) {
+        equity = balance;
+      } else {
+        equity = midTradeEquity(
+          balance: balance,
+          entryPrice: position.entryPrice,
+          quantity: position.quantity,
+          entryFee: position.entryFee,
+          markPrice: candle.close,
+          feeRate: feeRate,
+          isLong: position.isLong,
+        );
+      }
+
+      if (equity > peakEquity) peakEquity = equity;
+      final dd = peakEquity - equity;
+      final ddPct = peakEquity > 0 ? (dd / peakEquity) * 100 : 0.0;
+      if (dd > maxDrawdown) maxDrawdown = dd;
+      if (ddPct > maxDrawdownPct) maxDrawdownPct = ddPct;
+
+      equityCurve.add(EquityPoint(
+        timestamp: candle.timestamp,
+        equity: equity,
+        drawdown: dd,
+        drawdownPct: ddPct,
+      ));
+
+      if (i > 0) {
+        final ret = prevEquity > 0 ? (equity - prevEquity) / prevEquity : 0.0;
+        returns.add(ret);
+      }
+      prevEquity = equity;
     }
 
     // Close any remaining position at last candle
