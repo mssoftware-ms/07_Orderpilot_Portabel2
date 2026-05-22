@@ -11,6 +11,8 @@ library;
 
 import 'dart:convert';
 
+import '../core/models/trade.dart';
+
 // ─── Data Models (mirrors Rust structs) ──────────────────────────────────────
 
 /// Mirrors the Rust `Candle` struct.
@@ -94,7 +96,18 @@ class RustSignal {
       RustSignal(type: SignalType.exit, exitReason: reason);
 }
 
-/// Mirrors the Rust `BacktestMetrics` struct.
+/// FFI data-transfer object mirroring the Rust `BacktestMetrics` struct.
+///
+/// This is **not** a parallel metrics class — it carries the raw Rust payload
+/// across the bridge and is converted to the canonical [BacktestMetrics]
+/// (lib/core/models/trade.dart) via [toBacktestMetrics] before use by the
+/// rest of the app (F-06).
+///
+/// `totalFees` and `candlesProcessed` are not (yet) part of the Rust payload;
+/// they are passed through the converter from the FFI call site that knows
+/// the input candle count and fee accounting. This is the deliberate
+/// minimum-viable shape for F-06; full field parity with the Rust struct is
+/// owned by F-01 (FFI Bridge).
 class RustBacktestMetrics {
   final int totalTrades;
   final int winningTrades;
@@ -145,6 +158,33 @@ class RustBacktestMetrics {
       maxDrawdown: (json['max_drawdown'] as num).toDouble(),
       maxDrawdownPercent: (json['max_drawdown_percent'] as num).toDouble(),
       sharpeRatio: (json['sharpe_ratio'] as num).toDouble(),
+    );
+  }
+
+  /// Convert this FFI DTO into the canonical [BacktestMetrics] used by the
+  /// rest of the app.
+  ///
+  /// [totalFees] and [candlesProcessed] are accepted as parameters because
+  /// the Rust struct does not (yet) carry them; F-01 owns extending the FFI
+  /// payload. F-06 only guarantees that the converter exists and produces
+  /// the canonical type.
+  BacktestMetrics toBacktestMetrics({
+    double totalFees = 0,
+    int candlesProcessed = 0,
+  }) {
+    return BacktestMetrics(
+      totalTrades: totalTrades,
+      winningTrades: winningTrades,
+      losingTrades: losingTrades,
+      winRate: winRate,
+      profitFactor: profitFactor,
+      totalPnl: totalPnl,
+      totalPnlPercent: totalPnlPercent,
+      maxDrawdown: maxDrawdown,
+      maxDrawdownPercent: maxDrawdownPercent,
+      sharpeRatio: sharpeRatio,
+      totalFees: totalFees,
+      candlesProcessed: candlesProcessed,
     );
   }
 }

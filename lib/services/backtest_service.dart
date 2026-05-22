@@ -7,8 +7,11 @@ library;
 import 'dart:math' as math;
 
 import '../core/models/candle.dart';
+import '../core/models/trade.dart';
 
-// ─── Result models ──────────────────────────────────────────────────────────
+// ─── Engine-specific result models ──────────────────────────────────────────
+// Trade and metrics types are imported from lib/core/models/trade.dart —
+// see F-06 (test/regression/f06_model_unification_test.dart).
 
 /// A single point on the equity curve.
 class EquityPoint {
@@ -25,71 +28,11 @@ class EquityPoint {
   });
 }
 
-/// A completed trade record.
-class TradeRecord {
-  final int entryTimestamp;
-  final int exitTimestamp;
-  final String direction; // 'LONG' or 'SHORT'
-  final double entryPrice;
-  final double exitPrice;
-  final double quantity;
-  final double pnl;
-  final double pnlPercent;
-  final double fees;
-  final String exitReason;
-
-  const TradeRecord({
-    required this.entryTimestamp,
-    required this.exitTimestamp,
-    required this.direction,
-    required this.entryPrice,
-    required this.exitPrice,
-    required this.quantity,
-    required this.pnl,
-    required this.pnlPercent,
-    required this.fees,
-    required this.exitReason,
-  });
-
-  bool get isWin => pnl > 0;
-}
-
-/// Aggregate backtest performance metrics.
-class BacktestMetrics {
-  final int totalTrades;
-  final int winningTrades;
-  final int losingTrades;
-  final double winRate;
-  final double profitFactor;
-  final double totalPnl;
-  final double totalPnlPercent;
-  final double maxDrawdown;
-  final double maxDrawdownPercent;
-  final double sharpeRatio;
-  final double totalFees;
-  final int candlesProcessed;
-
-  const BacktestMetrics({
-    required this.totalTrades,
-    required this.winningTrades,
-    required this.losingTrades,
-    required this.winRate,
-    required this.profitFactor,
-    required this.totalPnl,
-    required this.totalPnlPercent,
-    required this.maxDrawdown,
-    required this.maxDrawdownPercent,
-    required this.sharpeRatio,
-    required this.totalFees,
-    required this.candlesProcessed,
-  });
-}
-
 /// Complete backtest result.
 class BacktestResult {
   final BacktestMetrics metrics;
   final List<EquityPoint> equityCurve;
-  final List<TradeRecord> trades;
+  final List<ClosedTrade> trades;
 
   const BacktestResult({
     required this.metrics,
@@ -193,7 +136,7 @@ class BacktestService {
     double totalFees = 0;
     _OpenPosition? position;
 
-    final trades = <TradeRecord>[];
+    final trades = <ClosedTrade>[];
     final equityCurve = <EquityPoint>[];
     final returns = <double>[];
     double prevEquity = initialBalance;
@@ -305,7 +248,7 @@ class BacktestService {
                 position.entryFee - exitFee;
           }
 
-          trades.add(TradeRecord(
+          trades.add(ClosedTrade(
             entryTimestamp: position.entryTimestamp,
             exitTimestamp: candle.timestamp,
             direction: position.isLong ? 'LONG' : 'SHORT',
@@ -342,7 +285,7 @@ class BacktestService {
         balance = exitNotional - exitFee;
       }
 
-      trades.add(TradeRecord(
+      trades.add(ClosedTrade(
         entryTimestamp: position.entryTimestamp,
         exitTimestamp: lastCandle.timestamp,
         direction: position.isLong ? 'LONG' : 'SHORT',

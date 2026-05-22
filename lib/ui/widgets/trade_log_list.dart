@@ -1,11 +1,11 @@
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import '../themes/app_theme.dart';
-import '../../services/backtest_service.dart';
+import '../../core/models/trade.dart';
 
 /// Scrollable trade log list with expandable details.
 class TradeLogList extends StatelessWidget {
-  final List<TradeRecord> trades;
+  final List<ClosedTrade> trades;
 
   const TradeLogList({super.key, required this.trades});
 
@@ -98,7 +98,7 @@ class _HeaderCell extends StatelessWidget {
 }
 
 class _TradeRow extends StatelessWidget {
-  final TradeRecord trade;
+  final ClosedTrade trade;
   final int index;
 
   const _TradeRow({required this.trade, required this.index});
