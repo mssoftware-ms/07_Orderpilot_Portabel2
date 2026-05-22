@@ -168,16 +168,20 @@ impl StrategyAddin for BbRsiStrategy {
         let rsi_oversold = ctx.param_or("rsi_oversold", 30.0);
         let rsi_overbought = ctx.param_or("rsi_overbought", 70.0);
 
-        // We need enough closes for both indicators.
-        let required = bb_period.max(rsi_period + 1);
-        let closes = ctx.closes(required);
-        if closes.len() < required {
+        // BB uses a fixed `bb_period` rolling window. RSI must run cumulative
+        // Wilder smoothing across the FULL prior-close history (F-02b) to
+        // match the Dart engine — feeding only the last 20 closes restarts
+        // the smoothing every bar and drifts noticeably on non-stationary
+        // series (cf. tests/regression_f02b_rsi_wilder.rs).
+        let bb_closes = ctx.closes(bb_period);
+        let rsi_closes = ctx.closes(ctx.index() + 1);
+        if bb_closes.len() < bb_period || rsi_closes.len() < rsi_period + 1 {
             return None;
         }
 
         // Compute indicators
-        let bb = calc_bollinger_bands(&closes, bb_period, bb_stddev_mult)?;
-        let rsi = calc_rsi(&closes, rsi_period)?;
+        let bb = calc_bollinger_bands(&bb_closes, bb_period, bb_stddev_mult)?;
+        let rsi = calc_rsi(&rsi_closes, rsi_period)?;
 
         // Persist indicator values in context state for external access
         ctx.set_state("bb_upper", bb.upper);
