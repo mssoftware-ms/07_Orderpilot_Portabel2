@@ -14,6 +14,124 @@ import 'package:trading_app/services/backtest_service.dart';
 import 'package:trading_app/services/indicators.dart';
 
 void main() {
+  group('calcAtr', () {
+    // Every reference value in this group is shared bit-for-bit with the
+    // Rust unit tests in `rust/trading_engine/src/addins/ut_bot.rs` so
+    // the ATR helper stays in lock-step at the algorithm level even
+    // before the UT-Bot strategy lands its end-to-end parity test
+    // (Welle U2-4). The fixtures construct OHLC bars where the body is
+    // zero (open == close) so the True Range collapses to the
+    // high/low/prev-close interaction described in the doc comment.
+
+    test('returns null for period 0', () {
+      expect(calcAtr([1.0], [1.0], [1.0], 0), isNull);
+    });
+
+    test('returns null for insufficient data', () {
+      expect(
+        calcAtr([1.0, 2.0, 3.0], [0.5, 1.5, 2.5], [0.8, 1.8, 2.8], 5),
+        isNull,
+      );
+    });
+
+    test('returns null for mismatched lengths', () {
+      expect(
+        calcAtr([1.0, 2.0, 3.0], [0.5, 1.5], [0.8, 1.8, 2.8], 2),
+        isNull,
+      );
+    });
+
+    test('constant TR converges instantly to that value', () {
+      // Mirrors `test_atr_constant_tr_converges_to_tr_value` in Rust:
+      // high=100.5 low=99.5 close=100.0 for every bar →
+      //   tr[0] = 1.0, tr[i>=1] = max(1.0, 0.5, 0.5) = 1.0.
+      const n = 20;
+      final highs = List<double>.filled(n, 100.5);
+      final lows = List<double>.filled(n, 99.5);
+      final closes = List<double>.filled(n, 100.0);
+      const period = 5;
+      final atr = calcAtr(highs, lows, closes, period)!;
+      expect(atr.length, n);
+      for (int i = 0; i < period - 1; i++) {
+        expect(atr[i].isNaN, isTrue, reason: 'warm-up at $i must be NaN');
+      }
+      for (int i = period - 1; i < n; i++) {
+        expect(atr[i], closeTo(1.0, 1e-12),
+            reason: 'constant TR=1.0 expected ATR=1.0 at index $i');
+      }
+    });
+
+    test('step function converges exponentially to new TR value', () {
+      // Mirrors `test_atr_step_function_converges_exponentially` in Rust:
+      // tr=1.0 for bars 0..period-1 (half-band 0.5), tr=2.0 from period
+      // onward (half-band 1.0). Verify the first few smoothed values
+      // analytically and the monotonic convergence behaviour after.
+      const period = 5;
+      const n = 20;
+      final highs = <double>[];
+      final lows = <double>[];
+      final closes = <double>[];
+      for (int i = 0; i < n; i++) {
+        final half = i < period ? 0.5 : 1.0;
+        highs.add(100.0 + half);
+        lows.add(100.0 - half);
+        closes.add(100.0);
+      }
+      final atr = calcAtr(highs, lows, closes, period)!;
+      expect(atr[period - 1], closeTo(1.0, 1e-12));
+      expect(atr[period], closeTo(1.2, 1e-12));
+      expect(atr[period + 1], closeTo(1.36, 1e-12));
+      expect(atr[period + 2], closeTo(1.488, 1e-12));
+      for (int i = period + 1; i < n; i++) {
+        expect(atr[i], greaterThan(atr[i - 1]),
+            reason: 'ATR must rise monotonically toward 2.0');
+        expect(atr[i], lessThan(2.0),
+            reason: 'ATR must stay below 2.0 (asymptotic)');
+      }
+    });
+
+    test('period equals length returns seed only (no Wilder step)', () {
+      // Mirrors `test_atr_period_equals_length_returns_seed_only` in Rust.
+      final h = [10.5, 11.5, 12.5, 13.5, 14.5];
+      final l = [9.5, 10.5, 11.5, 12.5, 13.5];
+      final c = [10.0, 11.0, 12.0, 13.0, 14.0];
+      const period = 5;
+      final atr = calcAtr(h, l, c, period)!;
+      for (int i = 0; i < period - 1; i++) {
+        expect(atr[i].isNaN, isTrue);
+      }
+      // tr[0] = 1.0; tr[1..4] = max(1.0, 1.5, 0.5) = 1.5 each.
+      // mean(tr[0..5]) = (1.0 + 4 * 1.5) / 5 = 7/5 = 1.4
+      expect(atr[period - 1], closeTo(1.4, 1e-12));
+    });
+
+    test('period 1 equals TR per bar (no warm-up, no smoothing)', () {
+      // Mirrors `test_atr_period_one_equals_tr_per_bar` in Rust — used by
+      // the UT-Bot verbesserte-Variante default `atrPeriod = 1`.
+      final h = [101.0, 102.0, 103.5];
+      final l = [99.0, 100.5, 100.0];
+      final c = [100.0, 101.0, 102.0];
+      final atr = calcAtr(h, l, c, 1)!;
+      expect(atr.length, 3);
+      expect(atr[0], closeTo(2.0, 1e-12));
+      expect(atr[1], closeTo(2.0, 1e-12));
+      expect(atr[2], closeTo(3.5, 1e-12));
+    });
+
+    test('first-bar TR uses high-low only (no synthetic prev-close)', () {
+      // Mirrors `test_atr_tr_seeded_from_high_low_when_no_prev_close` in
+      // Rust — pins the deterministic seed so the strategy reproduces
+      // across runs even when fed with a fresh candle history.
+      final h = [105.0, 106.0];
+      final l = [95.0, 104.0];
+      final c = [100.0, 105.5];
+      final atr = calcAtr(h, l, c, 2)!;
+      // tr[0] = 10.0; tr[1] = max(2.0, 6.0, 4.0) = 6.0;
+      // atr[1] = (10 + 6) / 2 = 8.0
+      expect(atr[1], closeTo(8.0, 1e-12));
+    });
+  });
+
   group('calcEma', () {
     test('returns null for insufficient data', () {
       expect(calcEma([1.0, 2.0, 3.0], 5), isNull);

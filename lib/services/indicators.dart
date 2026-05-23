@@ -38,6 +38,68 @@ double? swingHigh(List<double> highs) {
   return max;
 }
 
+/// Compute the Average True Range (ATR) series with Wilder's smoothing.
+///
+/// Convention (locked for Dart↔Rust parity, mirrors `calc_atr` in
+/// `rust/trading_engine/src/addins/ut_bot.rs`):
+///
+/// - True Range per bar:
+///   - `tr[0] = high[0] - low[0]` (no prior close available; matches the
+///     TradingView `ta.atr()` and QuantNomad UT-Bot-Alerts conventions)
+///   - `tr[i] = max(high[i] - low[i], |high[i] - close[i-1]|,
+///                  |low[i] - close[i-1]|)` for `i >= 1`
+/// - Initial ATR is the simple average of the first `period` TR values:
+///   `atr[period - 1] = mean(tr[0..period])`. Indices `0..period - 1` are
+///   set to `double.nan` to flag the warm-up region (callers must use
+///   `.isNaN` to skip).
+/// - Wilder smoothing for subsequent bars:
+///   `atr[i] = (atr[i - 1] * (period - 1) + tr[i]) / period`
+///
+/// Returns `null` if `period == 0`, if the input lists have mismatched
+/// lengths, or if there are fewer than `period` candles. Otherwise the
+/// returned `List<double>` has the same length as `closes`.
+List<double>? calcAtr(
+  List<double> highs,
+  List<double> lows,
+  List<double> closes,
+  int period,
+) {
+  if (period == 0) return null;
+  if (highs.length != closes.length || lows.length != closes.length) {
+    return null;
+  }
+  final n = closes.length;
+  if (n < period) return null;
+
+  // True Range per bar — tr[0] is the seed (high - low only).
+  final tr = List<double>.filled(n, 0.0);
+  tr[0] = highs[0] - lows[0];
+  for (int i = 1; i < n; i++) {
+    final hl = highs[i] - lows[i];
+    final hpc = (highs[i] - closes[i - 1]).abs();
+    final lpc = (lows[i] - closes[i - 1]).abs();
+    double m = hl;
+    if (hpc > m) m = hpc;
+    if (lpc > m) m = lpc;
+    tr[i] = m;
+  }
+
+  // Warm-up: indices 0..period-1 are NaN, atr[period-1] = mean(tr[0..period]).
+  final atr = List<double>.filled(n, double.nan);
+  double sum = 0.0;
+  for (int i = 0; i < period; i++) {
+    sum += tr[i];
+  }
+  atr[period - 1] = sum / period;
+
+  // Wilder smoothing for the remainder.
+  for (int i = period; i < n; i++) {
+    atr[i] = (atr[i - 1] * (period - 1) + tr[i]) / period;
+  }
+
+  return atr;
+}
+
 /// Compute the Exponential Moving Average over a full close-price history.
 ///
 /// Convention (locked for Dart↔Rust parity, see `calc_ema` in
