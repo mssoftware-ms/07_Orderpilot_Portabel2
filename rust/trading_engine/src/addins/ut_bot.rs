@@ -221,6 +221,104 @@ pub fn calc_smi(
     Some((smi, signal))
 }
 
+/// Compute the UT Bot ATR-trailing-stop line and per-bar direction
+/// (close-vs-trail bias) over a candle stream.
+///
+/// Pinescript reference (QuantNomad's "UT Bot Alerts", abridged):
+///
+/// ```text
+/// nLoss = key_value * ATR(atr_period)
+/// trail[i] = max(trail[i-1], close[i] - nLoss)   if close[i] > trail[i-1] AND close[i-1] > trail[i-1]
+///          = min(trail[i-1], close[i] + nLoss)   if close[i] < trail[i-1] AND close[i-1] < trail[i-1]
+///          = close[i] - nLoss                     if close[i] > trail[i-1] (else)
+///          = close[i] + nLoss                     if close[i] < trail[i-1] (else)
+/// direction[i] = +1 if close > trail[i]
+///              = -1 if close < trail[i]
+///              =  0 (warm-up only — NaN ATR; tied scenarios inherit prev)
+/// ```
+///
+/// Seeding follows the Pinescript `nz(xATRTrailingStop[1], 0)` convention:
+/// at the first bar where ATR is valid we have no prior trail, but with
+/// `prev_trail = 0` and positive prices the `else if close > prev_trail`
+/// branch fires → `trail[seed] = close - nLoss`. We adopt this seed
+/// directly so the helper is deterministic from the first valid ATR
+/// index without needing a hidden `nz` default in every comparison.
+///
+/// Returns `None` if `closes.len() != atr.len()` or no valid ATR exists.
+///
+/// Convention locked for Dart↔Rust parity (mirror lands in
+/// `lib/services/indicators.dart` `calcUtBotTrail`).
+pub fn calc_ut_bot_trail(
+    closes: &[f64],
+    atr: &[f64],
+    key_value: f64,
+) -> Option<(Vec<f64>, Vec<i8>)> {
+    if closes.len() != atr.len() {
+        return None;
+    }
+    let n = closes.len();
+    if n == 0 {
+        return None;
+    }
+
+    let mut trail = vec![f64::NAN; n];
+    let mut direction = vec![0i8; n];
+
+    // First valid ATR index — anything before that is warm-up.
+    let first_valid = atr.iter().position(|v| !v.is_nan())?;
+    if first_valid >= n {
+        return None;
+    }
+
+    // Seed: with `prev_trail = 0` (nz default in Pinescript) and a
+    // positive close, the third branch of the iff-chain fires:
+    // trail = close - nLoss. Direction is +1 because close > trail
+    // (since nLoss = key_value * ATR is non-negative).
+    let n_loss_seed = key_value * atr[first_valid];
+    trail[first_valid] = closes[first_valid] - n_loss_seed;
+    direction[first_valid] = if closes[first_valid] > trail[first_valid] {
+        1
+    } else if closes[first_valid] < trail[first_valid] {
+        -1
+    } else {
+        0
+    };
+
+    for i in (first_valid + 1)..n {
+        let nloss = key_value * atr[i];
+        let prev_trail = trail[i - 1];
+        let close = closes[i];
+        let prev_close = closes[i - 1];
+
+        let new_trail = if close > prev_trail && prev_close > prev_trail {
+            (close - nloss).max(prev_trail)
+        } else if close < prev_trail && prev_close < prev_trail {
+            (close + nloss).min(prev_trail)
+        } else if close > prev_trail {
+            close - nloss
+        } else {
+            // close <= prev_trail (treats equality as "below" per the
+            // Pinescript fall-through; flip-detection still works since
+            // a true cross sets close strictly on the other side).
+            close + nloss
+        };
+
+        trail[i] = new_trail;
+        direction[i] = if close > new_trail {
+            1
+        } else if close < new_trail {
+            -1
+        } else {
+            // close exactly == trail (rare float coincidence) — inherit
+            // previous direction so cross detection is not falsely
+            // triggered by a tie.
+            direction[i - 1]
+        };
+    }
+
+    Some((trail, direction))
+}
+
 // ─── Tests ──────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -559,6 +657,183 @@ mod tests {
                 signal[i],
                 smi[i],
                 i
+            );
+        }
+    }
+
+    // ── UT-Bot trail helper tests ───────────────────────────────────────
+
+    #[test]
+    fn test_trail_mismatched_lengths_returns_none() {
+        let closes = vec![100.0, 101.0, 102.0];
+        let atr = vec![1.0, 1.0];
+        assert!(calc_ut_bot_trail(&closes, &atr, 2.0).is_none());
+    }
+
+    #[test]
+    fn test_trail_empty_returns_none() {
+        let closes: Vec<f64> = vec![];
+        let atr: Vec<f64> = vec![];
+        assert!(calc_ut_bot_trail(&closes, &atr, 2.0).is_none());
+    }
+
+    #[test]
+    fn test_trail_all_nan_atr_returns_none() {
+        let closes = vec![100.0, 101.0, 102.0];
+        let atr = vec![f64::NAN, f64::NAN, f64::NAN];
+        assert!(calc_ut_bot_trail(&closes, &atr, 2.0).is_none());
+    }
+
+    #[test]
+    fn test_trail_seed_at_first_valid_atr() {
+        // ATR warm-up: NaN for index 0, 1.0 from index 1 onward.
+        // key_value = 2.0 → nLoss = 2.0. Seed trail at index 1 should be
+        // close[1] - nLoss = 101 - 2 = 99. Direction = +1 (close above trail).
+        // Index 0 is warm-up (NaN trail, 0 direction).
+        let closes = vec![100.0, 101.0];
+        let atr = vec![f64::NAN, 1.0];
+        let (trail, direction) = calc_ut_bot_trail(&closes, &atr, 2.0).unwrap();
+        assert!(trail[0].is_nan());
+        assert_eq!(direction[0], 0);
+        assert!((trail[1] - 99.0).abs() < 1e-12);
+        assert_eq!(direction[1], 1);
+    }
+
+    #[test]
+    fn test_trail_monotone_in_uptrend() {
+        // Closes rise +1 per bar, ATR constant 1.0, key=1.0 → nLoss=1.0.
+        // Every bar satisfies `close > prev_trail AND prev_close > prev_trail`
+        // after the seed, so trail = max(prev_trail, close - 1) and must
+        // rise monotonically. Direction stays +1 throughout.
+        let n = 20;
+        let closes: Vec<f64> = (0..n).map(|i| 100.0 + i as f64).collect();
+        let atr = vec![1.0; n];
+        let (trail, direction) = calc_ut_bot_trail(&closes, &atr, 1.0).unwrap();
+        // Seed at index 0: trail = 100 - 1 = 99, direction = +1.
+        assert!((trail[0] - 99.0).abs() < 1e-12);
+        assert_eq!(direction[0], 1);
+        for i in 1..n {
+            assert!(trail[i] >= trail[i - 1] - 1e-12,
+                "trail must be monotone non-decreasing in uptrend at {}: {} → {}",
+                i, trail[i - 1], trail[i]);
+            assert_eq!(direction[i], 1, "direction must stay +1 in uptrend");
+        }
+    }
+
+    #[test]
+    fn test_trail_monotone_in_downtrend() {
+        // Closes fall -1 per bar, ATR constant 1.0. At seed close=200 →
+        // trail=199, direction=+1. On the next bar close=199 → not >
+        // prev_trail (199 == 199, "else if close > prev_trail" fires false),
+        // first branch fails (close not > prev_trail). Lands in the
+        // fall-through `else` branch: trail = close + nLoss = 199 + 1 = 200.
+        // Direction = -1 (close=199 < trail=200). From there on the
+        // second branch (close < prev_trail AND prev_close < prev_trail)
+        // applies and trail = min(prev_trail, close + 1) → monotone down.
+        let n = 20;
+        let closes: Vec<f64> = (0..n).map(|i| 200.0 - i as f64).collect();
+        let atr = vec![1.0; n];
+        let (trail, direction) = calc_ut_bot_trail(&closes, &atr, 1.0).unwrap();
+        assert!((trail[0] - 199.0).abs() < 1e-12);
+        assert_eq!(direction[0], 1);
+        // Flip on bar 1.
+        assert!((trail[1] - 200.0).abs() < 1e-12, "trail[1] = {}", trail[1]);
+        assert_eq!(direction[1], -1);
+        // After the flip, trail must be monotone non-increasing.
+        for i in 2..n {
+            assert!(trail[i] <= trail[i - 1] + 1e-12,
+                "trail must be monotone non-increasing in downtrend at {}: {} → {}",
+                i, trail[i - 1], trail[i]);
+            assert_eq!(direction[i], -1, "direction must stay -1 in downtrend");
+        }
+    }
+
+    #[test]
+    fn test_trail_long_to_short_flip() {
+        // Sustained uptrend then sharp crash below trail → direction flip.
+        // Closes: 100, 101, 102, 103, 104, 80
+        // ATR=1.0 constant, key=2.0 → nLoss=2.0.
+        // Seed (i=0): trail = 100 - 2 = 98, dir = +1.
+        // i=1: close=101 > prev_trail=98 AND prev_close=100 > 98
+        //   → trail = max(98, 101-2) = 99, dir = +1.
+        // i=2: close=102, prev_trail=99 → max(99, 100) = 100, dir = +1.
+        // i=3: trail = max(100, 101) = 101, dir = +1.
+        // i=4: trail = max(101, 102) = 102, dir = +1.
+        // i=5: close=80 < prev_trail=102 AND prev_close=104 > 102 → fall
+        //   through to "else if close > prev_trail" (false, 80 < 102) →
+        //   final else: trail = close + nLoss = 80 + 2 = 82, dir = -1.
+        let closes = vec![100.0, 101.0, 102.0, 103.0, 104.0, 80.0];
+        let atr = vec![1.0; 6];
+        let (trail, direction) = calc_ut_bot_trail(&closes, &atr, 2.0).unwrap();
+        assert_eq!(direction, vec![1, 1, 1, 1, 1, -1]);
+        assert!((trail[4] - 102.0).abs() < 1e-12);
+        assert!((trail[5] - 82.0).abs() < 1e-12, "trail[5] = {}", trail[5]);
+    }
+
+    #[test]
+    fn test_trail_short_to_long_flip() {
+        // Mirror of the long-to-short flip:
+        // Closes: 100, 99, 98, 97, 96, 120
+        // Seed (i=0): trail = 100 - 2 = 98, dir = +1.
+        // i=1: close=99 > prev_trail=98 AND prev_close=100 > 98 → first
+        //   branch: trail = max(98, 99-2=97) = 98. close=99 vs trail=98 →
+        //   dir still +1. trail stayed at 98.
+        // i=2: close=98 > prev_trail=98? FALSE (98 == 98, strict >). Falls
+        //   into elif close > prev_trail (false), then elif close < prev_trail
+        //   AND prev_close < prev_trail (also false: 98 == 98). Falls to
+        //   else: trail = close + nLoss = 100, dir = -1.
+        // i=3: close=97 < 100 AND prev_close=98 < 100 → second branch:
+        //   trail = min(100, 97+2=99) = 99. dir = -1 (97 < 99).
+        // i=4: close=96 < 99 AND prev_close=97 < 99 → min(99, 98) = 98, dir=-1.
+        // i=5: close=120 > 98 AND prev_close=96 < 98 → first branch FAILS
+        //   (prev_close 96 not > prev_trail 98). elif close > prev_trail
+        //   (true: 120 > 98) → trail = 120 - 2 = 118, dir = +1.
+        let closes = vec![100.0, 99.0, 98.0, 97.0, 96.0, 120.0];
+        let atr = vec![1.0; 6];
+        let (trail, direction) = calc_ut_bot_trail(&closes, &atr, 2.0).unwrap();
+        assert_eq!(direction, vec![1, 1, -1, -1, -1, 1]);
+        assert!((trail[5] - 118.0).abs() < 1e-12, "trail[5] = {}", trail[5]);
+    }
+
+    #[test]
+    fn test_trail_known_values_small_fixture() {
+        // Hand-computed reference shared bit-for-bit with the Dart mirror.
+        // closes: [100, 102, 101, 103, 99, 100, 105, 104]
+        // atr:    1.0 constant
+        // key:    1.5 → nLoss = 1.5
+        //
+        // i=0 seed: trail = 100 - 1.5 = 98.5, dir = +1
+        // i=1: close=102 > 98.5 AND prev_close=100 > 98.5
+        //      → trail = max(98.5, 102-1.5=100.5) = 100.5, dir = +1
+        // i=2: close=101 > 100.5 AND prev_close=102 > 100.5
+        //      → trail = max(100.5, 101-1.5=99.5) = 100.5, dir = +1
+        // i=3: close=103 > 100.5 AND prev_close=101 > 100.5
+        //      → trail = max(100.5, 103-1.5=101.5) = 101.5, dir = +1
+        // i=4: close=99 < 101.5 AND prev_close=103 > 101.5 → fall-through
+        //      elif close > prev_trail (false: 99 < 101.5) → else
+        //      trail = 99 + 1.5 = 100.5, dir = -1
+        // i=5: close=100 < 100.5 AND prev_close=99 < 100.5 → second branch
+        //      trail = min(100.5, 100+1.5=101.5) = 100.5, dir = -1
+        // i=6: close=105 > 100.5 AND prev_close=100 < 100.5 → first branch
+        //      FAILS (prev_close 100 not > prev_trail 100.5).
+        //      elif close > prev_trail (true: 105 > 100.5) → trail = 105 - 1.5
+        //      = 103.5, dir = +1
+        // i=7: close=104 > 103.5 AND prev_close=105 > 103.5 → first branch
+        //      trail = max(103.5, 104-1.5=102.5) = 103.5, dir = +1
+        let closes = vec![100.0, 102.0, 101.0, 103.0, 99.0, 100.0, 105.0, 104.0];
+        let atr = vec![1.0; 8];
+        let (trail, direction) =
+            calc_ut_bot_trail(&closes, &atr, 1.5).unwrap();
+        let expected_trail = [98.5, 100.5, 100.5, 101.5, 100.5, 100.5, 103.5, 103.5];
+        let expected_dir = [1i8, 1, 1, 1, -1, -1, 1, 1];
+        for (i, &want) in expected_trail.iter().enumerate() {
+            assert!(
+                (trail[i] - want).abs() < 1e-12,
+                "trail[{}] expected {} got {}", i, want, trail[i],
+            );
+            assert_eq!(
+                direction[i], expected_dir[i],
+                "direction[{}] expected {} got {}", i, expected_dir[i], direction[i],
             );
         }
     }

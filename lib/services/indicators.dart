@@ -205,6 +205,94 @@ List<double> _emaSeriesFrom(List<double> values, int period, int start) {
   return out;
 }
 
+/// Compute the UT Bot ATR-trailing-stop line and per-bar direction
+/// (close-vs-trail bias) over a candle stream.
+///
+/// Pinescript reference: QuantNomad's "UT Bot Alerts" — see Spec §1 of
+/// `01_Projectplan/specs/ut_bot_spec.md`. Convention locked for
+/// Dart↔Rust parity (mirrors `calc_ut_bot_trail` in
+/// `rust/trading_engine/src/addins/ut_bot.rs`):
+///
+/// ```text
+/// nLoss = keyValue * ATR(atrPeriod)
+/// trail[i] = max(trail[i-1], close[i] - nLoss)   if close[i] > trail[i-1] AND close[i-1] > trail[i-1]
+///          = min(trail[i-1], close[i] + nLoss)   if close[i] < trail[i-1] AND close[i-1] < trail[i-1]
+///          = close[i] - nLoss                     if close[i] > trail[i-1] (else)
+///          = close[i] + nLoss                     if close[i] < trail[i-1] (else)
+/// direction[i] = +1 if close > trail[i]
+///              = -1 if close < trail[i]
+///              =  0 during ATR warm-up (NaN ATR before first valid)
+/// ```
+///
+/// Seed: at the first valid ATR index we adopt `trail = close - nLoss`
+/// (Pinescript `nz(xATRTrailingStop[1], 0)` plus the positive-prices
+/// fall-through branch).
+///
+/// Returns `null` if input lengths mismatch, the slices are empty, or
+/// the ATR series contains no valid value.
+({List<double> trail, List<int> direction})? calcUtBotTrail(
+  List<double> closes,
+  List<double> atr,
+  double keyValue,
+) {
+  if (closes.length != atr.length) return null;
+  final n = closes.length;
+  if (n == 0) return null;
+
+  final trail = List<double>.filled(n, double.nan);
+  final direction = List<int>.filled(n, 0);
+
+  int firstValid = -1;
+  for (int i = 0; i < n; i++) {
+    if (!atr[i].isNaN) {
+      firstValid = i;
+      break;
+    }
+  }
+  if (firstValid < 0) return null;
+
+  final seedNLoss = keyValue * atr[firstValid];
+  trail[firstValid] = closes[firstValid] - seedNLoss;
+  if (closes[firstValid] > trail[firstValid]) {
+    direction[firstValid] = 1;
+  } else if (closes[firstValid] < trail[firstValid]) {
+    direction[firstValid] = -1;
+  } else {
+    direction[firstValid] = 0;
+  }
+
+  for (int i = firstValid + 1; i < n; i++) {
+    final nloss = keyValue * atr[i];
+    final prevTrail = trail[i - 1];
+    final close = closes[i];
+    final prevClose = closes[i - 1];
+
+    double newTrail;
+    if (close > prevTrail && prevClose > prevTrail) {
+      final candidate = close - nloss;
+      newTrail = candidate > prevTrail ? candidate : prevTrail;
+    } else if (close < prevTrail && prevClose < prevTrail) {
+      final candidate = close + nloss;
+      newTrail = candidate < prevTrail ? candidate : prevTrail;
+    } else if (close > prevTrail) {
+      newTrail = close - nloss;
+    } else {
+      newTrail = close + nloss;
+    }
+
+    trail[i] = newTrail;
+    if (close > newTrail) {
+      direction[i] = 1;
+    } else if (close < newTrail) {
+      direction[i] = -1;
+    } else {
+      direction[i] = direction[i - 1];
+    }
+  }
+
+  return (trail: trail, direction: direction);
+}
+
 /// Compute the Exponential Moving Average over a full close-price history.
 ///
 /// Convention (locked for Dart↔Rust parity, see `calc_ema` in

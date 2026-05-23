@@ -266,6 +266,101 @@ void main() {
     });
   });
 
+  group('calcUtBotTrail', () {
+    // Mirror of `mod tests::test_trail_*` in
+    // `rust/trading_engine/src/addins/ut_bot.rs`. Every reference value
+    // is shared bit-for-bit with the Rust unit tests so the UT-Bot
+    // trail helper stays in lock-step at the algorithm level.
+
+    test('returns null for mismatched lengths', () {
+      expect(calcUtBotTrail([100.0, 101.0, 102.0], [1.0, 1.0], 2.0), isNull);
+    });
+
+    test('returns null for empty input', () {
+      expect(calcUtBotTrail(const [], const [], 2.0), isNull);
+    });
+
+    test('returns null when ATR is all NaN', () {
+      expect(
+        calcUtBotTrail([100.0, 101.0, 102.0],
+            [double.nan, double.nan, double.nan], 2.0),
+        isNull,
+      );
+    });
+
+    test('seeds at first valid ATR index', () {
+      // ATR NaN at 0, valid at 1 with value 1.0. key=2 → nLoss=2.
+      // trail[1] = close[1] - 2 = 99.
+      final r = calcUtBotTrail([100.0, 101.0], [double.nan, 1.0], 2.0)!;
+      expect(r.trail[0].isNaN, isTrue);
+      expect(r.direction[0], 0);
+      expect(r.trail[1], closeTo(99.0, 1e-12));
+      expect(r.direction[1], 1);
+    });
+
+    test('monotone non-decreasing in uptrend, direction stays +1', () {
+      const n = 20;
+      final closes = [for (var i = 0; i < n; i++) 100.0 + i];
+      final atr = List<double>.filled(n, 1.0);
+      final r = calcUtBotTrail(closes, atr, 1.0)!;
+      expect(r.trail[0], closeTo(99.0, 1e-12));
+      expect(r.direction[0], 1);
+      for (int i = 1; i < n; i++) {
+        expect(r.trail[i], greaterThanOrEqualTo(r.trail[i - 1] - 1e-12));
+        expect(r.direction[i], 1);
+      }
+    });
+
+    test('flips on bar 1 in downtrend, then monotone non-increasing', () {
+      const n = 20;
+      final closes = [for (var i = 0; i < n; i++) 200.0 - i];
+      final atr = List<double>.filled(n, 1.0);
+      final r = calcUtBotTrail(closes, atr, 1.0)!;
+      expect(r.trail[0], closeTo(199.0, 1e-12));
+      expect(r.direction[0], 1);
+      expect(r.trail[1], closeTo(200.0, 1e-12));
+      expect(r.direction[1], -1);
+      for (int i = 2; i < n; i++) {
+        expect(r.trail[i], lessThanOrEqualTo(r.trail[i - 1] + 1e-12));
+        expect(r.direction[i], -1);
+      }
+    });
+
+    test('long-to-short flip on crash bar', () {
+      final closes = [100.0, 101.0, 102.0, 103.0, 104.0, 80.0];
+      final atr = List<double>.filled(6, 1.0);
+      final r = calcUtBotTrail(closes, atr, 2.0)!;
+      expect(r.direction, [1, 1, 1, 1, 1, -1]);
+      expect(r.trail[4], closeTo(102.0, 1e-12));
+      expect(r.trail[5], closeTo(82.0, 1e-12));
+    });
+
+    test('short-to-long flip on rip bar', () {
+      final closes = [100.0, 99.0, 98.0, 97.0, 96.0, 120.0];
+      final atr = List<double>.filled(6, 1.0);
+      final r = calcUtBotTrail(closes, atr, 2.0)!;
+      expect(r.direction, [1, 1, -1, -1, -1, 1]);
+      expect(r.trail[5], closeTo(118.0, 1e-12));
+    });
+
+    test('known values on small fixture match Rust expectations', () {
+      // Hand-computed reference, mirrors
+      // `test_trail_known_values_small_fixture` in Rust.
+      final closes = [100.0, 102.0, 101.0, 103.0, 99.0, 100.0, 105.0, 104.0];
+      final atr = List<double>.filled(8, 1.0);
+      final r = calcUtBotTrail(closes, atr, 1.5)!;
+      const expectedTrail = [
+        98.5, 100.5, 100.5, 101.5, 100.5, 100.5, 103.5, 103.5,
+      ];
+      const expectedDir = [1, 1, 1, 1, -1, -1, 1, 1];
+      for (int i = 0; i < closes.length; i++) {
+        expect(r.trail[i], closeTo(expectedTrail[i], 1e-12),
+            reason: 'trail[$i]');
+        expect(r.direction[i], expectedDir[i], reason: 'direction[$i]');
+      }
+    });
+  });
+
   group('calcEma', () {
     test('returns null for insufficient data', () {
       expect(calcEma([1.0, 2.0, 3.0], 5), isNull);
