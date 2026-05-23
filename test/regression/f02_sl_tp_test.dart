@@ -152,10 +152,23 @@ void main() {
     test('long position closes at SL when next candle penetrates the level',
         () {
       final candles = _buildLongSlFixture();
+      // F-02 verifies engine SL execution arithmetic, not the current
+      // strategy defaults — pin the Phase-1 BB(20, SMA, 2.0σ) + RSI(14,
+      // 30/70) parameters so the hand-crafted crash-drop fixture
+      // continues to trigger the canonical long entry. Phase-2 default
+      // shift (Diff D-01/D-02) does not change what F-02 is testing.
       final result = BacktestService.runBbRsi(
         candles: candles,
         initialBalance: 10_000.0,
         feeRate: 0.0,
+        params: const BbRsiParams(
+          bbPeriod: 20,
+          bbStdDev: 2.0,
+          bbMaType: BbMaType.sma,
+          rsiPeriod: 14,
+          rsiOversold: 30.0,
+          rsiOverbought: 70.0,
+        ),
       );
 
       expect(result.trades, isNotEmpty,
@@ -194,10 +207,21 @@ void main() {
     test('short position closes at TP when next candle penetrates the level',
         () {
       final candles = _buildShortTpFixture();
+      // F-02 verifies engine TP execution arithmetic — pin Phase-1
+      // BB(20, SMA, 2.0σ) + RSI(14, 30/70) params (same rationale as
+      // the long-SL test above).
       final result = BacktestService.runBbRsi(
         candles: candles,
         initialBalance: 10_000.0,
         feeRate: 0.0,
+        params: const BbRsiParams(
+          bbPeriod: 20,
+          bbStdDev: 2.0,
+          bbMaType: BbMaType.sma,
+          rsiPeriod: 14,
+          rsiOversold: 30.0,
+          rsiOverbought: 70.0,
+        ),
       );
 
       expect(result.trades, isNotEmpty,

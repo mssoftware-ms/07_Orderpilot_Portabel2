@@ -100,34 +100,37 @@ void main() {
       return out;
     }
 
-    test('SMA basis (default) keeps Phase-1 numeric behavior', () {
-      final candles = sineFixture(200);
+    test('EMA basis (default) matches explicit EMA selection', () {
+      // After Diff D-01 the BbRsiParams default is BbMaType.ema. Pin that
+      // by checking the unset call equals the explicit EMA call on the
+      // same fixture. The fixture is extended to 400 candles so the new
+      // BB(200) default clears the warm-up boundary.
+      final candles = sineFixture(400);
       final resultDefault = BacktestService.runBbRsi(
         candles: candles,
         initialBalance: 10000.0,
         feeRate: 0.0,
       );
-      final resultExplicitSma = BacktestService.runBbRsi(
+      final resultExplicitEma = BacktestService.runBbRsi(
         candles: candles,
         initialBalance: 10000.0,
         feeRate: 0.0,
-        params: const BbRsiParams(bbMaType: BbMaType.sma),
+        params: const BbRsiParams(bbMaType: BbMaType.ema),
       );
-      // Explicit SMA must equal the unset default.
-      expect(resultExplicitSma.equityCurve.last.equity,
+      expect(resultExplicitEma.equityCurve.last.equity,
           closeTo(resultDefault.equityCurve.last.equity, 1e-12));
-      expect(resultExplicitSma.metrics.totalTrades,
+      expect(resultExplicitEma.metrics.totalTrades,
           equals(resultDefault.metrics.totalTrades));
     });
 
     test('EMA basis diverges from SMA on the F-01 sinusoid', () {
-      // On the sinusoidal fixture the SMA-BB triggers several entries
-      // (verified by the F-01 parity test). EMA basis tracks price more
-      // tightly, shifting the BB middle and bands per bar — at least one
-      // engine-observable metric (trade count or final equity) is expected
-      // to differ. This verifies the EMA branch is actually wired into
-      // the backtest loop, not silently ignored.
-      final candles = sineFixture(200);
+      // The sinusoidal fixture is extended to 400 candles so BB(200)
+      // (the new default) clears the warm-up boundary and produces
+      // trades. EMA basis tracks price more tightly than SMA, so at
+      // least one engine-observable metric (trade count or final equity)
+      // is expected to differ. This verifies the EMA branch is wired
+      // into the backtest loop, not silently ignored.
+      final candles = sineFixture(400);
       final sma = BacktestService.runBbRsi(
         candles: candles,
         initialBalance: 10000.0,

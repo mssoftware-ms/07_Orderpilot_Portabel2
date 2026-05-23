@@ -280,7 +280,11 @@ mod tests {
             .collect();
 
         let candles_json = serde_json::to_string(&candles).unwrap();
-        let params_json = r#"{"bb_period": 20, "rsi_period": 14}"#.to_string();
+        // Pin full Phase-1 BB(20, SMA, 2.0σ) + RSI(14, 30/70) so this API
+        // smoke test stays decoupled from the Phase-2 default shift
+        // (Diff D-01/D-02). The 60-candle dip fixture was built for that
+        // configuration.
+        let params_json = r#"{"bb_period": 20, "bb_stddev": 2.0, "bb_ma_type": 0, "rsi_period": 14, "rsi_oversold": 30, "rsi_overbought": 70}"#.to_string();
 
         let result = run_bb_rsi_strategy(candles_json, params_json);
         let signals: Vec<serde_json::Value> = serde_json::from_str(&result).unwrap();

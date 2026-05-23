@@ -1,18 +1,20 @@
-//! Bollinger Bands + RSI Mean Reversion Strategy Add-in.
+//! Bollinger Bands + RSI Strategy Add-in.
 //!
-//! # Strategy Logic
-//! - **Long entry**: Price touches lower Bollinger Band AND RSI < oversold threshold (default 30)
-//! - **Short entry**: Price touches upper Bollinger Band AND RSI > overbought threshold (default 70)
-//! - **Exit**: Opposite signal or price crosses the middle band (SMA)
+//! Defaults match the video-spec "verbesserte Variante" (see
+//! `01_Projectplan/specs/bb_rsi_spec.md` §1, Diff D-01 + D-02). The
+//! Phase-1 mean-reversion entry/exit logic is still in place here; the
+//! Phase-2 signal inversion (D-03/D-04), RSI cross trigger (D-05) and
+//! exit removal (D-11) land in subsequent commits.
 //!
 //! # Parameters
-//! | Name            | Default | Range    | Description                       |
-//! |-----------------|---------|----------|-----------------------------------|
-//! | bb_period       | 20      | 10–50    | Bollinger Bands SMA lookback      |
-//! | bb_stddev       | 2.0     | 1.0–3.0  | Standard-deviation multiplier     |
-//! | rsi_period      | 14      | 7–30     | RSI lookback period               |
-//! | rsi_oversold    | 30      | 20–40    | RSI oversold threshold            |
-//! | rsi_overbought  | 70      | 60–80    | RSI overbought threshold          |
+//! | Name            | Default | Range    | Description                                  |
+//! |-----------------|---------|----------|----------------------------------------------|
+//! | bb_period       | 200     | 5–500    | Bollinger Bands MA lookback                  |
+//! | bb_stddev       | 0.2     | 0.1–5.0  | Standard-deviation multiplier                |
+//! | bb_ma_type      | 1 (EMA) | 0–1      | Basis MA type (0=SMA, 1=EMA)                 |
+//! | rsi_period      | 3       | 2–50     | RSI lookback period                          |
+//! | rsi_oversold    | 20      | 5–45     | RSI oversold threshold / level for long     |
+//! | rsi_overbought  | 80      | 55–95    | RSI overbought threshold / level for short  |
 
 use std::collections::HashMap;
 
@@ -224,16 +226,18 @@ impl StrategyAddin for BbRsiStrategy {
     }
 
     fn on_candle(&mut self, ctx: &mut Context, _candle: &Candle) -> Option<Signal> {
-        let bb_period = ctx.param_or("bb_period", 20.0) as usize;
-        let bb_stddev_mult = ctx.param_or("bb_stddev", 2.0);
-        // bb_ma_type: 0.0 = SMA (default, backwards compatible), 1.0 = EMA.
+        // Defaults aligned with bb_rsi_manifest() — the video-spec verbesserte
+        // Variante (01_Projectplan/specs/bb_rsi_spec.md §1, Diff D-01 + D-02).
+        let bb_period = ctx.param_or("bb_period", 200.0) as usize;
+        let bb_stddev_mult = ctx.param_or("bb_stddev", 0.2);
+        // bb_ma_type: 0.0 = SMA, 1.0 = EMA (default EMA per spec D-01).
         // Encoded as f64 because the strategy parameter map is f64-typed;
         // the schema clamps to {0, 1} via min/max/step.
-        let bb_ma_type_raw = ctx.param_or("bb_ma_type", 0.0);
+        let bb_ma_type_raw = ctx.param_or("bb_ma_type", 1.0);
         let use_ema_basis = bb_ma_type_raw >= 0.5;
-        let rsi_period = ctx.param_or("rsi_period", 14.0) as usize;
-        let rsi_oversold = ctx.param_or("rsi_oversold", 30.0);
-        let rsi_overbought = ctx.param_or("rsi_overbought", 70.0);
+        let rsi_period = ctx.param_or("rsi_period", 3.0) as usize;
+        let rsi_oversold = ctx.param_or("rsi_oversold", 20.0);
+        let rsi_overbought = ctx.param_or("rsi_overbought", 80.0);
 
         // F-09 parity gate: match Dart `startIdx = max(bbPeriod, rsiPeriod + 1)`.
         // Without this, Rust emits signals one bar earlier than Dart at the
@@ -354,13 +358,18 @@ pub fn bb_rsi_manifest() -> AddinManifest {
         category: StrategyCategory::MeanReversion,
         timeframes: vec![Timeframe::M15, Timeframe::H1, Timeframe::H4],
         parameters: vec![
-            ParameterSchema::new("bb_period", "BB Period", 20.0, 10.0, 50.0, 1.0),
-            ParameterSchema::new("bb_stddev", "BB Std Dev", 2.0, 1.0, 3.0, 0.1),
-            // bb_ma_type: 0=SMA (default, backwards compatible), 1=EMA.
-            ParameterSchema::new("bb_ma_type", "BB MA Type (0=SMA,1=EMA)", 0.0, 0.0, 1.0, 1.0),
-            ParameterSchema::new("rsi_period", "RSI Period", 14.0, 7.0, 30.0, 1.0),
-            ParameterSchema::new("rsi_oversold", "RSI Oversold", 30.0, 20.0, 40.0, 1.0),
-            ParameterSchema::new("rsi_overbought", "RSI Overbought", 70.0, 60.0, 80.0, 1.0),
+            // Defaults from the video-spec verbesserte Variante
+            // (01_Projectplan/specs/bb_rsi_spec.md §1, Diff D-01 + D-02).
+            // Ranges widened to keep Phase-1 optimizer/regression configs
+            // (bb_period∈[10,50], bb_stddev∈[1.0,3.0], rsi_period∈[7,30])
+            // valid while permitting the new spec defaults.
+            ParameterSchema::new("bb_period", "BB Period", 200.0, 5.0, 500.0, 1.0),
+            ParameterSchema::new("bb_stddev", "BB Std Dev", 0.2, 0.1, 5.0, 0.1),
+            // bb_ma_type: 0=SMA, 1=EMA (default EMA per spec D-01).
+            ParameterSchema::new("bb_ma_type", "BB MA Type (0=SMA,1=EMA)", 1.0, 0.0, 1.0, 1.0),
+            ParameterSchema::new("rsi_period", "RSI Period", 3.0, 2.0, 50.0, 1.0),
+            ParameterSchema::new("rsi_oversold", "RSI Oversold", 20.0, 5.0, 45.0, 1.0),
+            ParameterSchema::new("rsi_overbought", "RSI Overbought", 80.0, 55.0, 95.0, 1.0),
         ],
     }
 }
@@ -703,7 +712,18 @@ mod tests {
             })
             .collect();
 
-        let params = HashMap::new(); // use defaults
+        // Phase-1 BB(20)+RSI(14) — the 38-candle fixture is too short for
+        // the new BB(200) defaults (Diff D-01). This test pins the existing
+        // Phase-1 mean-reversion long-entry trigger; the Phase-2 signal
+        // inversion in Diff D-03 lands in a later commit and will rewrite
+        // this test's expectation.
+        let mut params = HashMap::new();
+        params.insert("bb_period".to_string(), 20.0);
+        params.insert("bb_stddev".to_string(), 2.0);
+        params.insert("bb_ma_type".to_string(), 0.0); // SMA
+        params.insert("rsi_period".to_string(), 14.0);
+        params.insert("rsi_oversold".to_string(), 30.0);
+        params.insert("rsi_overbought".to_string(), 70.0);
         let mut ctx = Context::new(candles.clone(), Timeframe::M1, params);
 
         // Walk through all candles
@@ -742,7 +762,16 @@ mod tests {
             })
             .collect();
 
-        let params = HashMap::new();
+        // See test_strategy_long_entry_signal for the rationale; same
+        // Phase-1 pinning of BB(20)+RSI(14) so the 38-candle fixture clears
+        // the BB warm-up boundary.
+        let mut params = HashMap::new();
+        params.insert("bb_period".to_string(), 20.0);
+        params.insert("bb_stddev".to_string(), 2.0);
+        params.insert("bb_ma_type".to_string(), 0.0); // SMA
+        params.insert("rsi_period".to_string(), 14.0);
+        params.insert("rsi_oversold".to_string(), 30.0);
+        params.insert("rsi_overbought".to_string(), 70.0);
         let mut ctx = Context::new(candles.clone(), Timeframe::M1, params);
 
         let mut last_signal = Signal::NoAction;
@@ -777,7 +806,17 @@ mod tests {
             .enumerate()
             .map(|(i, &c)| Candle::new(i as i64 * 60000, c, c + 0.5, c - 0.5, c, 100.0))
             .collect();
-        let params = HashMap::from([("bb_ma_type".to_string(), 1.0)]);
+        // Pin bb_period=20 so the 45-candle fixture clears the warm-up
+        // boundary; this test isolates the EMA-basis wiring, not the
+        // Phase-2 default shift.
+        let params = HashMap::from([
+            ("bb_ma_type".to_string(), 1.0),
+            ("bb_period".to_string(), 20.0),
+            ("bb_stddev".to_string(), 2.0),
+            ("rsi_period".to_string(), 14.0),
+            ("rsi_oversold".to_string(), 30.0),
+            ("rsi_overbought".to_string(), 70.0),
+        ]);
         let mut ctx = Context::new(candles.clone(), Timeframe::H1, params);
         for (i, candle) in candles.iter().enumerate() {
             ctx.set_index(i);

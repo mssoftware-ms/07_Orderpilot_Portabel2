@@ -87,13 +87,18 @@ class BbRsiParams {
   /// BacktestConfig.slippage_bps for Dart↔Rust parity.
   final double slippageBps;
 
+  /// Defaults match the video-spec "verbesserte Variante" — see
+  /// `01_Projectplan/specs/bb_rsi_spec.md` §1, Diff D-01 + D-02
+  /// (BB(200, EMA, 0.2σ) + RSI(3, 20/80)).
+  /// Mirrors the bb_rsi_manifest() defaults in
+  /// `rust/trading_engine/src/addins/bb_rsi.rs`.
   const BbRsiParams({
-    this.bbPeriod = 20,
-    this.bbStdDev = 2.0,
-    this.bbMaType = BbMaType.sma,
-    this.rsiPeriod = 14,
-    this.rsiOversold = 30.0,
-    this.rsiOverbought = 70.0,
+    this.bbPeriod = 200,
+    this.bbStdDev = 0.2,
+    this.bbMaType = BbMaType.ema,
+    this.rsiPeriod = 3,
+    this.rsiOversold = 20.0,
+    this.rsiOverbought = 80.0,
     this.slippageBps = 0.0,
   });
 }

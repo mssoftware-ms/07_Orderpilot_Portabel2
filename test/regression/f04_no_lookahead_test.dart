@@ -67,10 +67,24 @@ void main() {
       'every trade entryPrice equals its bar\'s open, not the previous bar\'s close',
       () {
         final candles = _generateParityFixture();
+        // F-04 verifies engine no-lookahead arithmetic (entry executes at
+        // next bar's open, not signal bar's close) — pin Phase-1
+        // BB(20, SMA, 2.0σ) + RSI(14, 30/70) so the 200-candle fixture
+        // continues to trigger trades. The Phase-2 default BB(200) would
+        // sit exactly on the warm-up boundary and yield 0 trades on a
+        // 200-candle fixture, turning the F-04 assertion into a tautology.
         final result = BacktestService.runBbRsi(
           candles: candles,
           initialBalance: initialBalance,
           feeRate: feeRate,
+          params: const BbRsiParams(
+            bbPeriod: 20,
+            bbStdDev: 2.0,
+            bbMaType: BbMaType.sma,
+            rsiPeriod: 14,
+            rsiOversold: 30.0,
+            rsiOverbought: 70.0,
+          ),
         );
 
         expect(

@@ -29,16 +29,19 @@ import 'package:trading_app/core/models/candle.dart';
 import 'package:trading_app/services/backtest_service.dart';
 import 'package:trading_app/services/rust_bridge.dart';
 
-/// 200 deterministic candles: 50 000 baseline + sinusoid (amplitude 8 000,
-/// period 30 candles). Empirically chosen to trigger ~12 BB(20)+RSI(14)
-/// entries on the Dart ground-truth engine, with non-trivial win rate
-/// (~92 %) and a large |totalPnl| — both required so any engine drift
-/// > 1e-9 produces an unambiguous failure.
+/// 400 deterministic candles: 50 000 baseline + sinusoid (amplitude 8 000,
+/// period 30 candles). The Phase-2 video-spec defaults push the BB MA
+/// lookback to 200 (Diff D-01), so a 200-candle fixture would land
+/// exactly on the warm-up boundary and produce 0 trades. 400 candles
+/// give ~200 active bars with multiple sinusoid cycles — enough to
+/// trigger BB(200, EMA, 0.2σ)+RSI(3, 20/80) entries on both bands.
 ///
-/// QA note: the original spec asked for 60 candles, but BB(20)/RSI(14)
-/// need warm-up + several cycles to penetrate the BB band. 200 candles
-/// is the minimum size that survives the warm-up with reliable trade
-/// generation; cf. the probe results documented in the PR description.
+/// QA note: the original Phase-1 spec used 200 candles for BB(20)+RSI(14)
+/// (cf. PR history). Bumping to 400 preserves the test's purpose (any
+/// engine drift > 1e-9 produces an unambiguous failure) under the new
+/// defaults without coupling the parity contract to specific strategy
+/// parameters — both engines must still agree bit-for-bit on whatever
+/// the current defaults compute.
 ///
 /// All values are IEEE-754 f64 and round-trip cleanly through JSON,
 /// so the same candle stream reaches the Rust engine bit-identical.
@@ -48,7 +51,7 @@ List<CandleData> _generateFixture() {
   const baseline = 50000.0;
   const amplitude = 8000.0;
   const period = 30.0;
-  for (int i = 0; i < 200; i++) {
+  for (int i = 0; i < 400; i++) {
     final phase = 2 * math.pi * i / period;
     final price = baseline + amplitude * math.sin(phase);
     candles.add(CandleData(

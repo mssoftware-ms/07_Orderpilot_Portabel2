@@ -110,15 +110,37 @@ void main() {
       const initialBalance = 10000.0;
       const feeRate = 0.0006;
 
+      // F-03b verifies cross-engine equity-curve parity, not strategy
+      // logic — pin Phase-1 BB(20, SMA, 2.0σ) + RSI(14, 30/70) so the
+      // 200-candle fixture continues to trigger trades on both engines.
+      // The Phase-2 default BB(200) would sit on the warm-up boundary
+      // and produce 0 trades on this fixture.
+      const pinnedParams = BbRsiParams(
+        bbPeriod: 20,
+        bbStdDev: 2.0,
+        bbMaType: BbMaType.sma,
+        rsiPeriod: 14,
+        rsiOversold: 30.0,
+        rsiOverbought: 70.0,
+      );
+
       final dart = BacktestService.runBbRsi(
-        candles: candles, initialBalance: initialBalance, feeRate: feeRate,
+        candles: candles,
+        initialBalance: initialBalance,
+        feeRate: feeRate,
+        params: pinnedParams,
       );
       final dartEq = dart.equityCurve.map((p) => p.equity).toList();
 
+      // Mirror the Dart parameters into the Rust call so both engines
+      // run the same strategy (numerical encoding: bb_ma_type 0=SMA).
+      const pinnedParamsJson =
+          '{"bb_period":20,"bb_stddev":2.0,"bb_ma_type":0,'
+          '"rsi_period":14,"rsi_oversold":30,"rsi_overbought":70}';
       final candlesJson = jsonEncode(candles.map((c) => c.toRustJson()).toList());
       final resp = await rust.runBbRsiBacktest(
         candlesJson: candlesJson,
-        paramsJson: '{}',
+        paramsJson: pinnedParamsJson,
         initialBalance: initialBalance,
         feeRate: feeRate,
       );

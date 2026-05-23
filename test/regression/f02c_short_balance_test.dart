@@ -90,10 +90,23 @@ void main() {
       const feeRate = 0.001; // 0.1%
 
       final candles = _buildShortTpFixture();
+      // F-02c verifies engine balance accounting on SHORT trades — pin
+      // Phase-1 BB(20, SMA, 2.0σ) + RSI(14, 30/70) so the hand-crafted
+      // surge fixture continues to trigger the canonical short entry.
+      // Default shift (Diff D-01/D-02) is irrelevant to the balance-update
+      // arithmetic this test pins.
       final result = BacktestService.runBbRsi(
         candles: candles,
         initialBalance: initialBalance,
         feeRate: feeRate,
+        params: const BbRsiParams(
+          bbPeriod: 20,
+          bbStdDev: 2.0,
+          bbMaType: BbMaType.sma,
+          rsiPeriod: 14,
+          rsiOversold: 30.0,
+          rsiOverbought: 70.0,
+        ),
       );
 
       final shortTpTrade = result.trades.firstWhere(

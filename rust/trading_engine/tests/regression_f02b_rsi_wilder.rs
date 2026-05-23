@@ -58,8 +58,23 @@ fn on_candle_rsi_matches_cumulative_wilder() {
 
     // Drive the strategy across every candle so the smoothing state for the
     // last bar is the one actually used by `on_candle`.
+    //
+    // F-02b pins the *windowing semantics* — that on_candle feeds the FULL
+    // close history to calc_rsi rather than only the last bb_period closes.
+    // It does not depend on the Phase-2 default shift (Diff D-01/D-02) to
+    // BB(200)+RSI(3). Pin Phase-1 BB(20)+RSI(14) explicitly so the 50-candle
+    // fixture is long enough to pass the warm-up boundary
+    // (startIdx = max(bb_period, rsi_period+1) = 20).
+    let mut params = HashMap::new();
+    params.insert("bb_period".to_string(), 20.0);
+    params.insert("bb_stddev".to_string(), 2.0);
+    params.insert("bb_ma_type".to_string(), 0.0); // SMA
+    params.insert("rsi_period".to_string(), 14.0);
+    params.insert("rsi_oversold".to_string(), 30.0);
+    params.insert("rsi_overbought".to_string(), 70.0);
+
     let mut strategy = BbRsiStrategy::new();
-    let mut ctx = Context::new(candles.clone(), Timeframe::H1, HashMap::new());
+    let mut ctx = Context::new(candles.clone(), Timeframe::H1, params);
     for (i, candle) in candles.iter().enumerate() {
         ctx.set_index(i);
         let _ = strategy.on_candle(&mut ctx, candle);
