@@ -131,6 +131,7 @@ void main() {
           rsiOversold: 30.0,
           rsiOverbought: 70.0,
           swingLookbackBars: 20,
+          tpRrRatio: 3.0,
         ),
       );
       final result2 = BacktestService.runBbRsi(
@@ -145,6 +146,7 @@ void main() {
           rsiOversold: 30.0,
           rsiOverbought: 70.0,
           swingLookbackBars: 20,
+          tpRrRatio: 3.0,
         ),
       );
 

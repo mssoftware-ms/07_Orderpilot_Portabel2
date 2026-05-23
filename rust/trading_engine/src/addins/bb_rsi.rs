@@ -1,12 +1,13 @@
 //! Bollinger Bands + RSI Strategy Add-in.
 //!
-//! Defaults, entry direction, RSI cross-back trigger, exit semantics, and
-//! swing-low / swing-high SL placement all match the video-spec
-//! "verbesserte Variante" (see `01_Projectplan/specs/bb_rsi_spec.md` §1–§6,
-//! Diff D-01..D-05, D-07, and D-11). Positions are closed exclusively by
-//! the SL/TP placeholders attached at entry — no BB-middle or RSI-extreme
-//! indicator exits. The R:R 1:3 TP, break-even-trail at 1R, and
-//! risk-2 % sizing (D-06/D-08/D-09) land in subsequent Welle-2 commits.
+//! Defaults, entry direction, RSI cross-back trigger, exit semantics,
+//! swing-low / swing-high SL placement, and R:R 1:3 take-profit all match
+//! the video-spec "verbesserte Variante" (see
+//! `01_Projectplan/specs/bb_rsi_spec.md` §1–§6, Diff D-01..D-05, D-06,
+//! D-07, and D-11). Positions are closed exclusively by the SL/TP
+//! placeholders attached at entry — no BB-middle or RSI-extreme indicator
+//! exits. Break-even-trail at 1R and risk-2 % sizing (D-08/D-09) land in
+//! subsequent Welle-2 commits.
 //!
 //! # Parameters
 //! | Name                | Default | Range    | Description                                  |
@@ -18,6 +19,7 @@
 //! | rsi_oversold        | 20      | 5–45     | RSI oversold threshold / level for long     |
 //! | rsi_overbought      | 80      | 55–95    | RSI overbought threshold / level for short  |
 //! | swing_lookback_bars | 20      | 5–100    | SL swing-low/high window length (Diff D-07)  |
+//! | tp_rr_ratio         | 3.0     | 0.5–10.0 | TP distance as multiple of SL distance (D-06)|
 
 use std::collections::HashMap;
 
@@ -268,6 +270,7 @@ impl StrategyAddin for BbRsiStrategy {
         let rsi_oversold = ctx.param_or("rsi_oversold", 20.0);
         let rsi_overbought = ctx.param_or("rsi_overbought", 80.0);
         let swing_lookback = ctx.param_or("swing_lookback_bars", 20.0) as usize;
+        let tp_rr_ratio = ctx.param_or("tp_rr_ratio", 3.0);
 
         // F-09 parity gate: match Dart `startIdx = max(bbPeriod, rsiPeriod + 1)`.
         // Without this, Rust emits signals one bar earlier than Dart at the
@@ -330,18 +333,20 @@ impl StrategyAddin for BbRsiStrategy {
         let swing_high_price = swing_high(&pre_highs)?;
 
         // ── Entry logic ─────────────────────────────────────────────────
-        // Diff D-03/D-04 + Diff D-05 + Diff D-07: trend-follow + RSI
-        // cross-back through the oversold/overbought level + swing-based
-        // SL per video-spec §2/§3/§4.
+        // Diff D-03/D-04 + Diff D-05 + Diff D-06 + Diff D-07: trend-follow
+        // + RSI cross-back through the oversold/overbought level +
+        // swing-based SL + R:R 1:3 take-profit per video-spec §2/§3/§4/§5.
         //   Long  ⇔ price > BB.upper AND RSI(prev) < oversold AND RSI(cur) ≥ oversold
         //   Short ⇔ price < BB.lower AND RSI(prev) > overbought AND RSI(cur) ≤ overbought
         // Strict comparison on the prev side prevents re-triggering after
         // RSI flatlines on a threshold. `None` for prev_rsi (first valid
         // bar after warm-up) suppresses the cross — no signal possible.
-        // SL is now anchored on the swing-low/high of the prior N bars
-        // (spec §4 algorithmic definition, Welle-1 D-07 QA sign-off).
-        // TP is still the BB-geometry mirror from Diff D-04 placeholder;
-        // the R:R 1:3 conversion lands in the next Welle-2 commit (D-06).
+        // SL is anchored on the swing-low/high of the prior N bars (spec
+        // §4 algorithm). TP distance = `tp_rr_ratio` × SL distance from
+        // the signal-bar close (spec §5). Using the signal-bar close as
+        // the entry-price proxy is necessary because the actual fill
+        // happens at the next bar's open (F-04) — both engines apply
+        // the same proxy so the implicit R:R stays parity-locked.
         // Degenerate swings (swing_low ≥ signal-bar price for a long, or
         // swing_high ≤ signal-bar price for a short) are suppressed — those
         // SLs would be on the wrong side of entry and trip the position
@@ -353,11 +358,10 @@ impl StrategyAddin for BbRsiStrategy {
                     && rsi >= rsi_oversold
                     && swing_low_price < price
                 {
+                    let sl_distance = price - swing_low_price;
+                    let tp_price = price + tp_rr_ratio * sl_distance;
                     ctx.in_position = true;
-                    return Some(Signal::long(
-                        Some(swing_low_price),
-                        Some(bb.upper + (bb.upper - bb.middle)),
-                    ));
+                    return Some(Signal::long(Some(swing_low_price), Some(tp_price)));
                 }
 
                 if price < bb.lower
@@ -365,11 +369,10 @@ impl StrategyAddin for BbRsiStrategy {
                     && rsi <= rsi_overbought
                     && swing_high_price > price
                 {
+                    let sl_distance = swing_high_price - price;
+                    let tp_price = price - tp_rr_ratio * sl_distance;
                     ctx.in_position = true;
-                    return Some(Signal::short(
-                        Some(swing_high_price),
-                        Some(bb.lower - (bb.middle - bb.lower)),
-                    ));
+                    return Some(Signal::short(Some(swing_high_price), Some(tp_price)));
                 }
             }
         }
@@ -427,6 +430,17 @@ pub fn bb_rsi_manifest() -> AddinManifest {
                 5.0,
                 100.0,
                 1.0,
+            ),
+            // Diff D-06: TP distance as a multiple of the swing-derived
+            // SL distance, measured from the signal-bar close (entry-price
+            // proxy). Default 3.0 matches the spec §5 R:R 1:3 contract.
+            ParameterSchema::new(
+                "tp_rr_ratio",
+                "TP R:R Ratio",
+                3.0,
+                0.5,
+                10.0,
+                0.1,
             ),
         ],
     }
@@ -744,8 +758,8 @@ mod tests {
         let manifest = strategy.manifest();
         assert_eq!(manifest.id, "bb_rsi_v1");
         // bb_period, bb_stddev, bb_ma_type, rsi_period, rsi_oversold,
-        // rsi_overbought, swing_lookback_bars (Diff D-07)
-        assert_eq!(manifest.parameters.len(), 7);
+        // rsi_overbought, swing_lookback_bars (D-07), tp_rr_ratio (D-06)
+        assert_eq!(manifest.parameters.len(), 8);
         assert_eq!(manifest.category, StrategyCategory::MeanReversion);
         assert!(manifest
             .parameters
@@ -755,6 +769,10 @@ mod tests {
             .parameters
             .iter()
             .any(|p| p.name == "swing_lookback_bars"));
+        assert!(manifest
+            .parameters
+            .iter()
+            .any(|p| p.name == "tp_rr_ratio"));
     }
 
     #[test]
@@ -844,6 +862,7 @@ mod tests {
         params.insert("rsi_oversold".to_string(), 30.0);
         params.insert("rsi_overbought".to_string(), 70.0);
         params.insert("swing_lookback_bars".to_string(), 20.0);
+        params.insert("tp_rr_ratio".to_string(), 3.0);
         params
     }
 
@@ -964,6 +983,89 @@ mod tests {
         assert!(
             (got - 128.5).abs() < 1e-12,
             "swing-high SL expected 128.5 (bar 33 high), got {}",
+            got
+        );
+    }
+
+    #[test]
+    fn test_strategy_long_tp_at_three_times_sl_distance_from_signal_close() {
+        // Diff D-06: TP distance = `tp_rr_ratio` × SL distance, measured
+        // from the signal-bar close (which serves as entry-price proxy
+        // since the actual fill is at the next bar's open). For the same
+        // 20-flat + 14-decline + surge fixture used elsewhere:
+        //   signal-bar close = 120
+        //   swing_low = 71.5
+        //   sl_distance = 120 - 71.5 = 48.5
+        //   tp = 120 + 3.0 * 48.5 = 265.5
+        let mut closes = vec![100.0; 20];
+        for i in 0..14 {
+            closes.push(100.0 - (i as f64 + 1.0) * 2.0);
+        }
+        closes.push(120.0);
+        let candles: Vec<Candle> = closes
+            .iter()
+            .enumerate()
+            .map(|(i, &c)| {
+                Candle::new(i as i64 * 60000, c, c + 0.5, c - 0.5, c, 100.0)
+            })
+            .collect();
+
+        let mut strategy = BbRsiStrategy::new();
+        let mut ctx =
+            Context::new(candles.clone(), Timeframe::M1, phase1_pinned_params());
+        let mut captured_tp: Option<f64> = None;
+        for (i, candle) in candles.iter().enumerate() {
+            ctx.set_index(i);
+            if let Some(Signal::EnterLong { tp, .. }) = strategy.on_candle(&mut ctx, candle) {
+                captured_tp = tp.first().copied();
+                break;
+            }
+        }
+        let got = captured_tp.expect("expected EnterLong with TP");
+        assert!(
+            (got - 265.5).abs() < 1e-9,
+            "R:R 1:3 TP from signal-bar close: expected 265.5, got {}",
+            got
+        );
+    }
+
+    #[test]
+    fn test_strategy_short_tp_at_three_times_sl_distance_from_signal_close() {
+        // Mirror for short: signal-bar close = 80, swing_high = 128.5,
+        // sl_distance = 48.5, tp = 80 - 3.0 * 48.5 = -65.5 (theoretically
+        // unreachable for the synthetic fixture — see the discussion in
+        // 01_Projectplan/specs/bb_rsi_spec.md §13 about asset-mismatch on
+        // BTCUSDT 1h with the default-strategy SL/TP). We assert the
+        // arithmetic regardless: the engine emits the spec-derived TP
+        // and lets the bar action decide whether it gets hit.
+        let mut closes = vec![100.0; 20];
+        for i in 0..14 {
+            closes.push(100.0 + (i as f64 + 1.0) * 2.0);
+        }
+        closes.push(80.0);
+        let candles: Vec<Candle> = closes
+            .iter()
+            .enumerate()
+            .map(|(i, &c)| {
+                Candle::new(i as i64 * 60000, c, c + 0.5, c - 0.5, c, 100.0)
+            })
+            .collect();
+
+        let mut strategy = BbRsiStrategy::new();
+        let mut ctx =
+            Context::new(candles.clone(), Timeframe::M1, phase1_pinned_params());
+        let mut captured_tp: Option<f64> = None;
+        for (i, candle) in candles.iter().enumerate() {
+            ctx.set_index(i);
+            if let Some(Signal::EnterShort { tp, .. }) = strategy.on_candle(&mut ctx, candle) {
+                captured_tp = tp.first().copied();
+                break;
+            }
+        }
+        let got = captured_tp.expect("expected EnterShort with TP");
+        assert!(
+            (got - -65.5).abs() < 1e-9,
+            "R:R 1:3 TP from signal-bar close: expected -65.5, got {}",
             got
         );
     }

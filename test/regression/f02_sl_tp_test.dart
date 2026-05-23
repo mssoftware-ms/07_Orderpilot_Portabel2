@@ -78,10 +78,22 @@ List<CandleData> _buildLongSlFixture() {
   return candles;
 }
 
-/// Mirror of [_buildLongSlFixture] for the SHORT / TP scenario:
-/// 20 flat + 14-bar ascent (drives RSI ~100) + crash bar (close=80
-/// below lower BB, RSI crosses DOWN through 70) + TP-exit candle
-/// (low=0 hits TP placeholder = 2*lower-middle) + flat tail at 90.
+/// Mirror of [_buildLongSlFixture] for the SHORT / TP scenario, post-D-06:
+/// the R:R 1:3 take-profit is now distance-based (= 3 × SL distance from
+/// signal-bar close), so the swing-high SL must sit close to entry for
+/// the TP to land above zero and be reachable on the synthetic exit
+/// candle.
+///
+///   1. 20 flat candles at 100 train BB(20).
+///   2. 14-bar mild ascent (+0.5 per bar, 100 → 107) — enough to push
+///      RSI(14) toward 100 while keeping the swing-high (=107.5) close
+///      to the eventual entry price.
+///   3. Single crash bar at index 34 with close=95: close < BB lower
+///      (≈96.6 on this fixture) AND RSI(14) crosses DOWN through 70.
+///   4. Exit candle at index 35 with low=0 hits the TP placeholder.
+///      Entry at bar-35 open=95, swing-high SL=107.5 → sl_distance=12.5
+///      → TP = 95 − 3 × 12.5 = 57.5.
+///   5. Flat tail at 92 — no re-entry.
 List<CandleData> _buildShortTpFixture() {
   const baseTs = 1_700_000_000_000;
   final candles = <CandleData>[];
@@ -94,32 +106,31 @@ List<CandleData> _buildShortTpFixture() {
   }
 
   for (int i = 0; i < 14; i++) {
-    final close = 100.0 + (i + 1) * 2.0; // 102, 104, …, 128
+    final close = 100.0 + (i + 1) * 0.5; // 100.5, 101.0, …, 107.0
     candles.add(CandleData(
       timestamp: baseTs + (20 + i) * 3_600_000,
-      open: close - 0.5, high: close + 0.5, low: close - 0.5,
+      open: close - 0.25, high: close + 0.5, low: close - 0.5,
       close: close, volume: 1_000.0,
     ));
   }
 
-  // Crash bar — close=80 < lower(~86), RSI(14) crosses DOWN through 70.
+  // Crash bar — close=95 < lower (~96.6), RSI(14) crosses DOWN through 70.
   candles.add(CandleData(
     timestamp: baseTs + 34 * 3_600_000,
-    open: 127.5, high: 128.0, low: 80.0, close: 80.0, volume: 1_000.0,
+    open: 106.5, high: 107.0, low: 95.0, close: 95.0, volume: 1_000.0,
   ));
 
-  // TP-exit candle. Fill short at open=80, intra-bar low=0 hits the
-  // TP placeholder (2*lower - middle ≈ 63 well below 0… actually well
-  // above 0, so any low=0 trips it).
+  // TP-exit candle: low=0 trips the R:R 1:3 TP at 57.5.
   candles.add(CandleData(
     timestamp: baseTs + 35 * 3_600_000,
-    open: 80.0, high: 80.0, low: 0.0, close: 90.0, volume: 1_000.0,
+    open: 95.0, high: 95.5, low: 0.0, close: 92.0, volume: 1_000.0,
   ));
 
+  // Flat tail at 92 — no re-entry possible.
   for (int i = 36; i < 60; i++) {
     candles.add(CandleData(
       timestamp: baseTs + i * 3_600_000,
-      open: 90.0, high: 90.5, low: 89.5, close: 90.0, volume: 1_000.0,
+      open: 92.0, high: 92.5, low: 91.5, close: 92.0, volume: 1_000.0,
     ));
   }
   return candles;
@@ -149,6 +160,7 @@ void main() {
           rsiOversold: 30.0,
           rsiOverbought: 70.0,
           swingLookbackBars: 20,
+          tpRrRatio: 3.0,
         ),
       );
 
@@ -204,6 +216,7 @@ void main() {
           rsiOversold: 30.0,
           rsiOverbought: 70.0,
           swingLookbackBars: 20,
+          tpRrRatio: 3.0,
         ),
       );
 
@@ -224,20 +237,14 @@ void main() {
             'position would close at "BB Middle" on the indicator path, '
             'never with exitReason="TakeProfit".'),
       );
-      expect(trade.entryPrice, equals(80.0),
-          reason: 'short entry fills at the TP-candle open (slippage 0)');
-      expect(trade.exitPrice, lessThan(trade.entryPrice),
+      expect(trade.entryPrice, equals(95.0),
+          reason: 'short entry fills at the TP-candle open=95 '
+              '(slippage 0, mild-ascent fixture)');
+      expect(trade.exitPrice, closeTo(57.5, 1e-9),
           reason:
-              'a profitable short closes below entry — TP for a short is '
-              'always strictly below the entry price');
-      expect(trade.exitPrice, greaterThan(0.0),
-          reason:
-              'TP must equal the absolute TP price (BB-derived), not the exit '
-              'candle low which is 0.0');
-      expect(trade.exitPrice, isNot(closeTo(90.0, 1e-9)),
-          reason:
-              'pre-F-02 the position would close on the exit candle close '
-              '(=90); post-F-02 it closes at the BB-derived TP price intra-bar');
+              'TP must equal the R:R 1:3 derived price: signal-bar close=95, '
+              'swing_high=107.5, sl_distance=12.5 → TP = 95 - 3*12.5 = 57.5. '
+              'NOT the exit candle low (=0) nor close (=92).');
       expect(trade.pnl, greaterThan(0.0),
           reason: 'a short take-profit is by definition a winning trade');
     });

@@ -147,6 +147,7 @@ void main() {
           rsiOversold: 30.0,
           rsiOverbought: 70.0,
           swingLookbackBars: 20,
+          tpRrRatio: 3.0,
         ),
       );
       final resultExplicitEma = BacktestService.runBbRsi(
@@ -161,6 +162,7 @@ void main() {
           rsiOversold: 30.0,
           rsiOverbought: 70.0,
           swingLookbackBars: 20,
+          tpRrRatio: 3.0,
         ),
       );
       expect(resultExplicitEma.equityCurve.last.equity,

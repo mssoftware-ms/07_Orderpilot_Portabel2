@@ -90,6 +90,15 @@ class BbRsiParams {
   /// parameter for Dart↔Rust parity.
   final int swingLookbackBars;
 
+  /// TP distance as a multiple of the swing-derived SL distance (Diff D-06).
+  ///
+  /// Spec §5: R:R 1:3 → `tpRrRatio = 3.0` (default). At signal time the
+  /// engine sets TP = entry-proxy ± ratio × |entry-proxy − sl_price|,
+  /// using the signal-bar close as entry proxy (the actual fill is at
+  /// the next bar's open per F-04). Must equal the Rust `tp_rr_ratio`
+  /// parameter for Dart↔Rust parity.
+  final double tpRrRatio;
+
   /// One-side slippage in basis points applied at each execution
   /// (entry and exit) against the trader. Plan rev2 §3.4 F-04 sets the
   /// default to 0 bps for Binance / Bitunix BTC + ETH at retail size;
@@ -99,9 +108,9 @@ class BbRsiParams {
 
   /// Defaults match the video-spec "verbesserte Variante" — see
   /// `01_Projectplan/specs/bb_rsi_spec.md` §1, Diff D-01 + D-02
-  /// (BB(200, EMA, 0.2σ) + RSI(3, 20/80)) plus Diff D-07 swing-SL N=20.
-  /// Mirrors the bb_rsi_manifest() defaults in
-  /// `rust/trading_engine/src/addins/bb_rsi.rs`.
+  /// (BB(200, EMA, 0.2σ) + RSI(3, 20/80)) plus Diff D-06 R:R 1:3 TP
+  /// and Diff D-07 swing-SL N=20. Mirrors the bb_rsi_manifest() defaults
+  /// in `rust/trading_engine/src/addins/bb_rsi.rs`.
   const BbRsiParams({
     this.bbPeriod = 200,
     this.bbStdDev = 0.2,
@@ -110,6 +119,7 @@ class BbRsiParams {
     this.rsiOversold = 20.0,
     this.rsiOverbought = 80.0,
     this.swingLookbackBars = 20,
+    this.tpRrRatio = 3.0,
     this.slippageBps = 0.0,
   });
 }
@@ -405,8 +415,11 @@ class BacktestService {
 
         if (pending == null) {
           final lower = bbLower[i];
-          final middle = bbMiddle[i];
           final upper = bbUpper[i];
+          // Diff D-06: TP is no longer derived from BB-middle geometry —
+          // it is `tpRrRatio * sl_distance` from the signal-bar close.
+          // `bbMiddle[i]` stays populated for the EMA-basis state but is
+          // not consumed by the entry block anymore.
 
           if (position == null) {
             // Diff D-03/D-04 + Diff D-05 + Diff D-07: trend-follow + RSI
@@ -439,14 +452,22 @@ class BacktestService {
                   prev < params.rsiOversold &&
                   rsi >= params.rsiOversold &&
                   slLong < close) {
-                pending = _PendingEnterLong(slLong, 2 * upper - middle);
+                // Diff D-06: TP = entry-proxy + ratio * sl_distance.
+                // The signal-bar close is the entry-price proxy; the
+                // actual fill at the next bar's open may differ slightly
+                // under non-zero slippage (the asymmetric impact on R:R
+                // is documented in the Welle-2 QA brief).
+                final tpLong = close + params.tpRrRatio * (close - slLong);
+                pending = _PendingEnterLong(slLong, tpLong);
               } else if (slLong != null &&
                   slShort != null &&
                   close < lower &&
                   prev > params.rsiOverbought &&
                   rsi <= params.rsiOverbought &&
                   slShort > close) {
-                pending = _PendingEnterShort(slShort, 2 * lower - middle);
+                final tpShort =
+                    close - params.tpRrRatio * (slShort - close);
+                pending = _PendingEnterShort(slShort, tpShort);
               }
             }
           }

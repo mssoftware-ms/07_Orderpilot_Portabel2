@@ -123,6 +123,7 @@ void main() {
         rsiOversold: 30.0,
         rsiOverbought: 70.0,
         swingLookbackBars: 20,
+        tpRrRatio: 3.0,
       );
 
       final dart = BacktestService.runBbRsi(
@@ -138,7 +139,7 @@ void main() {
       const pinnedParamsJson =
           '{"bb_period":20,"bb_stddev":2.0,"bb_ma_type":0,'
           '"rsi_period":14,"rsi_oversold":30,"rsi_overbought":70,'
-          '"swing_lookback_bars":20}';
+          '"swing_lookback_bars":20,"tp_rr_ratio":3.0}';
       final candlesJson = jsonEncode(candles.map((c) => c.toRustJson()).toList());
       final resp = await rust.runBbRsiBacktest(
         candlesJson: candlesJson,
