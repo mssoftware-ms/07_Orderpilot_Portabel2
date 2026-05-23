@@ -206,7 +206,15 @@ Da der UT-Bot-Code im Repo noch nicht existiert, mappt diese Section die Spec-Be
 - **Abweichung:** Es gibt mindestens vier verbreitete „Stochastic Momentum Index"-Varianten auf TradingView (Blau 1993, modifizierter Stoch RSI, Uday-Custom, etc.). Wir wählen den **Blau-1993-Standard** (Double-EMA-smoothed momentum) mit Default-Periode 14 / 5 / 3 (Length / K-Smoothing / D-Smoothing).
 - **Begründung:** Das ist der namensgebende Original-Algorithmus und der Default-Wert in den meisten TradingView-Custom-Indikatoren mit dem Namen „Stochastic Momentum Index".
 - **QA-Risiko:** Falls Uday's spezifische Variante davon abweicht, ist das ein Pfad-B-Kandidat (bewusste Abweichung dokumentiert). Engineering-Plan-Welle U2 enthält die SMI-Implementation als isolierten atomaren Commit, damit Variante-Wechsel ohne Rest-Strategy-Refactor möglich ist.
-- **QA-Frage offen:** Falls Welle U3-Backtest die Acceptance-Targets nicht trifft, soll dann Uday's exakte Variante recherchiert und nachgezogen werden (Recherche-Aufwand ~1h) oder bleibt es bei Blau-Standard mit Pfad-B-Vermerk?
+- **QA-Entscheidung (Welle U2-1, smi_length=14 konfirmiert):** Default bleibt Blau-1993 14/5/3. Uday-Variante-Recherche wird in §13.6 als Phase-3-Backlog-Eintrag geparkt.
+
+**12.5 Path-B-Toggle `smi_cross_above_zero` (Welle U3 Sub-Commit)**
+
+- **Abweichung:** Spec §2 Bedingung 3 verlangt SMI-Cross-UP **unterhalb** der Nullinie für Long; Spec §3 verlangt SMI-Cross-DOWN **oberhalb** der Nullinie für Short (Transkript-Wortlaut T235–T238 / T258–T260). Der Welle-U3-Real-Data-Backtest (siehe §13.5) zeigt unter diesen Default-Bedingungen WR ≈ 24 %, PF ≈ 0.53 — weit unter dem XLSX-Target.
+- **Toggle:** Neuer Manifest-Parameter `smi_cross_above_zero` (default `0.0` = strict Spec). Wenn `1.0`, kehrt sich das Zero-Line-Gate um: Long verlangt SMI-Cross-UP-Above-Zero, Short verlangt SMI-Cross-DOWN-Below-Zero. Logik konsolidiert in `detect_entry()` (Rust) und gespiegelt in `BacktestService.runUtBot` (Dart).
+- **Begründung:** Bewusste Abweichung als Path-B-Experiment. Diagnose-Hypothese: in starken Krypto-Trends ist der strict-spec Trigger (SMI < 0 für Long) eine Mean-Reversion-Signatur, die gegen den EMA(200)-Trend-Filter läuft. Die `smi_cross_above_zero=1`-Variante testet die Pro-Trend-Lesart.
+- **Test-Beleg:** Drei Unit-Tests in `addins::ut_bot::tests` (Inversion-Long, Inversion-Short, strict-Mode-Pass-Through) plus ein Dart-Toggle-Test (`smi_cross_above_zero toggle produces different trade list`) auf der 400-Bar Random-Walk-Fixture.
+- **Real-Data-Resultat:** PF=0.64 (Test 3, BTCUSDT 5min, key=2.0) — besser als strict-spec PF=0.53, aber immer noch deutlich unter dem Akzeptanzband. Toggle wird **nicht** als neuer Default vorgeschlagen; bleibt als Optimizer-Lab-Knob.
 
 ---
 
@@ -255,3 +263,23 @@ Unabhängig vom Acceptance-Pfad müssen folgende Gates **vor** dem Phase-2-Tag g
 - Dart↔Rust-Parität 1e-9 auf einer 200-Candle-Synthese-Fixture (analog zur BB+RSI-Welle-1/2-Konvention; Fixture muss mindestens einen erfolgreichen Long-Entry und einen erfolgreichen Short-Entry enthalten)
 - Phase-1-Reference-Backtest (BTCUSDT 1h 2024-H1, BB+RSI) bleibt **strukturell** grün (Reproduzierbarkeit 3×, Parität, `totalTrades > 0`) — kein Engine-Drift durch UT-Bot-Hinzufügung
 - `flutter analyze` 0 Warnungen, `cargo clippy` 0 Warnungen
+
+**Welle-U2-5 Resolution:** FFI-Parity-Contract eingelöst. Native engine over flutter_rust_bridge erreicht 1e-9 totalPnl / WR / Sharpe / MaxDrawdown gegen die Dart-Fallback-Engine auf der 400-Candle LCG-Random-Walk-Fixture (`test/integration/dart_rust_ut_bot_parity_test.dart`, 3 Tests). Fixture-Design-Notiz: synthetische Sinusoid-/Triangle-/Sawtooth-Shapes triggern keine UT-Bot-Strict-Spec-Entries; der Random-Walk produziert genug chaotische Mikro-Reversals, dass alle drei Confluence-Bedingungen (EMA + ATR-Direction-Flip + SMI-Cross-Below-Zero) auf demselben Bar zusammenfallen. Die im Welle-U2-4 ESKALATIONS-MARKER beschriebene „0 Trades auf Synth-Fixtures"-Beobachtung ist ein Artefakt der Fixture-Form, kein Strategie-Defekt.
+
+### 13.5 Pfad-Klassifikation (Welle U3 final, 2026-05-23)
+
+**Verdikt:** Pfad C (Video-treu implementiert, Targets auf Ziel-Asset/TF nicht erreichbar).
+
+**Mandatory Sanity-Sweep (§13.3) durchgeführt** — alle 7 vorgeschriebenen Variationen plus zwei zusätzliche Path-B-Tests (T2 key=3 aus §12.1, T3 `smi_cross_above_zero=1` aus §12.5). **KEINE Variation erreicht alle vier Bänder gleichzeitig.** Best-of-Sweep ist T4c (ETHUSDT 5min) mit PF=0.81 — immer noch defizitär.
+
+Vollständige Resultat-Tabelle, bit-exakte Run-Snapshots und Driver-Analyse: `01_Projectplan/specs/ut_bot_diagnose_2026-05-23.md`.
+
+**Root-Cause-Hypothese (Diagnose §4 Punkt 2):** Die UT-Bot-EMA200-SMI-Confluence kombiniert einen Trend-Filter (EMA-200) mit einem Mean-Reversion-Trigger (SMI-Cross-While-Same-Sign-Zero). Auf NQ-5min (Video) profitiert dieser Mix vom auctions-getriebenen Open-/Close-Mean-Reversion-Verhalten und dem Future-Roll-Liquiditäts-Profile. Auf 24/7-Krypto-Märkten existieren diese Mikrostruktur-Vorteile nicht — die zwei Filter sind gegenläufig kalibriert für Krypto-Volatilität, was die ~10pp-Lücke im Win-Rate (20–25 % statt 53 % Target) konsistent über alle untersuchten Achsen erklärt.
+
+**Final-Default-Parameter (unverändert gegenüber `ut_bot_manifest()`):** `key_value = 2.0`, `atr_period = 1`, `smi_length = 14`, `smi_k_smoothing = 5`, `smi_d_smoothing = 3`, `swing_lookback_bars = 20`, `tp_rr_ratio = 2.0`, `risk_per_trade = 0.02`, `session_filter_enabled = 0`, `smi_cross_above_zero = 0`. Die Defaults bleiben video-treu; die XLSX-Acceptance-Lücke ist eine Eigenschaft des Asset/TF-Setups, nicht der Implementation.
+
+### 13.6 Phase-3-Konsequenz
+
+- **Phase-2-Tag-Kriterium:** UT Bot v1 bleibt als Add-in-Manifest-Eintrag (`addins::ut_bot::UtBotStrategy`) registriert. Strategy-Code, Dart-Fallback und FFI-Bindings sind produktionsreif (Engine-Korrektheit per §13.4 grün, FFI-Parity per §13.4 Welle-U2-5-Resolution grün). Kein Default-Wechsel commitet.
+- **Phase-3 Backlog (mittlere Priorität):** „UT Bot v1 ETH-Multi-TF-Sweep (ETHUSDT 5m/15m/1h + BTCUSDT 4h-Vergleich), Ziel PF ≥ 1.5 bei trades ≥ 50". Erwartung niedriger Erfolgswahrscheinlichkeit als der vergleichbare BB+RSI-4h-Backlog-Eintrag — bei BB+RSI lieferte 1h → 4h einen positiven Sweet-Spot (Diagnose 2026-05-23 C1), bei UT Bot zeigt 5m → 15m → 1h einen monotonen Performance-Abfall.
+- **Phase-3 Backlog (niedrige Priorität):** „SMI Uday-spezifische Variante (§12.4) recherchieren und gegen Blau-1993-Standard backtesten". Recherche-Aufwand ~1h; kann nur Implementations-Detail-Fixes liefern, ohne die grundlegende Confluence-Inkompatibilität auf Krypto-5min anzugreifen.

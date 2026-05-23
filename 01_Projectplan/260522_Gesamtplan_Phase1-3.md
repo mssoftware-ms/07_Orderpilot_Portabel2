@@ -450,8 +450,10 @@ Drei mögliche Acceptance-Ausgänge pro Strategie (jeder eindeutig in der Spec-M
 
 **Status nach BB+RSI-Abschluss (2026-05-23):**
 - BB+RSI v3: **Pfad C** (Diagnose-Sweep: `bb_rsi_diagnose_2026-05-23.md`)
-- UT Bot: pending
+- UT Bot v1: **Pfad C** (Diagnose-Sweep: `ut_bot_diagnose_2026-05-23.md`, 7 Variationen alle defizitär — best-of-sweep PF=0.81 auf ETHUSDT 5min; Spec §13.5 finalisiert mit Root-Cause-Hypothese „Confluence-Inkompatibilität auf Krypto-5min")
 - Ichimoku: pending
+
+**Phase-2-Tag-Status:** **Beide bisher implementierten Strategien sind Pfad C.** Phase-2-Tag-Bedingung „mindestens eine Pfad-A-oder-B-Strategie" ist nicht erfüllt → Ichimoku muss als dritte Strategie implementiert werden, bevor `v0.3.0-strategies-verified` gesetzt werden kann. Falls auch Ichimoku Pfad C trifft, wird Phase 2 als Sub-Diagnose-Session eröffnet (Plan §4.4 letzter Aufzählungspunkt).
 
 ---
 
