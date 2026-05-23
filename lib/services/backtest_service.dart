@@ -162,6 +162,12 @@ class UtBotParams {
   final int sessionEndHourLocal;
   final double slippageBps;
 
+  /// Path-B toggle per `01_Projectplan/specs/ut_bot_spec.md` §12.5.
+  /// Default `false` = strict spec (Long fires only while SMI < 0,
+  /// Short only while SMI > 0). Set `true` to flip the zero-line gate
+  /// for the Welle-U3 Path-B experiment.
+  final bool smiCrossAboveZero;
+
   const UtBotParams({
     this.emaPeriod = 200,
     this.keyValue = 2.0,
@@ -176,6 +182,7 @@ class UtBotParams {
     this.sessionStartHourLocal = 9,
     this.sessionEndHourLocal = 23,
     this.slippageBps = 0.0,
+    this.smiCrossAboveZero = false,
   });
 }
 
@@ -931,6 +938,12 @@ class BacktestService {
           final smiCrossDown = smiPrev > sigPrev && smiNow <= sigNow;
           final smiBelowZero = smiNow < 0.0 && sigNow < 0.0;
           final smiAboveZero = smiNow > 0.0 && sigNow > 0.0;
+          // Path-B zero-line gate (mirrors `detect_entry` in
+          // rust/trading_engine/src/addins/ut_bot.rs).
+          final smiLongOk =
+              params.smiCrossAboveZero ? smiAboveZero : smiBelowZero;
+          final smiShortOk =
+              params.smiCrossAboveZero ? smiBelowZero : smiAboveZero;
 
           final allValid = !ema.isNaN &&
               !smiPrev.isNaN &&
@@ -939,7 +952,7 @@ class BacktestService {
               !sigNow.isNaN;
           if (allValid) {
             final price = candle.close;
-            if (price > ema && flipUp && smiCrossUp && smiBelowZero) {
+            if (price > ema && flipUp && smiCrossUp && smiLongOk) {
               final preLows = [
                 for (int j = i - params.swingLookbackBars; j < i;
                     j++)
@@ -956,7 +969,7 @@ class BacktestService {
             } else if (price < ema &&
                 flipDown &&
                 smiCrossDown &&
-                smiAboveZero) {
+                smiShortOk) {
               final preHighs = [
                 for (int j = i - params.swingLookbackBars; j < i;
                     j++)

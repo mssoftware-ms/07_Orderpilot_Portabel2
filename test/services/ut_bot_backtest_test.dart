@@ -210,6 +210,76 @@ void main() {
       expect(result.equityCurve.length, candles.length);
     });
 
+    test('smi_cross_above_zero toggle produces different trade list', () {
+      // Path-B toggle (Spec §12.5): same fixture, same other params, only
+      // the zero-line gate flips. The strict-spec run and the relaxed run
+      // MUST NOT produce identical trade lists — otherwise the toggle is
+      // not actually wired through. We don't pin "more" or "fewer" trades
+      // here because that depends on the fixture; we only pin "different".
+      //
+      // Fixture: 400-bar LCG random walk (seed 12345, ±3.3 step, clamped
+      // to [80,120]) — same shape as the FFI parity test, picked because
+      // it actually fires UT-Bot entries on the strict spec while the
+      // 200-bar designed synth shapes do not.
+      final candles = <CandleData>[];
+      int s = 12345;
+      double price = 100.0;
+      final closes = <double>[price];
+      while (closes.length < 400) {
+        s = (s * 1103515245 + 12345) & 0x7fffffff;
+        final step = ((s % 200) - 100) / 30.0;
+        price = (price + step).clamp(80.0, 120.0);
+        closes.add(price);
+      }
+      const baseTs = 1700000000000;
+      for (int i = 0; i < closes.length; i++) {
+        candles.add(CandleData(
+          timestamp: baseTs + i * 300000,
+          open: closes[i] - 0.3,
+          high: closes[i] + 1.2,
+          low: closes[i] - 1.2,
+          close: closes[i],
+          volume: 1000.0 + i,
+        ));
+      }
+
+      final strict = BacktestService.runUtBot(
+        candles: candles,
+        initialBalance: 10000,
+        feeRate: 0.0,
+        params: fastParams,
+      );
+      final relaxed = BacktestService.runUtBot(
+        candles: candles,
+        initialBalance: 10000,
+        feeRate: 0.0,
+        params: const UtBotParams(
+          emaPeriod: 30,
+          keyValue: 1.0,
+          atrPeriod: 1,
+          smiLength: 5,
+          smiKSmoothing: 3,
+          smiDSmoothing: 3,
+          swingLookbackBars: 5,
+          tpRrRatio: 2.0,
+          smiCrossAboveZero: true,
+        ),
+      );
+      expect(
+        strict.metrics.totalTrades + relaxed.metrics.totalTrades,
+        greaterThan(0),
+        reason: 'fixture must trigger at least one entry across the two '
+            'modes; otherwise the toggle assertion is vacuous',
+      );
+      expect(
+        relaxed.metrics.totalTrades,
+        isNot(equals(strict.metrics.totalTrades)),
+        reason: 'cross_above_zero toggle must change the trade count on a '
+            'fixture that fires entries — otherwise the parameter is not '
+            'reaching `detect_entry`',
+      );
+    });
+
     test('session filter never increases the trade count vs filter-off', () {
       // Lower-bound sanity: enabling the filter cannot produce MORE
       // trades than disabling it (the filter only ever blocks entries).

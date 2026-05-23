@@ -371,15 +371,20 @@ pub struct UtBotEntrySignal {
 
 /// Evaluate the three-way UT-Bot confluence at the current bar.
 ///
-/// - **Long** ⇔ `price > ema` AND UT-Bot direction flipped from −1 to +1
-///   on this bar AND the SMI line crossed up through its signal AND
-///   both SMI and signal are still strictly below zero (Spec §2, condition 3:
-///   "unterhalb der Nullinie").
-/// - **Short** is the mirror with all comparisons reversed (Spec §3).
+/// - **Strict spec (default, `cross_above_zero = false`)** — long requires
+///   SMI cross-up while both SMI and signal are strictly **below** zero
+///   (Spec §2, condition 3: "unterhalb der Nullinie"); short mirrors with
+///   strictly **above** zero (Spec §3).
+/// - **Path-B experiment (`cross_above_zero = true`)** — the zero-line
+///   constraint is flipped: long requires SMI cross-up while both SMI and
+///   signal are strictly **above** zero, short while strictly **below**.
+///   This is the relaxation explored in Spec §13.3 when the strict-spec
+///   default produces no winning entries on the real-data backtest. See
+///   `01_Projectplan/specs/ut_bot_spec.md` §12.5 for the rationale.
 ///
 /// Any input being `NaN` (warm-up) suppresses the signal — the helper
 /// returns `UtBotEntrySignal::default()`.
-#[allow(clippy::too_many_arguments)] // 8 independent per-bar samples — flattening into a struct hurts test ergonomics.
+#[allow(clippy::too_many_arguments)] // 9 independent per-bar samples + toggle — flattening into a struct hurts test ergonomics.
 pub fn detect_entry(
     price: f64,
     ema: f64,
@@ -389,6 +394,7 @@ pub fn detect_entry(
     signal_prev: f64,
     smi_now: f64,
     signal_now: f64,
+    cross_above_zero: bool,
 ) -> UtBotEntrySignal {
     if price.is_nan()
         || ema.is_nan()
@@ -405,9 +411,12 @@ pub fn detect_entry(
     let smi_cross_down = smi_prev > signal_prev && smi_now <= signal_now;
     let smi_below_zero = smi_now < 0.0 && signal_now < 0.0;
     let smi_above_zero = smi_now > 0.0 && signal_now > 0.0;
+    // Zero-line gate per mode — strict ↦ below/above, relaxed ↦ above/below.
+    let smi_long_ok = if cross_above_zero { smi_above_zero } else { smi_below_zero };
+    let smi_short_ok = if cross_above_zero { smi_below_zero } else { smi_above_zero };
     UtBotEntrySignal {
-        long: price > ema && flip_up && smi_cross_up && smi_below_zero,
-        short: price < ema && flip_down && smi_cross_down && smi_above_zero,
+        long: price > ema && flip_up && smi_cross_up && smi_long_ok,
+        short: price < ema && flip_down && smi_cross_down && smi_short_ok,
     }
 }
 
@@ -471,6 +480,10 @@ impl StrategyAddin for UtBotStrategy {
         let session_enabled = ctx.param_or("session_filter_enabled", 0.0) >= 0.5;
         let session_start = ctx.param_or("session_start_hour_local", 9.0) as i32;
         let session_end = ctx.param_or("session_end_hour_local", 23.0) as i32;
+        // Path-B toggle (Spec §12.5 / §13.3): default false = strict spec
+        // (SMI cross while same-sign with zero); true flips the zero-line
+        // gate per `detect_entry` doc.
+        let cross_above_zero = ctx.param_or("smi_cross_above_zero", 0.0) >= 0.5;
 
         // Warm-up: SMI signal needs `(length - 1) + (k - 1) + (d - 1) + (d - 1)`
         // bars; we also need at least one prior bar for the SMI cross and
@@ -536,6 +549,7 @@ impl StrategyAddin for UtBotStrategy {
             signal_series[i - 1],
             smi_series[i],
             signal_series[i],
+            cross_above_zero,
         );
 
         if entry.long {
@@ -651,6 +665,19 @@ pub fn ut_bot_manifest() -> AddinManifest {
                 23.0,
                 1.0,
                 24.0,
+                1.0,
+            ),
+            // Path-B toggle (Spec §12.5). Default 0 = strict spec
+            // (Long: SMI cross while below zero, Short: cross while
+            // above zero). Set to 1 to flip the zero-line gate — used
+            // by the Welle-U3 Path-B experiment when the strict default
+            // produces no winning entries on real-data backtests.
+            ParameterSchema::new(
+                "smi_cross_above_zero",
+                "SMI Cross Above-Zero Mode (0/1)",
+                0.0,
+                0.0,
+                1.0,
                 1.0,
             ),
         ],
@@ -1247,6 +1274,7 @@ mod tests {
             /* sig_prev */ -40.0,
             /* smi_now */ -20.0,
             /* sig_now */ -30.0,
+            /* cross_above_zero */ false,
         );
         assert!(r.long);
         assert!(!r.short);
@@ -1263,6 +1291,7 @@ mod tests {
             /* sig_prev */ 40.0,
             /* smi_now */ 20.0,
             /* sig_now */ 30.0,
+            /* cross_above_zero */ false,
         );
         assert!(!r.long);
         assert!(r.short);
@@ -1270,37 +1299,81 @@ mod tests {
 
     #[test]
     fn test_detect_entry_long_suppressed_when_price_below_ema() {
-        let r = detect_entry(95.0, 100.0, -1, 1, -50.0, -40.0, -20.0, -30.0);
+        let r = detect_entry(95.0, 100.0, -1, 1, -50.0, -40.0, -20.0, -30.0, false);
         assert!(!r.long);
     }
 
     #[test]
     fn test_detect_entry_long_suppressed_when_no_direction_flip() {
         // direction stays at +1 across bars (no flip).
-        let r = detect_entry(105.0, 100.0, 1, 1, -50.0, -40.0, -20.0, -30.0);
+        let r = detect_entry(105.0, 100.0, 1, 1, -50.0, -40.0, -20.0, -30.0, false);
         assert!(!r.long);
     }
 
     #[test]
     fn test_detect_entry_long_suppressed_when_no_smi_cross() {
         // SMI already above its signal on prev bar → no cross-up here.
-        let r = detect_entry(105.0, 100.0, -1, 1, -20.0, -30.0, -10.0, -25.0);
+        let r = detect_entry(105.0, 100.0, -1, 1, -20.0, -30.0, -10.0, -25.0, false);
         assert!(!r.long);
     }
 
     #[test]
     fn test_detect_entry_long_suppressed_when_smi_above_zero() {
         // All other conditions met but SMI/signal already positive.
-        let r = detect_entry(105.0, 100.0, -1, 1, 10.0, 20.0, 30.0, 25.0);
+        let r = detect_entry(105.0, 100.0, -1, 1, 10.0, 20.0, 30.0, 25.0, false);
         assert!(!r.long);
     }
 
     #[test]
     fn test_detect_entry_nan_inputs_suppress_signal() {
-        let r = detect_entry(105.0, f64::NAN, -1, 1, -50.0, -40.0, -20.0, -30.0);
+        let r = detect_entry(105.0, f64::NAN, -1, 1, -50.0, -40.0, -20.0, -30.0, false);
         assert!(!r.long && !r.short);
-        let r = detect_entry(105.0, 100.0, -1, 1, f64::NAN, -40.0, -20.0, -30.0);
+        let r = detect_entry(105.0, 100.0, -1, 1, f64::NAN, -40.0, -20.0, -30.0, false);
         assert!(!r.long && !r.short);
+    }
+
+    // ── cross_above_zero toggle (Path-B experiment, Spec §12.5) ─────────
+
+    #[test]
+    fn test_detect_entry_cross_above_zero_inverts_long_gate() {
+        // SAME inputs that fired Long in strict mode (smi cross while
+        // below zero) MUST be suppressed in cross_above_zero mode — the
+        // gate is now "above zero" for long.
+        let r = detect_entry(
+            105.0, 100.0, -1, 1, -50.0, -40.0, -20.0, -30.0,
+            /* cross_above_zero */ true,
+        );
+        assert!(!r.long, "strict-mode long must NOT fire in cross_above_zero mode");
+        assert!(!r.short);
+    }
+
+    #[test]
+    fn test_detect_entry_cross_above_zero_fires_long_when_smi_positive() {
+        // Long requires SMI cross-up while above zero in the relaxed mode.
+        let r = detect_entry(
+            105.0, 100.0,
+            /* dir_prev */ -1, /* dir_now */ 1,
+            /* smi_prev */ 10.0, /* sig_prev */ 20.0,
+            /* smi_now */ 30.0, /* sig_now */ 25.0,
+            /* cross_above_zero */ true,
+        );
+        assert!(r.long, "cross_above_zero mode must fire long on above-zero cross");
+        assert!(!r.short);
+    }
+
+    #[test]
+    fn test_detect_entry_cross_above_zero_fires_short_when_smi_negative() {
+        // Mirror — short requires SMI cross-down while below zero in
+        // the relaxed mode.
+        let r = detect_entry(
+            95.0, 100.0,
+            /* dir_prev */ 1, /* dir_now */ -1,
+            /* smi_prev */ -10.0, /* sig_prev */ -20.0,
+            /* smi_now */ -30.0, /* sig_now */ -25.0,
+            /* cross_above_zero */ true,
+        );
+        assert!(!r.long);
+        assert!(r.short, "cross_above_zero mode must fire short on below-zero cross");
     }
 
     // ── Strategy integration tests ──────────────────────────────────────
@@ -1314,8 +1387,8 @@ mod tests {
         // ema_period, key_value, atr_period, smi_length, smi_k_smoothing,
         // smi_d_smoothing, swing_lookback_bars, tp_rr_ratio, risk_per_trade,
         // session_filter_enabled, session_start_hour_local,
-        // session_end_hour_local → 12 parameters.
-        assert_eq!(m.parameters.len(), 12);
+        // session_end_hour_local, smi_cross_above_zero → 13 parameters.
+        assert_eq!(m.parameters.len(), 13);
         for required in [
             "ema_period",
             "key_value",
@@ -1329,6 +1402,7 @@ mod tests {
             "session_filter_enabled",
             "session_start_hour_local",
             "session_end_hour_local",
+            "smi_cross_above_zero",
         ] {
             assert!(
                 m.parameters.iter().any(|p| p.name == required),
