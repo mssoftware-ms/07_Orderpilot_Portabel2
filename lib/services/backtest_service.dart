@@ -12,6 +12,7 @@ import '../core/models/trade.dart';
 import 'equity.dart';
 import 'indicators.dart';
 import 'sharpe.dart';
+import 'strategy_common.dart';
 
 // ─── Engine-specific result models ──────────────────────────────────────────
 // Trade and metrics types are imported from lib/core/models/trade.dart —
@@ -913,14 +914,15 @@ class BacktestService {
       // Step C — strategy decision queues a pending order for next bar.
       if (i >= startIdx && pending == null && position == null) {
         // Session filter (default off). Berlin-local hour-of-day using
-        // fixed UTC+1 (no DST) — see `is_in_session` doc in the Rust
-        // module. With BTC + filter-disabled this is a no-op.
+        // fixed UTC+1 (no DST) — see `withinSession` in
+        // `strategy_common.dart`. With BTC + filter-disabled this is a no-op.
         bool sessionOk = true;
         if (params.sessionFilterEnabled) {
-          sessionOk = _isInSession(
+          sessionOk = withinSession(
             candle.timestamp,
             params.sessionStartHourLocal,
             params.sessionEndHourLocal,
+            1,
           );
         }
         if (sessionOk) {
@@ -1075,22 +1077,6 @@ class BacktestService {
       equityCurve: const [],
       trades: const [],
     );
-  }
-
-  /// Berlin-local session window check used by [runUtBot].
-  /// Fixed UTC+1 (no DST) — mirrors `is_in_session` in
-  /// `rust/trading_engine/src/addins/ut_bot.rs`.
-  static bool _isInSession(int timestampMs, int startHour, int endHour) {
-    final secsUtc = timestampMs ~/ 1000;
-    final secsLocal = secsUtc + 3600;
-    final hour = ((secsLocal ~/ 3600) % 24).toInt();
-    final start = startHour % 24;
-    final end = endHour % 24;
-    if (start == end) return false;
-    if (start < end) {
-      return hour >= start && hour < end;
-    }
-    return hour >= start || hour < end;
   }
 
   /// Compute RSI using Wilder's smoothing method.

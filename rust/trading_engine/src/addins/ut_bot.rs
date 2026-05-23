@@ -10,16 +10,13 @@
 //! # Module layout
 //!
 //! Welle U1 lands the ATR helper only. Welle U2 extends this module with
-//! the SMI helper, the UT-Bot trail-state helper, the session filter, and
-//! the full [`StrategyAddin`] implementation. Helpers are kept local to
-//! this file per QA decision F1 (lokal mit TODO-Marker); a shared
-//! `addins/indicators.rs` refactor is deferred to the third strategy.
-
-// TODO(phase-3): once a third strategy (e.g. Ichimoku) is implemented,
-// extract `calc_atr`, `calc_smi`, `update_ut_bot_trail`, and the session
-// filter into a shared `rust/trading_engine/src/addins/indicators.rs`
-// module to avoid duplication across strategies (Spec §12.2 / engineering
-// plan §3 Frage 1 + Frage 4).
+//! the SMI helper, the UT-Bot trail-state helper, and the full
+//! [`StrategyAddin`] implementation. The session filter was extracted to
+//! [`crate::addins::common::within_session`] in Welle I2-0 once the third
+//! strategy (Ichimoku) needed the same window check (engineering plan
+//! §4.1 Rule-of-Three). Indicator helpers (`calc_atr`, `calc_smi`,
+//! `calc_ut_bot_trail`) remain local to this file because no other
+//! strategy consumes them yet.
 
 // ─── Indicator helpers (pure functions) ─────────────────────────────────────
 
@@ -319,42 +316,6 @@ pub fn calc_ut_bot_trail(
     Some((trail, direction))
 }
 
-// ─── Session filter ─────────────────────────────────────────────────────────
-
-/// Return `true` if the bar's timestamp falls inside the local-hour
-/// window `[start_hour, end_hour)` in Europe/Berlin time.
-///
-/// Convention:
-/// - Berlin offset is approximated as **fixed UTC+1** (no DST). For BTC
-///   the session filter is shipped disabled (`session_filter_enabled = 0`),
-///   so DST drift has no real effect on the default Phase-2 backtests.
-///   Spec §7 documents the 09:00–23:00 window; this helper enforces it
-///   in a parity-friendly way that works identically in Dart.
-/// - `start_hour <= end_hour` → straightforward inclusive-exclusive
-///   window (so `end_hour = 23` excludes 23:00:00 itself).
-/// - `start_hour > end_hour` → overnight wrap-around window
-///   `[start_hour, 24) ∪ [0, end_hour)`.
-///
-/// Hours outside `[0, 24]` are treated as their modulo-24 value.
-pub fn is_in_session(timestamp_ms: i64, start_hour: i32, end_hour: i32) -> bool {
-    // Convert ms → seconds → local hour-of-day (fixed UTC+1).
-    let secs_utc = timestamp_ms.div_euclid(1000);
-    let secs_local = secs_utc + 3600; // Berlin = UTC+1 (no DST)
-    let hour = (secs_local.div_euclid(3600).rem_euclid(24)) as i32;
-    let start = start_hour.rem_euclid(24);
-    let end = end_hour.rem_euclid(24);
-    if start == end {
-        // Degenerate window — treat as "all day off" so the filter is a
-        // no-op rather than silently activating 24/7.
-        return false;
-    }
-    if start < end {
-        hour >= start && hour < end
-    } else {
-        hour >= start || hour < end
-    }
-}
-
 // ─── Confluence detection (pure, unit-testable) ─────────────────────────────
 
 /// Result of the per-bar UT-Bot confluence check (Spec §2 / §3).
@@ -431,6 +392,7 @@ use crate::strategy::{
 };
 
 use super::bb_rsi::{calc_ema, position_size_pct, swing_high, swing_low};
+use super::common::within_session;
 
 /// UT Bot Alerts (verbesserte Variante) strategy add-in.
 ///
@@ -478,8 +440,8 @@ impl StrategyAddin for UtBotStrategy {
         let tp_rr_ratio = ctx.param_or("tp_rr_ratio", 2.0);
         let risk_per_trade = ctx.param_or("risk_per_trade", 0.02);
         let session_enabled = ctx.param_or("session_filter_enabled", 0.0) >= 0.5;
-        let session_start = ctx.param_or("session_start_hour_local", 9.0) as i32;
-        let session_end = ctx.param_or("session_end_hour_local", 23.0) as i32;
+        let session_start = ctx.param_or("session_start_hour_local", 9.0) as u32;
+        let session_end = ctx.param_or("session_end_hour_local", 23.0) as u32;
         // Path-B toggle (Spec §12.5 / §13.3): default false = strict spec
         // (SMI cross while same-sign with zero); true flips the zero-line
         // gate per `detect_entry` doc.
@@ -531,8 +493,11 @@ impl StrategyAddin for UtBotStrategy {
         // Session filter — default off (encoded as f64 0.0). When
         // enabled and the bar falls outside `[start, end)` local Berlin
         // time, no new entries fire. Open positions are unaffected
-        // (engine-side SL/TP/BE-trail still applies).
-        if session_enabled && !is_in_session(current_ts, session_start, session_end) {
+        // (engine-side SL/TP/BE-trail still applies). Berlin offset is
+        // fixed UTC+1 (no DST) — see `within_session` doc in addins/common.rs.
+        if session_enabled
+            && !within_session(current_ts, session_start, session_end, 1)
+        {
             return Some(Signal::NoAction);
         }
 
@@ -1203,60 +1168,20 @@ mod tests {
         }
     }
 
-    // ── Session filter tests ────────────────────────────────────────────
+    // ── Session-fixture helper (used by strategy-integration tests) ─────
+    //
+    // The six standalone `is_in_session` unit tests moved to
+    // `addins/common.rs` in Welle I2-0 together with the helper itself.
+    // Only `ts_at_utc_hour` stays here because the strategy-level
+    // session-filter tests below still need it to build off-hours bars.
 
     /// Helper: build a UTC timestamp for `hour` (0..23) on 2024-01-15.
-    /// Berlin offset is fixed UTC+1 in the helper, so the local hour
-    /// equals `hour_utc + 1` (mod 24).
+    /// With the Berlin = UTC+1 convention used by [`UtBotStrategy`], the
+    /// local hour equals `hour_utc + 1` (mod 24).
     fn ts_at_utc_hour(hour: i64) -> i64 {
         // 2024-01-15 00:00:00 UTC = 1705276800000 ms (no DST in January).
         const BASE_UTC_MS: i64 = 1_705_276_800_000;
         BASE_UTC_MS + hour * 3_600_000
-    }
-
-    #[test]
-    fn test_session_filter_inside_window() {
-        // Window 09:00–23:00 Berlin (= 08:00–22:00 UTC).
-        // UTC 10:00 → local 11:00 → inside.
-        assert!(is_in_session(ts_at_utc_hour(10), 9, 23));
-    }
-
-    #[test]
-    fn test_session_filter_before_window() {
-        // UTC 03:00 → local 04:00 → outside (before 09:00).
-        assert!(!is_in_session(ts_at_utc_hour(3), 9, 23));
-    }
-
-    #[test]
-    fn test_session_filter_at_window_start_inclusive() {
-        // UTC 08:00 → local 09:00 exactly → inside (`>= start`).
-        assert!(is_in_session(ts_at_utc_hour(8), 9, 23));
-    }
-
-    #[test]
-    fn test_session_filter_at_window_end_exclusive() {
-        // UTC 22:00 → local 23:00 exactly → outside (`< end`).
-        assert!(!is_in_session(ts_at_utc_hour(22), 9, 23));
-    }
-
-    #[test]
-    fn test_session_filter_overnight_wrap() {
-        // Window 22:00–06:00 Berlin: bars at local 23 and local 02
-        // are inside, bar at local 10 is outside.
-        // local 23 = UTC 22
-        assert!(is_in_session(ts_at_utc_hour(22), 22, 6));
-        // local 02 = UTC 01
-        assert!(is_in_session(ts_at_utc_hour(1), 22, 6));
-        // local 10 = UTC 09
-        assert!(!is_in_session(ts_at_utc_hour(9), 22, 6));
-    }
-
-    #[test]
-    fn test_session_filter_degenerate_window_is_off() {
-        // start == end → no-op (always returns false). Pins the
-        // documented degenerate behavior so an accidental `start=end`
-        // config does not silently enable a 24/7 filter.
-        assert!(!is_in_session(ts_at_utc_hour(10), 12, 12));
     }
 
     // ── detect_entry confluence tests ───────────────────────────────────
