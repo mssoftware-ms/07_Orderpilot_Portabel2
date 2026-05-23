@@ -44,9 +44,9 @@ List<List<dynamic>> _hourlyKlines(int n, {required int startMs}) =>
 void main() {
   // Plan-skeleton constants. The current `downloadHistory` API only takes
   // `days: int` and computes `now` internally — that is precisely where the
-  // bug lives. T0 / days() are kept here to document the logical intent of
-  // the test (a fixed 7-day window).
-  final T0 =
+  // bug lives. `t0` / `days()` are kept here to document the logical intent
+  // of the test (a fixed 7-day window).
+  final t0 =
       DateTime.utc(2024, 1, 1).millisecondsSinceEpoch; // > 7 days in the past
   int days(int n) => Duration(days: n).inMilliseconds;
 
@@ -65,8 +65,8 @@ void main() {
 
     test('downloadHistory hits cache on second call within same hour',
         () async {
-      // Sanity: T0 / days() helpers are well-defined.
-      expect(T0, lessThan(DateTime.now().millisecondsSinceEpoch));
+      // Sanity: t0 / days() helpers are well-defined.
+      expect(t0, lessThan(DateTime.now().millisecondsSinceEpoch));
       expect(days(7), equals(7 * 24 * 60 * 60 * 1000));
 
       int callCount = 0;
@@ -107,6 +107,15 @@ void main() {
             'Second downloadHistory call within the same hour must hit the '
             'disk cache instead of producing a fresh cache file. '
             'Cache key must round endtime to the last full hour.',
+      );
+
+      // Stronger assertion: the second call must not hit the network at all.
+      expect(
+        callCount,
+        equals(1),
+        reason:
+            'Second downloadHistory call within the same hour must serve '
+            'from cache without invoking the HTTP client.',
       );
 
       client.dispose();
