@@ -24,66 +24,54 @@ import 'package:trading_app/core/models/candle.dart';
 import 'package:trading_app/services/backtest_service.dart';
 
 /// Build a fixture that produces exactly one SHORT trade closed via the
-/// intra-candle TP path (F-02 contract).
-///
-/// Post-Diff-D-04 the short entry trigger is `close < lower BB + RSI <
-/// oversold`, so the fixture is now a 30-candle upward drift followed
-/// by a 4-candle crash — mirror image of the pre-Phase-2 surge fixture.
-/// The exit candle has `low = 0` which crosses any positive TP, so the
-/// short position closes intra-bar via TP. Flat tail at 60 holds the
-/// trade closed without re-triggering.
+/// intra-candle TP path under Phase-2 trend-follow + RSI-cross entry
+/// (Diff D-04 + D-05). Mirror of the F-02 long-SL fixture flipped to
+/// the short side:
+///   1. 20 flat candles at 100 train BB(20).
+///   2. 14-bar ascent (+2 per bar, 100 → 128) drives RSI(14) toward 100.
+///   3. Single crash bar (close=80) takes price below the lower band
+///      AND crosses RSI down through 70 → SHORT signal pending at
+///      index 34, filled at the open of index 35.
+///   4. Exit candle at index 35 with low=0 trips the TP placeholder
+///      (2*lower - middle ≈ 63).
+///   5. Flat tail at 90 — RSI converges, no re-entry possible.
 List<CandleData> _buildShortTpFixture() {
   const baseTs = 1_700_000_000_000;
   final candles = <CandleData>[];
 
-  // Phase 1: upward drift trains BB high.
-  for (int i = 0; i < 30; i++) {
-    final close = 100.0 + i * 0.5;
+  for (int i = 0; i < 20; i++) {
     candles.add(CandleData(
       timestamp: baseTs + i * 3_600_000,
-      open: close - 0.1,
-      high: close + 0.3,
-      low: close - 0.3,
-      close: close,
-      volume: 1_000.0,
+      open: 100.1, high: 100.3, low: 99.7, close: 100.0, volume: 1_000.0,
     ));
   }
 
-  // Phase 2: sharp crash pushes close below lower BB; RSI plunges.
-  final crash = [100.0, 90.0, 80.0, 70.0];
-  for (int j = 0; j < crash.length; j++) {
-    final i = 30 + j;
-    final close = crash[j];
+  for (int i = 0; i < 14; i++) {
+    final close = 100.0 + (i + 1) * 2.0; // 102, 104, …, 128
     candles.add(CandleData(
-      timestamp: baseTs + i * 3_600_000,
-      open: close + 0.5,
-      high: close + 0.5,
-      low: close - 0.5,
-      close: close,
-      volume: 1_000.0,
+      timestamp: baseTs + (20 + i) * 3_600_000,
+      open: close - 0.5, high: close + 0.5, low: close - 0.5,
+      close: close, volume: 1_000.0,
     ));
   }
 
-  // TP-exit candle: low=0 crosses any positive TP.
+  // Crash bar — close=80 < lower(~86), RSI(14) crosses DOWN through 70.
   candles.add(CandleData(
     timestamp: baseTs + 34 * 3_600_000,
-    open: 70.0,
-    high: 70.0,
-    low: 0.0,
-    close: 60.0,
-    volume: 1_000.0,
+    open: 127.5, high: 128.0, low: 80.0, close: 80.0, volume: 1_000.0,
   ));
 
-  // Flat tail — close=60 stays below BB middle but RSI normalises so
-  // the (current placeholder) re-entry conditions don't fire.
-  for (int i = 35; i < 60; i++) {
+  // TP-exit candle: low=0 trips TP placeholder well above 0.
+  candles.add(CandleData(
+    timestamp: baseTs + 35 * 3_600_000,
+    open: 80.0, high: 80.0, low: 0.0, close: 90.0, volume: 1_000.0,
+  ));
+
+  // Flat tail at 90 — no re-entry possible.
+  for (int i = 36; i < 60; i++) {
     candles.add(CandleData(
       timestamp: baseTs + i * 3_600_000,
-      open: 60.0,
-      high: 60.5,
-      low: 59.5,
-      close: 60.0,
-      volume: 1_000.0,
+      open: 90.0, high: 90.5, low: 89.5, close: 90.0, volume: 1_000.0,
     ));
   }
   return candles;

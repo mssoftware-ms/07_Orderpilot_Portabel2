@@ -75,24 +75,75 @@ void main() {
     });
 
     test('custom params are respected', () {
-      final candles = generateCandles(500);
+      // Phase-2 trend-follow + RSI cross trigger needs a dip+surge
+      // pattern to produce trades; the triangular wave from
+      // generateCandles doesn't align the cross with the close-extreme.
+      // Build a small dip+surge inline so both BB(10) and BB(30) on
+      // pinned Phase-1 SMA + RSI(7)/RSI(21) generate non-identical
+      // engine output.
+      final candles = <CandleData>[];
+      final baseTs = DateTime(2024, 1, 1).millisecondsSinceEpoch;
+      for (int i = 0; i < 25; i++) {
+        candles.add(CandleData(
+          timestamp: baseTs + i * 3600000,
+          open: 99.9, high: 100.3, low: 99.7, close: 100.0, volume: 1000.0,
+        ));
+      }
+      for (int i = 0; i < 14; i++) {
+        final close = 100.0 - (i + 1) * 2.0;
+        candles.add(CandleData(
+          timestamp: baseTs + (25 + i) * 3600000,
+          open: close + 0.5, high: close + 0.5, low: close - 0.5,
+          close: close, volume: 1000.0,
+        ));
+      }
+      candles.add(CandleData(
+        timestamp: baseTs + 39 * 3600000,
+        open: 72.5, high: 120.5, low: 72.0, close: 120.0, volume: 1000.0,
+      ));
+      candles.add(CandleData(
+        timestamp: baseTs + 40 * 3600000,
+        open: 119.0, high: 120.0, low: 0.0, close: 110.0, volume: 1000.0,
+      ));
+      for (int i = 41; i < 100; i++) {
+        candles.add(CandleData(
+          timestamp: baseTs + i * 3600000,
+          open: 110.0, high: 110.5, low: 109.5, close: 110.0, volume: 1000.0,
+        ));
+      }
+
       final result1 = BacktestService.runBbRsi(
         candles: candles,
         initialBalance: 10000,
         feeRate: 0.0006,
-        params: const BbRsiParams(bbPeriod: 10, rsiPeriod: 7),
+        params: const BbRsiParams(
+          bbPeriod: 10,
+          bbStdDev: 2.0,
+          bbMaType: BbMaType.sma,
+          rsiPeriod: 7,
+          rsiOversold: 30.0,
+          rsiOverbought: 70.0,
+        ),
       );
       final result2 = BacktestService.runBbRsi(
         candles: candles,
         initialBalance: 10000,
         feeRate: 0.0006,
-        params: const BbRsiParams(bbPeriod: 30, rsiPeriod: 21),
+        params: const BbRsiParams(
+          bbPeriod: 30,
+          bbStdDev: 2.0,
+          bbMaType: BbMaType.sma,
+          rsiPeriod: 21,
+          rsiOversold: 30.0,
+          rsiOverbought: 70.0,
+        ),
       );
 
-      // Different params should produce different results
-      // (not necessarily, but with synthetic data they should differ)
-      expect(result1.metrics.totalTrades != result2.metrics.totalTrades ||
-             result1.metrics.totalPnl != result2.metrics.totalPnl, isTrue);
+      expect(
+        result1.metrics.totalTrades != result2.metrics.totalTrades ||
+            result1.metrics.totalPnl != result2.metrics.totalPnl,
+        isTrue,
+      );
     });
 
     test('fees are tracked correctly', () {

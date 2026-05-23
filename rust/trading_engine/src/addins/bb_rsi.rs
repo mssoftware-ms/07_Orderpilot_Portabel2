@@ -1,9 +1,10 @@
 //! Bollinger Bands + RSI Strategy Add-in.
 //!
-//! Defaults and entry direction match the video-spec "verbesserte
-//! Variante" (see `01_Projectplan/specs/bb_rsi_spec.md` §1–§3, Diff
-//! D-01..D-04). The RSI cross trigger (D-05) and BB-middle / RSI-extreme
-//! exit removal (D-11) land in subsequent commits.
+//! Defaults, entry direction and RSI cross-back trigger match the
+//! video-spec "verbesserte Variante" (see
+//! `01_Projectplan/specs/bb_rsi_spec.md` §1–§3, Diff D-01..D-05). The
+//! BB-middle / RSI-extreme exit removal (D-11) and the R:R 1:3 +
+//! swing-low SL (D-06/D-07/D-08/D-09) land in subsequent commits.
 //!
 //! # Parameters
 //! | Name            | Default | Range    | Description                                  |
@@ -178,6 +179,10 @@ pub struct BbRsiState {
     pub last_bb: Option<BollingerBands>,
     /// Last computed RSI value.
     pub last_rsi: Option<f64>,
+    /// RSI value from the previous bar — required by the Diff D-05 cross
+    /// check. `None` on the first valid bar after warm-up, in which case
+    /// no cross can be observed yet.
+    pub prev_rsi: Option<f64>,
     /// Whether we are in a long position.
     pub in_long: bool,
     /// Whether we are in a short position.
@@ -274,9 +279,13 @@ impl StrategyAddin for BbRsiStrategy {
         ctx.set_state("bb_lower", bb.lower);
         ctx.set_state("rsi", rsi);
 
-        // Persist in our own struct too
+        // Persist in our own struct too. `prev_rsi` is rotated from
+        // last_rsi BEFORE overwriting it, so the entry block below can
+        // observe (prev_rsi, rsi) of the cross.
+        let prev_rsi = self.state.last_rsi;
         self.state.last_bb = Some(bb);
         self.state.last_rsi = Some(rsi);
+        self.state.prev_rsi = prev_rsi;
 
         let price = ctx.current_price();
 
@@ -306,34 +315,36 @@ impl StrategyAddin for BbRsiStrategy {
         }
 
         // ── Entry logic ─────────────────────────────────────────────────
-        // Diff D-03/D-04: long when price closes above upper BB with RSI
-        // confirming momentum (RSI > overbought), short when price closes
-        // below lower BB with RSI confirming exhaustion (RSI < oversold).
-        // Strict `>` / `<` on price per spec; the RSI threshold gets
-        // replaced by an event-based cross check in the next commit
-        // (D-05). SL/TP placeholders mirror the old BB-geometry pattern
-        // for the new direction so basic invariants hold (long SL <
-        // entry < long TP); the video-spec R:R 1:3 + swing-low SL land
-        // in Welle 2 (D-06 / D-07).
+        // Diff D-03/D-04 + Diff D-05: trend-follow + RSI cross-back
+        // through the oversold/overbought level per video-spec §2/§3.
+        //   Long  ⇔ price > BB.upper AND RSI(prev) < oversold AND RSI(cur) ≥ oversold
+        //   Short ⇔ price < BB.lower AND RSI(prev) > overbought AND RSI(cur) ≤ overbought
+        // Strict comparison on the prev side prevents re-triggering after
+        // RSI flatlines on a threshold. `None` for prev_rsi (first valid
+        // bar after warm-up) suppresses the cross — no signal possible.
+        // SL/TP placeholders are still the BB-geometry mirror from
+        // Diff D-04; video-spec R:R 1:3 + swing-low SL land in Welle 2.
         if !ctx.in_position {
-            if price > bb.upper && rsi > rsi_overbought {
-                self.state.in_long = true;
-                self.state.in_short = false;
-                ctx.in_position = true;
-                return Some(Signal::long(
-                    Some(bb.middle),
-                    Some(bb.upper + (bb.upper - bb.middle)),
-                ));
-            }
+            if let Some(prev) = prev_rsi {
+                if price > bb.upper && prev < rsi_oversold && rsi >= rsi_oversold {
+                    self.state.in_long = true;
+                    self.state.in_short = false;
+                    ctx.in_position = true;
+                    return Some(Signal::long(
+                        Some(bb.middle),
+                        Some(bb.upper + (bb.upper - bb.middle)),
+                    ));
+                }
 
-            if price < bb.lower && rsi < rsi_oversold {
-                self.state.in_short = true;
-                self.state.in_long = false;
-                ctx.in_position = true;
-                return Some(Signal::short(
-                    Some(bb.middle),
-                    Some(bb.lower - (bb.middle - bb.lower)),
-                ));
+                if price < bb.lower && prev > rsi_overbought && rsi <= rsi_overbought {
+                    self.state.in_short = true;
+                    self.state.in_long = false;
+                    ctx.in_position = true;
+                    return Some(Signal::short(
+                        Some(bb.middle),
+                        Some(bb.lower - (bb.middle - bb.lower)),
+                    ));
+                }
             }
         }
 
@@ -754,14 +765,16 @@ mod tests {
 
     #[test]
     fn test_strategy_long_entry_signal() {
-        // Phase-2 entry inversion (Diff D-03): a long is now triggered
-        // by close > upper BB + RSI overbought, i.e. a sharp RISE not
-        // a sharp drop. The 38-candle fixture mirrors the previous
-        // Phase-1 long-signal test, flipped to the new trigger direction.
-        let mut closes = vec![100.0; 30];
-        for i in 0..8 {
-            closes.push(100.0 + (i as f64 + 1.0) * 2.0);
+        // Phase-2 entry (Diff D-03 + D-05): long requires close > upper
+        // AND RSI cross UP through oversold. The fixture has to first
+        // drive RSI(14) below 30 (sustained decline), then push price
+        // above the upper band on a single surge bar so RSI crosses
+        // back through 30 on the same bar.
+        let mut closes = vec![100.0; 20]; // BB warmup at 100
+        for i in 0..14 {
+            closes.push(100.0 - (i as f64 + 1.0) * 2.0); // 98, 96, …, 72
         }
+        closes.push(120.0); // surge: close > upper, RSI crosses UP through 30
         let candles: Vec<Candle> = closes
             .iter()
             .enumerate()
@@ -774,12 +787,14 @@ mod tests {
 
     #[test]
     fn test_strategy_short_entry_signal() {
-        // Diff D-04: a short is now triggered by close < lower BB + RSI
-        // oversold. Sharp drop fixture, mirror of the long-entry test.
-        let mut closes = vec![100.0; 30];
-        for i in 0..8 {
-            closes.push(100.0 - (i as f64 + 1.0) * 2.0);
+        // Mirror of the long-entry fixture: 14-bar ascent drives RSI(14)
+        // above 70, then a single crash bar pulls close below the lower
+        // band so RSI crosses DOWN through 70 on the same bar.
+        let mut closes = vec![100.0; 20];
+        for i in 0..14 {
+            closes.push(100.0 + (i as f64 + 1.0) * 2.0); // 102, 104, …, 128
         }
+        closes.push(80.0); // crash: close < lower, RSI crosses DOWN through 70
         let candles: Vec<Candle> = closes
             .iter()
             .enumerate()

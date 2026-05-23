@@ -20,31 +20,57 @@
 /// Plan rev2 normative paragraph.
 library;
 
-import 'dart:math' as math;
-
 import 'package:flutter_test/flutter_test.dart';
 import 'package:trading_app/core/models/candle.dart';
 import 'package:trading_app/services/backtest_service.dart';
 
-/// The 200-candle parity fixture, copied verbatim from
-/// test/integration/dart_rust_parity_test.dart so this regression is
-/// self-contained and does not import a test-only helper.
+/// Fixture that produces at least one trade under the Phase-2 trend-
+/// follow + RSI-cross entry logic (Diff D-03..D-05): 20 flat candles +
+/// 14-bar decline to drive RSI(14) ≈ 0 + a single surge bar that
+/// crosses RSI through 30 and pushes close > upper → LONG signal +
+/// SL-exit candle with low=0 + flat tail.
+///
+/// Replaces the previous sinusoidal F-01 parity fixture, which never
+/// satisfies the cross condition AND close-extreme requirement on the
+/// same bar — under Phase-2 logic it would yield 0 trades, turning
+/// this regression into a tautology.
 List<CandleData> _generateParityFixture() {
-  final candles = <CandleData>[];
   const baseTs = 1700000000000;
-  const baseline = 50000.0;
-  const amplitude = 8000.0;
-  const period = 30.0;
-  for (int i = 0; i < 200; i++) {
-    final phase = 2 * math.pi * i / period;
-    final price = baseline + amplitude * math.sin(phase);
+  final candles = <CandleData>[];
+
+  // Phase 1: 20 flat candles at 100.0.
+  for (int i = 0; i < 20; i++) {
     candles.add(CandleData(
       timestamp: baseTs + i * 3600000,
-      open: price - 20,
-      high: price + 100,
-      low: price - 100,
-      close: price,
-      volume: 1000.0 + i,
+      open: 99.9, high: 100.3, low: 99.7, close: 100.0, volume: 1000.0 + i,
+    ));
+  }
+  // Phase 2: 14-bar decline.
+  for (int i = 0; i < 14; i++) {
+    final close = 100.0 - (i + 1) * 2.0;
+    candles.add(CandleData(
+      timestamp: baseTs + (20 + i) * 3600000,
+      open: close + 0.5, high: close + 0.5, low: close - 0.5,
+      close: close, volume: 1000.0 + 20 + i,
+    ));
+  }
+  // Phase 3: surge bar that triggers the LONG signal.
+  candles.add(CandleData(
+    timestamp: baseTs + 34 * 3600000,
+    open: 72.5, high: 120.5, low: 72.0, close: 120.0, volume: 1034.0,
+  ));
+  // Phase 4: SL-exit candle. open=119.0 (≠ signal-bar close=120.0) so
+  // the F-04 "entry price != prior bar's close" smoking-gun assertion
+  // has a non-trivial gap to detect; low=0 trips placeholder SL ≈ middle.
+  candles.add(CandleData(
+    timestamp: baseTs + 35 * 3600000,
+    open: 119.0, high: 120.0, low: 0.0, close: 110.0, volume: 1035.0,
+  ));
+  // Phase 5: flat tail at 110.
+  for (int i = 36; i < 200; i++) {
+    candles.add(CandleData(
+      timestamp: baseTs + i * 3600000,
+      open: 110.0, high: 110.5, low: 109.5, close: 110.0, volume: 1000.0 + i,
     ));
   }
   return candles;

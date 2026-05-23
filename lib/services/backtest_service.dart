@@ -253,6 +253,12 @@ class BacktestService {
     final returns = <double>[];
     double prevEquity = initialBalance;
 
+    // Previous bar's RSI for the Diff D-05 cross check. Rotated at the
+    // end of each post-warm-up iteration so the first cross can fire on
+    // bar `startIdx + 1` at the earliest — mirrors the Rust
+    // BbRsiStrategy's `prev_rsi` state semantics.
+    double? prevRsi;
+
     final startIdx = math.max(params.bbPeriod, params.rsiPeriod + 1);
     final slipFactor = params.slippageBps / 10000.0;
 
@@ -381,48 +387,62 @@ class BacktestService {
       // (BB middle / opposite RSI extreme) both queue pending; only the
       // price-triggered SL/TP exits in Step B fill on the same bar.
       // Skipped during indicator warm-up.
-      if (i >= startIdx && pending == null) {
+      if (i >= startIdx) {
         final close = candle.close;
         final rsi = rsiValues[i];
-        final lower = bbLower[i];
-        final middle = bbMiddle[i];
-        final upper = bbUpper[i];
 
-        if (position == null) {
-          // Diff D-03/D-04 (Phase-2): trend-following entries. Long when
-          // close > BB upper with RSI confirming momentum (> overbought);
-          // short when close < BB lower with RSI confirming exhaustion
-          // (< oversold). Strict `>` / `<` on price per spec. SL/TP
-          // placeholders mirror the old BB-geometry pattern for the new
-          // direction so basic invariants hold (long SL < entry < long
-          // TP); the video-spec R:R 1:3 + swing-low SL land in Welle 2
-          // (D-06 / D-07). Mirrors Rust BbRsiStrategy::on_candle.
-          if (close > upper && rsi > params.rsiOverbought) {
-            pending = _PendingEnterLong(middle, 2 * upper - middle);
-          } else if (close < lower && rsi < params.rsiOversold) {
-            pending = _PendingEnterShort(middle, 2 * lower - middle);
-          }
-        } else {
-          // Intermediate exit conditions inverted to stay coherent with
-          // the new trend-follow entries (close back to / past middle =
-          // trend over; RSI flipping to the opposite extreme = trend
-          // reversal). Diff D-11 removes this whole block in the next
-          // commit; final spec uses only SL/TP exits set at entry.
-          final pos = position!;
-          if (pos.isLong) {
-            if (close <= middle) {
-              pending = _PendingExit('BB Middle');
-            } else if (rsi < params.rsiOversold) {
-              pending = _PendingExit('RSI Oversold');
+        if (pending == null) {
+          final lower = bbLower[i];
+          final middle = bbMiddle[i];
+          final upper = bbUpper[i];
+
+          if (position == null) {
+            // Diff D-03/D-04 + Diff D-05: trend-follow + RSI cross-back
+            // through the oversold/overbought level (video spec §2/§3).
+            //   Long  ⇔ close > upper AND prev_rsi < oversold AND rsi ≥ oversold
+            //   Short ⇔ close < lower AND prev_rsi > overbought AND rsi ≤ overbought
+            // Null prev_rsi (first bar after warm-up) suppresses the
+            // cross — no signal possible. SL/TP placeholders mirror the
+            // BB-geometry pattern of Diff D-04; the video-spec R:R 1:3 +
+            // swing-low SL land in Welle 2.
+            final prev = prevRsi;
+            if (prev != null) {
+              if (close > upper &&
+                  prev < params.rsiOversold &&
+                  rsi >= params.rsiOversold) {
+                pending = _PendingEnterLong(middle, 2 * upper - middle);
+              } else if (close < lower &&
+                  prev > params.rsiOverbought &&
+                  rsi <= params.rsiOverbought) {
+                pending = _PendingEnterShort(middle, 2 * lower - middle);
+              }
             }
           } else {
-            if (close >= middle) {
-              pending = _PendingExit('BB Middle');
-            } else if (rsi > params.rsiOverbought) {
-              pending = _PendingExit('RSI Overbought');
+            // Intermediate exit conditions, removed entirely in Diff
+            // D-11 (next commit). Direction mirrors the new trend-follow
+            // entries (close past middle = trend over; RSI flipping to
+            // the opposite extreme = trend reversal).
+            final pos = position!;
+            if (pos.isLong) {
+              if (close <= middle) {
+                pending = _PendingExit('BB Middle');
+              } else if (rsi < params.rsiOversold) {
+                pending = _PendingExit('RSI Oversold');
+              }
+            } else {
+              if (close >= middle) {
+                pending = _PendingExit('BB Middle');
+              } else if (rsi > params.rsiOverbought) {
+                pending = _PendingExit('RSI Overbought');
+              }
             }
           }
         }
+
+        // Rotate prevRsi for the next iteration regardless of whether a
+        // decision fired this bar, mirroring Rust's `state.last_rsi`
+        // rotation in on_candle.
+        prevRsi = rsi;
       }
 
       // ── Step D: equity + drawdown + per-candle return. ──
