@@ -324,3 +324,66 @@ double? calcEma(List<double> values, int period) {
   }
   return ema;
 }
+
+// ─── Ichimoku rolling-window primitives (Phase-2 Welle I1) ──────────────────
+
+/// Maximum of `values[endIdx + 1 - period ..= endIdx]` — the highest
+/// value across the last `period` samples **including the bar at
+/// `endIdx` itself**.
+///
+/// `endIdx` is **inclusive** — at index `i` with `period = N`, the
+/// helper looks at the `N` bars ending at bar `i`. This matches the
+/// Ichimoku convention `HH_N = highest(high, N)` (Spec §1) and the
+/// pandas-ta `ta.highest` / Pinescript `ta.highest` operators.
+///
+/// Returns `double.nan` when the window cannot be filled:
+/// - `period == 0`
+/// - `values` is empty
+/// - `endIdx >= values.length`
+/// - `period > endIdx + 1` (warm-up region — fewer than `period`
+///   samples available at or before `endIdx`)
+///
+/// NaN samples inside a valid window propagate (any NaN ⇒ NaN result),
+/// matching the Pinescript/pandas-ta semantics where `na` poisons the
+/// aggregate. Locked bit-identical against `rolling_max` in
+/// `rust/trading_engine/src/addins/ichimoku.rs`.
+double rollingMax(List<double> values, int endIdx, int period) {
+  if (period == 0 ||
+      values.isEmpty ||
+      endIdx >= values.length ||
+      period > endIdx + 1) {
+    return double.nan;
+  }
+  final start = endIdx + 1 - period;
+  double max = double.negativeInfinity;
+  for (int i = start; i <= endIdx; i++) {
+    final v = values[i];
+    if (v.isNaN) return double.nan;
+    if (v > max) max = v;
+  }
+  return max;
+}
+
+/// Minimum of `values[endIdx + 1 - period ..= endIdx]` — the lowest
+/// value across the last `period` samples **including the bar at
+/// `endIdx` itself**.
+///
+/// Mirror of [rollingMax] for the lows side. Same inclusive-`endIdx`
+/// convention, same NaN/warm-up semantics. Locked bit-identical against
+/// `rolling_min` in `rust/trading_engine/src/addins/ichimoku.rs`.
+double rollingMin(List<double> values, int endIdx, int period) {
+  if (period == 0 ||
+      values.isEmpty ||
+      endIdx >= values.length ||
+      period > endIdx + 1) {
+    return double.nan;
+  }
+  final start = endIdx + 1 - period;
+  double min = double.infinity;
+  for (int i = start; i <= endIdx; i++) {
+    final v = values[i];
+    if (v.isNaN) return double.nan;
+    if (v < min) min = v;
+  }
+  return min;
+}

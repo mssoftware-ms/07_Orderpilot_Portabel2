@@ -5,6 +5,7 @@
 
 pub mod bb_rsi;
 pub mod common;
+pub mod ichimoku;
 pub mod ut_bot;
 
 pub use bb_rsi::BbRsiStrategy;

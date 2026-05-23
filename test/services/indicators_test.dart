@@ -558,4 +558,176 @@ void main() {
       expect(BbMaType.ema.rustParamValue, 1.0);
     });
   });
+
+  group('rollingMax / rollingMin (Phase-2 Welle I1)', () {
+    // Reference values shared bit-for-bit with the Rust unit tests in
+    // `rust/trading_engine/src/addins/ichimoku.rs` (`mod tests`). The
+    // 200-bar parity fixture below uses the same generator on both
+    // sides, so the anchor assertions lock the two engines at 1e-9.
+
+    test('rollingMax: period 0 returns NaN', () {
+      expect(rollingMax(const [1.0, 2.0, 3.0], 2, 0).isNaN, isTrue);
+    });
+
+    test('rollingMax: empty values returns NaN', () {
+      expect(rollingMax(const [], 0, 1).isNaN, isTrue);
+    });
+
+    test('rollingMax: end_idx out of bounds returns NaN', () {
+      expect(rollingMax(const [1.0, 2.0], 5, 1).isNaN, isTrue);
+    });
+
+    test('rollingMax: warm-up (period > end_idx + 1) returns NaN', () {
+      expect(
+        rollingMax(const [1.0, 2.0, 3.0, 4.0, 5.0], 2, 9).isNaN,
+        isTrue,
+      );
+    });
+
+    test('rollingMax: period=1 equals values[end_idx]', () {
+      const v = [10.0, 20.0, 15.0, 30.0];
+      expect(rollingMax(v, 0, 1), closeTo(10.0, 1e-12));
+      expect(rollingMax(v, 2, 1), closeTo(15.0, 1e-12));
+      expect(rollingMax(v, 3, 1), closeTo(30.0, 1e-12));
+    });
+
+    test('rollingMax: constant values return the constant', () {
+      final v = List<double>.filled(20, 42.0);
+      for (int i = 0; i < 20; i++) {
+        final period = math.min(5, i + 1);
+        expect(rollingMax(v, i, period), closeTo(42.0, 1e-12));
+      }
+    });
+
+    test('rollingMax: first valid index at period - 1', () {
+      const v = [1.0, 2.0, 3.0, 4.0, 5.0];
+      expect(rollingMax(v, 3, 5).isNaN, isTrue);
+      expect(rollingMax(v, 4, 5), closeTo(5.0, 1e-12));
+    });
+
+    test('rollingMax: known small fixture, period 3', () {
+      // Mirrors `test_rolling_max_known_small_fixture` in Rust.
+      const v = [3.0, 1.0, 4.0, 1.0, 5.0, 9.0, 2.0, 6.0, 5.0, 3.0];
+      const expected = <int, double>{
+        2: 4.0,
+        3: 4.0,
+        4: 5.0,
+        5: 9.0,
+        6: 9.0,
+        7: 9.0,
+        8: 6.0,
+        9: 6.0,
+      };
+      for (final entry in expected.entries) {
+        expect(rollingMax(v, entry.key, 3), closeTo(entry.value, 1e-9),
+            reason: 'rollingMax idx=${entry.key}');
+      }
+    });
+
+    test('rollingMax: NaN inside the window poisons the result', () {
+      const v = [1.0, 2.0, double.nan, 4.0, 5.0];
+      expect(rollingMax(v, 3, 3).isNaN, isTrue);
+      expect(rollingMax(v, 4, 2), closeTo(5.0, 1e-12));
+    });
+
+    test('rollingMin: period 0 returns NaN', () {
+      expect(rollingMin(const [1.0, 2.0, 3.0], 2, 0).isNaN, isTrue);
+    });
+
+    test('rollingMin: empty values returns NaN', () {
+      expect(rollingMin(const [], 0, 1).isNaN, isTrue);
+    });
+
+    test('rollingMin: end_idx out of bounds returns NaN', () {
+      expect(rollingMin(const [1.0, 2.0], 5, 1).isNaN, isTrue);
+    });
+
+    test('rollingMin: warm-up returns NaN', () {
+      expect(
+        rollingMin(const [5.0, 4.0, 3.0, 2.0, 1.0], 2, 9).isNaN,
+        isTrue,
+      );
+    });
+
+    test('rollingMin: period=1 equals values[end_idx]', () {
+      const v = [10.0, 20.0, 15.0, 30.0];
+      expect(rollingMin(v, 0, 1), closeTo(10.0, 1e-12));
+      expect(rollingMin(v, 2, 1), closeTo(15.0, 1e-12));
+      expect(rollingMin(v, 3, 1), closeTo(30.0, 1e-12));
+    });
+
+    test('rollingMin: constant values return the constant', () {
+      final v = List<double>.filled(20, 42.0);
+      for (int i = 0; i < 20; i++) {
+        final period = math.min(5, i + 1);
+        expect(rollingMin(v, i, period), closeTo(42.0, 1e-12));
+      }
+    });
+
+    test('rollingMin: first valid index at period - 1', () {
+      const v = [5.0, 4.0, 3.0, 2.0, 1.0];
+      expect(rollingMin(v, 3, 5).isNaN, isTrue);
+      expect(rollingMin(v, 4, 5), closeTo(1.0, 1e-12));
+    });
+
+    test('rollingMin: known small fixture, period 3', () {
+      // Mirrors `test_rolling_min_known_small_fixture` in Rust.
+      const v = [3.0, 1.0, 4.0, 1.0, 5.0, 9.0, 2.0, 6.0, 5.0, 3.0];
+      const expected = <int, double>{
+        2: 1.0,
+        3: 1.0,
+        4: 1.0,
+        5: 1.0,
+        6: 2.0,
+        7: 2.0,
+        8: 2.0,
+        9: 3.0,
+      };
+      for (final entry in expected.entries) {
+        expect(rollingMin(v, entry.key, 3), closeTo(entry.value, 1e-9),
+            reason: 'rollingMin idx=${entry.key}');
+      }
+    });
+
+    test('rollingMin: NaN inside the window poisons the result', () {
+      const v = [5.0, 4.0, double.nan, 2.0, 1.0];
+      expect(rollingMin(v, 3, 3).isNaN, isTrue);
+      expect(rollingMin(v, 4, 2), closeTo(1.0, 1e-12));
+    });
+
+    // ── 200-bar parity fixture (mirrors `parity_fixture_200` in Rust) ──
+
+    /// Same generator as `parity_fixture_200` in
+    /// `rust/trading_engine/src/addins/ichimoku.rs`:
+    ///   v[i] = 100 + 10*sin(0.13*i) + 3*cos(0.41*i) + 0.5*(i%7)
+    List<double> parityFixture200() {
+      return List<double>.generate(
+        200,
+        (i) {
+          final x = i.toDouble();
+          return 100.0 +
+              10.0 * math.sin(0.13 * x) +
+              3.0 * math.cos(0.41 * x) +
+              0.5 * (i % 7);
+        },
+      );
+    }
+
+    test('rollingMax: 200-bar parity fixture anchors match Rust', () {
+      // Anchors hit: first valid window (period - 1), middle of the
+      // series, and the last bar. Tolerance 1e-9 locks Dart↔Rust parity.
+      final v = parityFixture200();
+      expect(rollingMax(v, 8, 9), closeTo(107.70308334140422, 1e-9));
+      expect(rollingMax(v, 100, 26), closeTo(102.23965253569493, 1e-9));
+      expect(rollingMax(v, 199, 52), closeTo(114.61074181274041, 1e-9));
+    });
+
+    test('rollingMin: 200-bar parity fixture anchors match Rust', () {
+      final v = parityFixture200();
+      // i=0: 100 + 10*sin(0) + 3*cos(0) + 0 = 103.0 exactly.
+      expect(rollingMin(v, 8, 9), closeTo(103.0, 1e-9));
+      expect(rollingMin(v, 100, 26), closeTo(87.04923608392424, 1e-9));
+      expect(rollingMin(v, 199, 52), closeTo(89.63103534666807, 1e-9));
+    });
+  });
 }
