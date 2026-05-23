@@ -730,4 +730,132 @@ void main() {
       expect(rollingMin(v, 199, 52), closeTo(89.63103534666807, 1e-9));
     });
   });
+
+  group('calcTenkanSen / calcKijunSen (Phase-2 Welle I1)', () {
+    test('calcTenkanSen: returns null for period 0', () {
+      expect(calcTenkanSen(const [1.0], const [1.0], 0), isNull);
+    });
+
+    test('calcTenkanSen: returns null for mismatched lengths', () {
+      expect(calcTenkanSen(const [1.0, 2.0], const [1.0], 1), isNull);
+    });
+
+    test('calcTenkanSen: returns null for insufficient data', () {
+      expect(
+        calcTenkanSen(
+          const [1.0, 2.0, 3.0],
+          const [0.5, 1.5, 2.5],
+          9,
+        ),
+        isNull,
+      );
+    });
+
+    test('calcTenkanSen: constant high/low produces constant midpoint', () {
+      const n = 20;
+      final highs = List<double>.filled(n, 105.0);
+      final lows = List<double>.filled(n, 95.0);
+      final t = calcTenkanSen(highs, lows, 9);
+      expect(t, isNotNull);
+      expect(t!.length, n);
+      for (int i = 0; i < 8; i++) {
+        expect(t[i].isNaN, isTrue, reason: 'warm-up i=$i');
+      }
+      for (int i = 8; i < n; i++) {
+        expect(t[i], closeTo(100.0, 1e-12), reason: 'midpoint i=$i');
+      }
+    });
+
+    test('calcTenkanSen: first valid index at period - 1', () {
+      final highs = [1.0, 2.0, 3.0, 4.0, 5.0];
+      final lows = [0.5, 1.5, 2.5, 3.5, 4.5];
+      final t = calcTenkanSen(highs, lows, 5);
+      expect(t, isNotNull);
+      for (int i = 0; i < 4; i++) {
+        expect(t![i].isNaN, isTrue);
+      }
+      // (max(1..5) + min(0.5..4.5)) / 2 = (5 + 0.5) / 2 = 2.75
+      expect(t![4], closeTo(2.75, 1e-12));
+    });
+
+    test('calcTenkanSen: known small fixture, period 3', () {
+      // Mirrors `test_tenkan_sen_known_small_fixture` in Rust.
+      final highs = [3.0, 1.0, 4.0, 1.0, 5.0, 9.0, 2.0, 6.0, 5.0, 3.0];
+      final lows = [1.0, 0.0, 2.0, 0.0, 4.0, 8.0, 1.0, 5.0, 4.0, 2.0];
+      final t = calcTenkanSen(highs, lows, 3);
+      expect(t, isNotNull);
+      const expected = <int, double>{
+        2: 2.0,
+        3: 2.0,
+        4: 2.5,
+        5: 4.5,
+        6: 5.0,
+        7: 5.0,
+        8: 3.5,
+        9: 4.0,
+      };
+      for (final entry in expected.entries) {
+        expect(t![entry.key], closeTo(entry.value, 1e-9),
+            reason: 'tenkan idx=${entry.key}');
+      }
+    });
+
+    test('calcKijunSen: midpoint with default period 26', () {
+      // Same as Rust test: high[i] = i+1, low[i] = i, period 26.
+      // At i=25: HH=26, LL=0 → midpoint=13.0. At i=26: HH=27, LL=1 → 14.0.
+      const n = 30;
+      final highs = List<double>.generate(n, (i) => (i + 1).toDouble());
+      final lows = List<double>.generate(n, (i) => i.toDouble());
+      final k = calcKijunSen(highs, lows, 26);
+      expect(k, isNotNull);
+      expect(k!.length, n);
+      for (int i = 0; i < 25; i++) {
+        expect(k[i].isNaN, isTrue, reason: 'warm-up i=$i');
+      }
+      expect(k[25], closeTo(13.0, 1e-12));
+      expect(k[26], closeTo(14.0, 1e-12));
+    });
+
+    test('calcTenkanSen: NaN inside window poisons only affected bars', () {
+      // NaN at idx 4 corrupts midpoints at i ∈ {4,5,6} (any period-3
+      // window covering bar 4). At i=7 the window [5..=7] is clean.
+      final highs = [10.0, 11.0, 12.0, 13.0, double.nan, 15.0, 16.0, 17.0];
+      final lows = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
+      final t = calcTenkanSen(highs, lows, 3);
+      expect(t, isNotNull);
+      expect(t![4].isNaN, isTrue);
+      expect(t[5].isNaN, isTrue);
+      expect(t[6].isNaN, isTrue);
+      // window [5..=7]: highs [15,16,17] / lows [6,7,8] → (17+6)/2 = 11.5
+      expect(t[7], closeTo(11.5, 1e-12));
+    });
+
+    test('200-bar parity fixture: tenkan + kijun anchors match Rust', () {
+      // Uses the same parity_fixture_200 as the rollingMax tests; high
+      // band = +0.5, low band = -0.5.
+      List<double> v = List<double>.generate(
+        200,
+        (i) {
+          final x = i.toDouble();
+          return 100.0 +
+              10.0 * math.sin(0.13 * x) +
+              3.0 * math.cos(0.41 * x) +
+              0.5 * (i % 7);
+        },
+      );
+      final highs = v.map((x) => x + 0.5).toList();
+      final lows = v.map((x) => x - 0.5).toList();
+
+      final t9 = calcTenkanSen(highs, lows, 9);
+      expect(t9, isNotNull);
+      // (rolling_max(v, 8, 9) + 0.5 + rolling_min(v, 8, 9) - 0.5) / 2
+      // = (107.70308334140422 + 103.0) / 2 = 105.35154167070211
+      expect(t9![8], closeTo(105.35154167070211, 1e-9));
+
+      final k26 = calcKijunSen(highs, lows, 26);
+      expect(k26, isNotNull);
+      // (102.23965253569493 + 87.04923608392424) / 2 = 94.64444430980959
+      expect(k26![100], closeTo(94.64444430980959, 1e-9));
+    });
+  });
 }

@@ -75,6 +75,79 @@ pub fn rolling_min(values: &[f64], end_idx: usize, period: usize) -> f64 {
     min
 }
 
+// ─── Tenkan-Sen / Kijun-Sen midpoint lines ─────────────────────────────────
+
+/// Shared midpoint-series builder backing both [`calc_tenkan_sen`] and
+/// [`calc_kijun_sen`] — the math is identical (`(HH_N + LL_N) / 2`),
+/// only the default period differs (9 vs 26 per Spec §1).
+///
+/// Returns `None` only on hard input errors (mismatched lengths, zero
+/// period, or fewer candles than `period`). Otherwise the result has
+/// the same length as the inputs with `NaN` for the warm-up region
+/// (`i < period - 1`) and the midpoint for `i >= period - 1`.
+fn calc_midpoint_series(
+    highs: &[f64],
+    lows: &[f64],
+    period: usize,
+) -> Option<Vec<f64>> {
+    if period == 0 || highs.len() != lows.len() {
+        return None;
+    }
+    let n = highs.len();
+    if n < period {
+        return None;
+    }
+    let mut out = vec![f64::NAN; n];
+    for (i, slot) in out.iter_mut().enumerate().skip(period - 1) {
+        let hh = rolling_max(highs, i, period);
+        let ll = rolling_min(lows, i, period);
+        if hh.is_nan() || ll.is_nan() {
+            // NaN poisoning from a NaN sample in the window — leave
+            // *slot as NaN (already the default).
+            continue;
+        }
+        *slot = (hh + ll) / 2.0;
+    }
+    Some(out)
+}
+
+/// Compute the **Tenkan-Sen** (Conversion Line) series.
+///
+/// Definition (Spec §1.1, mirrors the canonical Ichimoku formula):
+///
+/// ```text
+/// Tenkan-Sen[i] = (highest(high, period) + lowest(low, period)) / 2
+/// ```
+///
+/// at each bar `i`, where the rolling window is `[i + 1 - period ..= i]`
+/// (period bars **including** bar `i`). Spec default `period = 9`.
+///
+/// Returned `Vec<f64>` has the same length as `highs`; indices
+/// `0..period - 1` are `NaN` (warm-up). Returns `None` on mismatched
+/// `highs`/`lows` lengths, `period == 0`, or fewer than `period` candles.
+pub fn calc_tenkan_sen(
+    highs: &[f64],
+    lows: &[f64],
+    period: usize,
+) -> Option<Vec<f64>> {
+    calc_midpoint_series(highs, lows, period)
+}
+
+/// Compute the **Kijun-Sen** (Base Line) series.
+///
+/// Same midpoint math as [`calc_tenkan_sen`], differing only in the
+/// canonical period (Spec default `period = 26`). Two distinct functions
+/// (rather than one parameterised helper) keep the strategy call sites
+/// self-documenting and let future overrides (e.g. spec-§13 sensitivity
+/// runs) diverge without touching shared code.
+pub fn calc_kijun_sen(
+    highs: &[f64],
+    lows: &[f64],
+    period: usize,
+) -> Option<Vec<f64>> {
+    calc_midpoint_series(highs, lows, period)
+}
+
 // ─── Tests ──────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -308,6 +381,156 @@ mod tests {
             (rolling_max(&v, 199, 52) - 114.610_741_812_740_41).abs() < 1e-9,
             "rolling_max(199, 52) = {}",
             rolling_max(&v, 199, 52)
+        );
+    }
+
+    // ── Tenkan-Sen / Kijun-Sen ──────────────────────────────────────────
+
+    #[test]
+    fn test_tenkan_sen_zero_period_returns_none() {
+        assert!(calc_tenkan_sen(&[1.0], &[1.0], 0).is_none());
+    }
+
+    #[test]
+    fn test_tenkan_sen_mismatched_lengths_returns_none() {
+        assert!(calc_tenkan_sen(&[1.0, 2.0], &[1.0], 1).is_none());
+    }
+
+    #[test]
+    fn test_tenkan_sen_insufficient_data_returns_none() {
+        // 3 bars, period 9 → no valid index possible.
+        assert!(calc_tenkan_sen(&[1.0, 2.0, 3.0], &[0.5, 1.5, 2.5], 9).is_none());
+    }
+
+    #[test]
+    fn test_tenkan_sen_constant_high_low_constant_midpoint() {
+        // highs ≡ 105, lows ≡ 95 → (HH + LL) / 2 = 100 from i = period-1.
+        let n = 20;
+        let highs = vec![105.0; n];
+        let lows = vec![95.0; n];
+        let t = calc_tenkan_sen(&highs, &lows, 9).unwrap();
+        assert_eq!(t.len(), n);
+        for v in t.iter().take(8) {
+            assert!(v.is_nan(), "warm-up index must be NaN, got {}", v);
+        }
+        for v in t.iter().skip(8) {
+            assert!((v - 100.0).abs() < 1e-12, "midpoint != 100: {}", v);
+        }
+    }
+
+    #[test]
+    fn test_tenkan_sen_first_valid_index_at_period_minus_one() {
+        // period = 5 → first valid index = 4.
+        let highs = vec![1.0, 2.0, 3.0, 4.0, 5.0];
+        let lows = vec![0.5, 1.5, 2.5, 3.5, 4.5];
+        let t = calc_tenkan_sen(&highs, &lows, 5).unwrap();
+        assert_eq!(t.len(), 5);
+        for v in t.iter().take(4) {
+            assert!(v.is_nan());
+        }
+        // (max(1..5) + min(0.5..4.5)) / 2 = (5 + 0.5) / 2 = 2.75
+        assert!((t[4] - 2.75).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_tenkan_sen_known_small_fixture() {
+        // Hand-computed reference, period 3 — shared bit-for-bit with
+        // the Dart mirror.
+        // highs: [3.0, 1.0, 4.0, 1.0, 5.0, 9.0, 2.0, 6.0, 5.0, 3.0]
+        // lows:  [1.0, 0.0, 2.0, 0.0, 4.0, 8.0, 1.0, 5.0, 4.0, 2.0]
+        //
+        // i=2  → (max(3,1,4)=4   + min(1,0,2)=0  ) / 2 = 2.0
+        // i=3  → (max(1,4,1)=4   + min(0,2,0)=0  ) / 2 = 2.0
+        // i=4  → (max(4,1,5)=5   + min(2,0,4)=0  ) / 2 = 2.5
+        // i=5  → (max(1,5,9)=9   + min(0,4,8)=0  ) / 2 = 4.5
+        // i=6  → (max(5,9,2)=9   + min(4,8,1)=1  ) / 2 = 5.0
+        // i=7  → (max(9,2,6)=9   + min(8,1,5)=1  ) / 2 = 5.0
+        // i=8  → (max(2,6,5)=6   + min(1,5,4)=1  ) / 2 = 3.5
+        // i=9  → (max(6,5,3)=6   + min(5,4,2)=2  ) / 2 = 4.0
+        let highs = [3.0, 1.0, 4.0, 1.0, 5.0, 9.0, 2.0, 6.0, 5.0, 3.0];
+        let lows = [1.0, 0.0, 2.0, 0.0, 4.0, 8.0, 1.0, 5.0, 4.0, 2.0];
+        let t = calc_tenkan_sen(&highs, &lows, 3).unwrap();
+        let expected = [
+            (2usize, 2.0),
+            (3, 2.0),
+            (4, 2.5),
+            (5, 4.5),
+            (6, 5.0),
+            (7, 5.0),
+            (8, 3.5),
+            (9, 4.0),
+        ];
+        for &(i, want) in expected.iter() {
+            assert!(
+                (t[i] - want).abs() < 1e-9,
+                "tenkan idx={} want={} got={}", i, want, t[i],
+            );
+        }
+    }
+
+    #[test]
+    fn test_kijun_sen_is_midpoint_with_default_period_26() {
+        // Same shared math as Tenkan but with the Kijun default period.
+        // Synthetic linear ramp: high[i] = i + 1, low[i] = i.
+        // At i = 25 (first valid), window is [0..=25]:
+        //   HH = 26, LL = 0 → midpoint = 13.0.
+        let n = 30;
+        let highs: Vec<f64> = (0..n).map(|i| (i + 1) as f64).collect();
+        let lows: Vec<f64> = (0..n).map(|i| i as f64).collect();
+        let k = calc_kijun_sen(&highs, &lows, 26).unwrap();
+        assert_eq!(k.len(), n);
+        for v in k.iter().take(25) {
+            assert!(v.is_nan(), "warm-up must be NaN, got {}", v);
+        }
+        assert!((k[25] - 13.0).abs() < 1e-12, "k[25] = {}", k[25]);
+        // At i = 26 the window slides to [1..=26]: HH = 27, LL = 1 → 14.0.
+        assert!((k[26] - 14.0).abs() < 1e-12, "k[26] = {}", k[26]);
+    }
+
+    #[test]
+    fn test_tenkan_sen_nan_inside_window_poisons_only_that_bar() {
+        // A NaN at index 4 corrupts the midpoint at indices 4..=6 (any
+        // window covering bar 4 with period 3) but bar 7's window
+        // [5..=7] no longer contains the NaN → valid midpoint resumes.
+        let highs = [10.0, 11.0, 12.0, 13.0, f64::NAN, 15.0, 16.0, 17.0];
+        let lows = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
+        let t = calc_tenkan_sen(&highs, &lows, 3).unwrap();
+        assert!(t[4].is_nan(), "bar 4 must be NaN, got {}", t[4]);
+        assert!(t[5].is_nan(), "bar 5 must be NaN, got {}", t[5]);
+        assert!(t[6].is_nan(), "bar 6 must be NaN, got {}", t[6]);
+        // i = 7: window [5..=7] = highs [15,16,17] / lows [6,7,8]
+        //   → (17 + 6) / 2 = 11.5
+        assert!((t[7] - 11.5).abs() < 1e-12, "t[7] = {}", t[7]);
+    }
+
+    #[test]
+    fn test_tenkan_sen_200_bar_fixture_reference_anchors() {
+        // 200-bar fixture parallel to the rolling-window anchors above:
+        // highs = parity_fixture_200() + 0.5
+        // lows  = parity_fixture_200() - 0.5
+        // → midpoint(period=9, i=8)  ≡ rolling_max(values, 8, 9)+0.5
+        //                             plus rolling_min(values, 8, 9)-0.5
+        //                             divided by 2 — i.e. the running
+        //                             midpoint of the band-shifted
+        //                             values (locked at 1e-9 to Dart).
+        let v = parity_fixture_200();
+        let highs: Vec<f64> = v.iter().map(|x| x + 0.5).collect();
+        let lows: Vec<f64> = v.iter().map(|x| x - 0.5).collect();
+
+        let t9 = calc_tenkan_sen(&highs, &lows, 9).unwrap();
+        // anchor: (rolling_max(v, 8, 9) + 0.5 + rolling_min(v, 8, 9) - 0.5) / 2
+        // ≡ (107.70308334140422 + 103.0) / 2 = 105.35154167070211
+        assert!(
+            (t9[8] - 105.351_541_670_702_1).abs() < 1e-9,
+            "tenkan[8] = {}", t9[8]
+        );
+
+        let k26 = calc_kijun_sen(&highs, &lows, 26).unwrap();
+        // anchor: (102.23965253569493 + 87.04923608392424) / 2
+        // = 94.64444430980959 (last digit at the ulp boundary of double).
+        assert!(
+            (k26[100] - 94.644_444_309_809_6).abs() < 1e-9,
+            "kijun[100] = {}", k26[100]
         );
     }
 

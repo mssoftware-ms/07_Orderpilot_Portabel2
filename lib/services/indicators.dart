@@ -387,3 +387,56 @@ double rollingMin(List<double> values, int endIdx, int period) {
   }
   return min;
 }
+
+// ─── Tenkan-Sen / Kijun-Sen midpoint lines (Phase-2 Welle I1) ───────────────
+
+/// Shared midpoint-series builder backing both [calcTenkanSen] and
+/// [calcKijunSen]: `(HH_N + LL_N) / 2` over a rolling window of size
+/// `period`. Returns `null` on hard input errors (mismatched lengths,
+/// zero period, or fewer candles than `period`). Otherwise produces a
+/// list of length `highs.length` with `double.nan` in the warm-up
+/// region (`i < period - 1`).
+List<double>? _midpointSeries(
+  List<double> highs,
+  List<double> lows,
+  int period,
+) {
+  if (period == 0 || highs.length != lows.length) return null;
+  final n = highs.length;
+  if (n < period) return null;
+  final out = List<double>.filled(n, double.nan);
+  for (int i = period - 1; i < n; i++) {
+    final hh = rollingMax(highs, i, period);
+    final ll = rollingMin(lows, i, period);
+    if (hh.isNaN || ll.isNaN) continue;
+    out[i] = (hh + ll) / 2.0;
+  }
+  return out;
+}
+
+/// Compute the **Tenkan-Sen** (Conversion Line) series.
+///
+/// `Tenkan-Sen[i] = (highest(high, period) + lowest(low, period)) / 2`
+/// over the window `[i + 1 - period ..= i]` (Spec §1.1, default
+/// `period = 9`). Indices `0..period - 1` are `double.nan` (warm-up).
+/// Returns `null` on mismatched lengths, zero period, or insufficient
+/// data. Locked bit-identical against `calc_tenkan_sen` in
+/// `rust/trading_engine/src/addins/ichimoku.rs`.
+List<double>? calcTenkanSen(
+  List<double> highs,
+  List<double> lows,
+  int period,
+) =>
+    _midpointSeries(highs, lows, period);
+
+/// Compute the **Kijun-Sen** (Base Line) series.
+///
+/// Same midpoint math as [calcTenkanSen], differing only in the
+/// canonical period (Spec default `period = 26`). Two distinct
+/// functions keep the strategy call sites self-documenting.
+List<double>? calcKijunSen(
+  List<double> highs,
+  List<double> lows,
+  int period,
+) =>
+    _midpointSeries(highs, lows, period);
