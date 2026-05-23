@@ -18,7 +18,7 @@ use trading_engine::models::{annualized_sharpe, periods_per_year, Timeframe};
 /// Alternating +δ, −δ around `mean` with even `n` → sample mean exactly `mean`,
 /// sample stdev (population formula, /n) exactly `delta`.
 fn construct_returns(mean: f64, delta: f64, n: usize) -> Vec<f64> {
-    assert!(n % 2 == 0, "n must be even for exact sample stats");
+    assert!(n.is_multiple_of(2), "n must be even for exact sample stats");
     (0..n)
         .map(|i| if i % 2 == 0 { mean + delta } else { mean - delta })
         .collect()

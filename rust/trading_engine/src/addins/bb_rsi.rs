@@ -503,9 +503,9 @@ mod tests {
 
         // Walk through all candles
         let mut last_signal = Signal::NoAction;
-        for i in 0..candles.len() {
+        for (i, candle) in candles.iter().enumerate() {
             ctx.set_index(i);
-            if let Some(sig) = strategy.on_candle(&mut ctx, &candles[i]) {
+            if let Some(sig) = strategy.on_candle(&mut ctx, candle) {
                 if sig.is_actionable() {
                     last_signal = sig;
                 }
@@ -541,9 +541,9 @@ mod tests {
         let mut ctx = Context::new(candles.clone(), Timeframe::M1, params);
 
         let mut last_signal = Signal::NoAction;
-        for i in 0..candles.len() {
+        for (i, candle) in candles.iter().enumerate() {
             ctx.set_index(i);
-            if let Some(sig) = strategy.on_candle(&mut ctx, &candles[i]) {
+            if let Some(sig) = strategy.on_candle(&mut ctx, candle) {
                 if sig.is_actionable() {
                     last_signal = sig;
                 }
@@ -588,9 +588,9 @@ mod tests {
         let mut exits = 0u32;
         let mut no_actions = 0u32;
 
-        for i in 0..candles.len() {
+        for (i, candle) in candles.iter().enumerate() {
             ctx.set_index(i);
-            if let Some(signal) = strategy.on_candle(&mut ctx, &candles[i]) {
+            if let Some(signal) = strategy.on_candle(&mut ctx, candle) {
                 match &signal {
                     Signal::EnterLong { .. } | Signal::EnterShort { .. } => entries += 1,
                     Signal::Exit { .. } => exits += 1,

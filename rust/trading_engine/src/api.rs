@@ -139,9 +139,9 @@ pub fn run_bb_rsi_strategy(candles_json: String, params_json: String) -> String 
     let mut ctx = crate::strategy::Context::new(candles.clone(), Timeframe::H1, params);
     let mut results: Vec<serde_json::Value> = Vec::new();
 
-    for i in 0..candles.len() {
+    for (i, candle) in candles.iter().enumerate() {
         ctx.set_index(i);
-        if let Some(signal) = strategy.on_candle(&mut ctx, &candles[i]) {
+        if let Some(signal) = strategy.on_candle(&mut ctx, candle) {
             if signal.is_actionable() {
                 results.push(serde_json::json!({
                     "index": i,

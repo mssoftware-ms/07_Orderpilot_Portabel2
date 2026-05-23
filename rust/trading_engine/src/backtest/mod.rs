@@ -199,9 +199,8 @@ impl BacktestEngine {
 
         let num_candles = candles.len();
 
-        for i in 0..num_candles {
+        for (i, candle) in candles.iter().enumerate() {
             ctx.set_index(i);
-            let candle = &candles[i];
 
             // ── Step 1: Execute pending order at this bar's OPEN ──
             if let Some(pending) = self.pending_order.take() {
@@ -398,10 +397,10 @@ impl BacktestEngine {
     ///     entry-exit), so `net_pnl = gross_pnl - entry_fee - exit_fee` is
     ///     correctly signed for both sides.
     ///   - On close we return the reserved margin and add the realised P&L:
-    ///       `balance += alloc + net_pnl`
-    ///   For LONGs this collapses algebraically to the older
-    ///   `proceeds = exit_notional - exit_fee` expression; for SHORTs the
-    ///   older expression drained balance by ~`2 * gross_pnl_short`.
+    ///     `balance += alloc + net_pnl`
+    ///     For LONGs this collapses algebraically to the older
+    ///     `proceeds = exit_notional - exit_fee` expression; for SHORTs the
+    ///     older expression drained balance by ~`2 * gross_pnl_short`.
     fn close_position(&mut self, exit_price: f64, exit_time: i64, reason: ExitReason) {
         let pos = match self.position.take() {
             Some(p) => p,

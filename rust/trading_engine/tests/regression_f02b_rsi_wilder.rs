@@ -60,9 +60,9 @@ fn on_candle_rsi_matches_cumulative_wilder() {
     // last bar is the one actually used by `on_candle`.
     let mut strategy = BbRsiStrategy::new();
     let mut ctx = Context::new(candles.clone(), Timeframe::H1, HashMap::new());
-    for i in 0..candles.len() {
+    for (i, candle) in candles.iter().enumerate() {
         ctx.set_index(i);
-        let _ = strategy.on_candle(&mut ctx, &candles[i]);
+        let _ = strategy.on_candle(&mut ctx, candle);
     }
 
     let actual_rsi = ctx
