@@ -1,9 +1,8 @@
 //! Bollinger Bands + RSI Strategy Add-in.
 //!
-//! Defaults match the video-spec "verbesserte Variante" (see
-//! `01_Projectplan/specs/bb_rsi_spec.md` §1, Diff D-01 + D-02). The
-//! Phase-1 mean-reversion entry/exit logic is still in place here; the
-//! Phase-2 signal inversion (D-03/D-04), RSI cross trigger (D-05) and
+//! Defaults and entry direction match the video-spec "verbesserte
+//! Variante" (see `01_Projectplan/specs/bb_rsi_spec.md` §1–§3, Diff
+//! D-01..D-04). The RSI cross trigger (D-05) and BB-middle / RSI-extreme
 //! exit removal (D-11) land in subsequent commits.
 //!
 //! # Parameters
@@ -282,48 +281,59 @@ impl StrategyAddin for BbRsiStrategy {
         let price = ctx.current_price();
 
         // ── Exit logic (checked first) ──────────────────────────────────
-        if self.state.in_long {
-            // Exit long: price crosses above middle band or overbought RSI.
-            // F-09: strict `>` matches Dart's operator (rsi > overbought) — avoids
-            // floating-point equality edge at rsi == 70.0.
-            if price >= bb.middle || rsi > rsi_overbought {
-                self.state.in_long = false;
-                ctx.in_position = false;
-                return Some(Signal::Exit {
-                    reason: ExitReason::Signal("BB middle / RSI exit".to_string()),
-                });
-            }
+        // Phase-2 Diff D-03/D-04 inverts the strategy from mean-reversion
+        // to trend-following: long enters above the upper band, short
+        // enters below the lower band. The intermediate exit conditions
+        // here mirror the OLD mean-reversion exits so the strategy stays
+        // coherent at this commit (price reverting to the middle band
+        // means the trend pullback is over). Diff D-11 (next commit)
+        // removes these blocks entirely; the final spec uses only SL/TP
+        // exits set at entry.
+        if self.state.in_long && (price <= bb.middle || rsi < rsi_oversold) {
+            self.state.in_long = false;
+            ctx.in_position = false;
+            return Some(Signal::Exit {
+                reason: ExitReason::Signal("BB middle / RSI exit".to_string()),
+            });
         }
 
-        if self.state.in_short {
-            // Exit short: price crosses below middle band or oversold RSI.
-            // F-09: strict `<` matches Dart's operator (rsi < oversold) — avoids
-            // floating-point equality edge at rsi == 30.0.
-            if price <= bb.middle || rsi < rsi_oversold {
-                self.state.in_short = false;
-                ctx.in_position = false;
-                return Some(Signal::Exit {
-                    reason: ExitReason::Signal("BB middle / RSI exit".to_string()),
-                });
-            }
+        if self.state.in_short && (price >= bb.middle || rsi > rsi_overbought) {
+            self.state.in_short = false;
+            ctx.in_position = false;
+            return Some(Signal::Exit {
+                reason: ExitReason::Signal("BB middle / RSI exit".to_string()),
+            });
         }
 
         // ── Entry logic ─────────────────────────────────────────────────
+        // Diff D-03/D-04: long when price closes above upper BB with RSI
+        // confirming momentum (RSI > overbought), short when price closes
+        // below lower BB with RSI confirming exhaustion (RSI < oversold).
+        // Strict `>` / `<` on price per spec; the RSI threshold gets
+        // replaced by an event-based cross check in the next commit
+        // (D-05). SL/TP placeholders mirror the old BB-geometry pattern
+        // for the new direction so basic invariants hold (long SL <
+        // entry < long TP); the video-spec R:R 1:3 + swing-low SL land
+        // in Welle 2 (D-06 / D-07).
         if !ctx.in_position {
-            // Long entry: price touches lower BB AND RSI oversold
-            if price <= bb.lower && rsi < rsi_oversold {
+            if price > bb.upper && rsi > rsi_overbought {
                 self.state.in_long = true;
                 self.state.in_short = false;
                 ctx.in_position = true;
-                return Some(Signal::long(Some(bb.lower - (bb.middle - bb.lower)), Some(bb.middle)));
+                return Some(Signal::long(
+                    Some(bb.middle),
+                    Some(bb.upper + (bb.upper - bb.middle)),
+                ));
             }
 
-            // Short entry: price touches upper BB AND RSI overbought
-            if price >= bb.upper && rsi > rsi_overbought {
+            if price < bb.lower && rsi < rsi_oversold {
                 self.state.in_short = true;
                 self.state.in_long = false;
                 ctx.in_position = true;
-                return Some(Signal::short(Some(bb.upper + (bb.upper - bb.middle)), Some(bb.middle)));
+                return Some(Signal::short(
+                    Some(bb.middle),
+                    Some(bb.lower - (bb.middle - bb.lower)),
+                ));
             }
         }
 
@@ -693,30 +703,45 @@ mod tests {
         assert!(signal.is_none());
     }
 
-    #[test]
-    fn test_strategy_long_entry_signal() {
+    /// Helper: assert that the strategy emitted an entry signal of the
+    /// expected direction at some bar during the walk. Robust to the
+    /// intermediate state where the BB-middle exit might fire on the
+    /// very next bar (D-11 cleanup is in a later commit).
+    fn assert_entry_direction(
+        candles: &[Candle],
+        expect_long: bool,
+        params: HashMap<String, f64>,
+    ) {
         let mut strategy = BbRsiStrategy::new();
-        // Build candles: mostly stable around 100, then a sharp drop to trigger
-        // lower BB touch + RSI oversold.
-        let mut closes = vec![100.0; 30];
-        // Add a sharp decline at the end
-        for i in 0..8 {
-            closes.push(100.0 - (i as f64 + 1.0) * 2.0);
+        let mut ctx = Context::new(candles.to_vec(), Timeframe::M1, params);
+        let mut seen_long = false;
+        let mut seen_short = false;
+        for (i, candle) in candles.iter().enumerate() {
+            ctx.set_index(i);
+            if let Some(sig) = strategy.on_candle(&mut ctx, candle) {
+                match sig {
+                    Signal::EnterLong { .. } => seen_long = true,
+                    Signal::EnterShort { .. } => seen_short = true,
+                    _ => {}
+                }
+            }
         }
+        if expect_long {
+            assert!(seen_long, "expected an EnterLong signal, none observed");
+            assert!(
+                !seen_short,
+                "did not expect any EnterShort signal on this fixture"
+            );
+        } else {
+            assert!(seen_short, "expected an EnterShort signal, none observed");
+            assert!(
+                !seen_long,
+                "did not expect any EnterLong signal on this fixture"
+            );
+        }
+    }
 
-        let candles: Vec<Candle> = closes
-            .iter()
-            .enumerate()
-            .map(|(i, &c)| {
-                Candle::new(i as i64 * 60000, c, c + 0.5, c - 0.5, c, 100.0)
-            })
-            .collect();
-
-        // Phase-1 BB(20)+RSI(14) — the 38-candle fixture is too short for
-        // the new BB(200) defaults (Diff D-01). This test pins the existing
-        // Phase-1 mean-reversion long-entry trigger; the Phase-2 signal
-        // inversion in Diff D-03 lands in a later commit and will rewrite
-        // this test's expectation.
+    fn phase1_pinned_params() -> HashMap<String, f64> {
         let mut params = HashMap::new();
         params.insert("bb_period".to_string(), 20.0);
         params.insert("bb_stddev".to_string(), 2.0);
@@ -724,36 +749,19 @@ mod tests {
         params.insert("rsi_period".to_string(), 14.0);
         params.insert("rsi_oversold".to_string(), 30.0);
         params.insert("rsi_overbought".to_string(), 70.0);
-        let mut ctx = Context::new(candles.clone(), Timeframe::M1, params);
-
-        // Walk through all candles
-        let mut last_signal = Signal::NoAction;
-        for (i, candle) in candles.iter().enumerate() {
-            ctx.set_index(i);
-            if let Some(sig) = strategy.on_candle(&mut ctx, candle) {
-                if sig.is_actionable() {
-                    last_signal = sig;
-                }
-            }
-        }
-
-        // With a sharp decline, we expect a long entry signal at some point
-        assert!(
-            last_signal.is_entry(),
-            "Expected long entry after sharp decline, got {:?}",
-            last_signal
-        );
+        params
     }
 
     #[test]
-    fn test_strategy_short_entry_signal() {
-        let mut strategy = BbRsiStrategy::new();
-        // Build candles: mostly stable around 100, then a sharp rise
+    fn test_strategy_long_entry_signal() {
+        // Phase-2 entry inversion (Diff D-03): a long is now triggered
+        // by close > upper BB + RSI overbought, i.e. a sharp RISE not
+        // a sharp drop. The 38-candle fixture mirrors the previous
+        // Phase-1 long-signal test, flipped to the new trigger direction.
         let mut closes = vec![100.0; 30];
         for i in 0..8 {
             closes.push(100.0 + (i as f64 + 1.0) * 2.0);
         }
-
         let candles: Vec<Candle> = closes
             .iter()
             .enumerate()
@@ -761,34 +769,25 @@ mod tests {
                 Candle::new(i as i64 * 60000, c, c + 0.5, c - 0.5, c, 100.0)
             })
             .collect();
+        assert_entry_direction(&candles, true, phase1_pinned_params());
+    }
 
-        // See test_strategy_long_entry_signal for the rationale; same
-        // Phase-1 pinning of BB(20)+RSI(14) so the 38-candle fixture clears
-        // the BB warm-up boundary.
-        let mut params = HashMap::new();
-        params.insert("bb_period".to_string(), 20.0);
-        params.insert("bb_stddev".to_string(), 2.0);
-        params.insert("bb_ma_type".to_string(), 0.0); // SMA
-        params.insert("rsi_period".to_string(), 14.0);
-        params.insert("rsi_oversold".to_string(), 30.0);
-        params.insert("rsi_overbought".to_string(), 70.0);
-        let mut ctx = Context::new(candles.clone(), Timeframe::M1, params);
-
-        let mut last_signal = Signal::NoAction;
-        for (i, candle) in candles.iter().enumerate() {
-            ctx.set_index(i);
-            if let Some(sig) = strategy.on_candle(&mut ctx, candle) {
-                if sig.is_actionable() {
-                    last_signal = sig;
-                }
-            }
+    #[test]
+    fn test_strategy_short_entry_signal() {
+        // Diff D-04: a short is now triggered by close < lower BB + RSI
+        // oversold. Sharp drop fixture, mirror of the long-entry test.
+        let mut closes = vec![100.0; 30];
+        for i in 0..8 {
+            closes.push(100.0 - (i as f64 + 1.0) * 2.0);
         }
-
-        assert!(
-            last_signal.is_entry(),
-            "Expected short entry after sharp rise, got {:?}",
-            last_signal
-        );
+        let candles: Vec<Candle> = closes
+            .iter()
+            .enumerate()
+            .map(|(i, &c)| {
+                Candle::new(i as i64 * 60000, c, c + 0.5, c - 0.5, c, 100.0)
+            })
+            .collect();
+        assert_entry_direction(&candles, false, phase1_pinned_params());
     }
 
     #[test]

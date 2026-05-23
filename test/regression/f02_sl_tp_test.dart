@@ -151,12 +151,14 @@ void main() {
   group('F-02 §3.4 Dart SL/TP intra-candle exits', () {
     test('long position closes at SL when next candle penetrates the level',
         () {
-      final candles = _buildLongSlFixture();
-      // F-02 verifies engine SL execution arithmetic, not the current
-      // strategy defaults — pin the Phase-1 BB(20, SMA, 2.0σ) + RSI(14,
-      // 30/70) parameters so the hand-crafted crash-drop fixture
-      // continues to trigger the canonical long entry. Phase-2 default
-      // shift (Diff D-01/D-02) does not change what F-02 is testing.
+      // Phase-2 entry inversion (Diff D-03): a long is now triggered by
+      // close > upper + RSI overbought. Use the surge fixture (was
+      // _buildShortTpFixture under Phase-1 mean-reversion semantics) so
+      // the same hand-crafted asymmetric move produces a long under the
+      // new direction; the engine SL arithmetic this test pins is
+      // unchanged. Phase-1 BB(20, SMA, 2.0σ) + RSI(14, 30/70) stays
+      // pinned so this test is decoupled from the default shift.
+      final candles = _buildShortTpFixture();
       final result = BacktestService.runBbRsi(
         candles: candles,
         initialBalance: 10_000.0,
@@ -173,22 +175,22 @@ void main() {
 
       expect(result.trades, isNotEmpty,
           reason:
-              'fixture must trigger at least one BB+RSI long entry — if this '
-              'fails the crash-drop sequence is no longer pushing close below '
-              'lower BB with RSI < 30; rebuild the fixture, do NOT delete the '
-              'assertion.');
+              'fixture must trigger at least one BB+RSI long entry — if '
+              'this fails the surge-up sequence is no longer pushing close '
+              'above upper BB with RSI > 70; rebuild the fixture, do NOT '
+              'delete the assertion.');
 
-      // Find the canonical SL-exit long trade (entered on the deep-crash candle
-      // close=70, exited next bar on low=0). Other trades in the fixture's
-      // flat tail are not the F-02 contract under test.
+      // Find the canonical SL-exit long trade. Under Phase-2 entry
+      // inversion the long is opened on the surge top (close=130) and
+      // exited next bar on low=0 → SL (placeholder = BB middle) fires.
       final trade = result.trades.firstWhere(
         (t) => t.direction == 'LONG' &&
             t.exitReason == 'StopLoss' &&
-            t.entryPrice == 70.0,
+            t.entryPrice == 130.0,
         orElse: () => throw StateError(
-            'F-02: fixture must produce a LONG SL trade entered at close=70 '
-            '(the deep-crash candle). Pre-F-02 this position closes at "BB '
-            'Middle" or "End of Data", never with exitReason="StopLoss".'),
+            'F-02: fixture must produce a LONG SL trade entered at close=130 '
+            '(the surge top). Pre-F-02 this position closes at "BB Middle" '
+            'or "End of Data", never with exitReason="StopLoss".'),
       );
       expect(trade.exitPrice, lessThan(trade.entryPrice),
           reason: 'long SL is always strictly below entry price');
@@ -196,20 +198,21 @@ void main() {
           reason:
               'SL must equal the absolute SL price computed at entry, not '
               'the exit candle low (which is 0.0 in the fixture)');
-      expect(trade.exitPrice, isNot(closeTo(60.0, 1e-9)),
+      expect(trade.exitPrice, isNot(closeTo(110.0, 1e-9)),
           reason:
               'pre-F-02 the position would close on the exit candle close '
-              '(=60); post-F-02 it closes at the BB-derived SL price intra-bar');
+              '(=110); post-F-02 it closes at the BB-derived SL price intra-bar');
       expect(trade.pnl, lessThan(0.0),
           reason: 'a long stop-loss is by definition a losing trade');
     });
 
     test('short position closes at TP when next candle penetrates the level',
         () {
-      final candles = _buildShortTpFixture();
-      // F-02 verifies engine TP execution arithmetic — pin Phase-1
-      // BB(20, SMA, 2.0σ) + RSI(14, 30/70) params (same rationale as
-      // the long-SL test above).
+      // Phase-2 entry inversion (Diff D-04): a short is now triggered by
+      // close < lower + RSI oversold. Use the crash fixture (was
+      // _buildLongSlFixture under Phase-1 semantics) so the asymmetric
+      // move produces a short under the new direction.
+      final candles = _buildLongSlFixture();
       final result = BacktestService.runBbRsi(
         candles: candles,
         initialBalance: 10_000.0,
@@ -227,20 +230,20 @@ void main() {
       expect(result.trades, isNotEmpty,
           reason:
               'fixture must trigger at least one BB+RSI short entry — if '
-              'this fails the surge-up sequence is no longer pushing close '
-              'above upper BB with RSI > 70; rebuild the fixture.');
+              'this fails the crash-down sequence is no longer pushing close '
+              'below lower BB with RSI < 30; rebuild the fixture.');
 
-      // Find the canonical TP-exit short trade (entered on the surge top
-      // close=130, exited next bar on low=0). Earlier surge candles may have
-      // produced a separate SL-exit trade; that is not the F-02 contract here.
+      // Under Phase-2 the short is opened on the crash bottom (close=70)
+      // and the next candle low=0 hits TP (placeholder = 2*lower-middle,
+      // well above 0).
       final trade = result.trades.firstWhere(
         (t) => t.direction == 'SHORT' &&
             t.exitReason == 'TakeProfit' &&
-            t.entryPrice == 130.0,
+            t.entryPrice == 70.0,
         orElse: () => throw StateError(
-            'F-02: fixture must produce a SHORT TP trade entered at close=130 '
-            '(the surge top). Pre-F-02 this position would close at "BB Middle" '
-            'on the indicator path, never with exitReason="TakeProfit".'),
+            'F-02: fixture must produce a SHORT TP trade entered at close=70 '
+            '(the crash bottom). Pre-F-02 this position would close at "BB '
+            'Middle" on the indicator path, never with exitReason="TakeProfit".'),
       );
       expect(trade.exitPrice, lessThan(trade.entryPrice),
           reason:
@@ -248,12 +251,12 @@ void main() {
               'always strictly below the entry price');
       expect(trade.exitPrice, greaterThan(0.0),
           reason:
-              'TP must equal the absolute TP price (BB middle), not the exit '
+              'TP must equal the absolute TP price (BB-derived), not the exit '
               'candle low which is 0.0');
-      expect(trade.exitPrice, isNot(closeTo(110.0, 1e-9)),
+      expect(trade.exitPrice, isNot(closeTo(60.0, 1e-9)),
           reason:
               'pre-F-02 the position would close on the exit candle close '
-              '(=110); post-F-02 it closes at the BB-derived TP price intra-bar');
+              '(=60); post-F-02 it closes at the BB-derived TP price intra-bar');
       expect(trade.pnl, greaterThan(0.0),
           reason: 'a short take-profit is by definition a winning trade');
     });

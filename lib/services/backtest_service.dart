@@ -389,26 +389,37 @@ class BacktestService {
         final upper = bbUpper[i];
 
         if (position == null) {
-          // Entry: SL/TP computed at SIGNAL bar's BB (i), filled at i+1
-          // open. Mirrors Rust BbRsiStrategy::on_candle (bb_rsi.rs:224, :232).
-          if (close <= lower && rsi < params.rsiOversold) {
-            pending = _PendingEnterLong(2 * lower - middle, middle);
-          } else if (close >= upper && rsi > params.rsiOverbought) {
-            pending = _PendingEnterShort(2 * upper - middle, middle);
+          // Diff D-03/D-04 (Phase-2): trend-following entries. Long when
+          // close > BB upper with RSI confirming momentum (> overbought);
+          // short when close < BB lower with RSI confirming exhaustion
+          // (< oversold). Strict `>` / `<` on price per spec. SL/TP
+          // placeholders mirror the old BB-geometry pattern for the new
+          // direction so basic invariants hold (long SL < entry < long
+          // TP); the video-spec R:R 1:3 + swing-low SL land in Welle 2
+          // (D-06 / D-07). Mirrors Rust BbRsiStrategy::on_candle.
+          if (close > upper && rsi > params.rsiOverbought) {
+            pending = _PendingEnterLong(middle, 2 * upper - middle);
+          } else if (close < lower && rsi < params.rsiOversold) {
+            pending = _PendingEnterShort(middle, 2 * lower - middle);
           }
         } else {
+          // Intermediate exit conditions inverted to stay coherent with
+          // the new trend-follow entries (close back to / past middle =
+          // trend over; RSI flipping to the opposite extreme = trend
+          // reversal). Diff D-11 removes this whole block in the next
+          // commit; final spec uses only SL/TP exits set at entry.
           final pos = position!;
           if (pos.isLong) {
-            if (close >= middle) {
-              pending = _PendingExit('BB Middle');
-            } else if (rsi > params.rsiOverbought) {
-              pending = _PendingExit('RSI Overbought');
-            }
-          } else {
             if (close <= middle) {
               pending = _PendingExit('BB Middle');
             } else if (rsi < params.rsiOversold) {
               pending = _PendingExit('RSI Oversold');
+            }
+          } else {
+            if (close >= middle) {
+              pending = _PendingExit('BB Middle');
+            } else if (rsi > params.rsiOverbought) {
+              pending = _PendingExit('RSI Overbought');
             }
           }
         }
