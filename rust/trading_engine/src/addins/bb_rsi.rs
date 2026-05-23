@@ -1,10 +1,12 @@
 //! Bollinger Bands + RSI Strategy Add-in.
 //!
-//! Defaults, entry direction and RSI cross-back trigger match the
-//! video-spec "verbesserte Variante" (see
-//! `01_Projectplan/specs/bb_rsi_spec.md` §1–§3, Diff D-01..D-05). The
-//! BB-middle / RSI-extreme exit removal (D-11) and the R:R 1:3 +
-//! swing-low SL (D-06/D-07/D-08/D-09) land in subsequent commits.
+//! Defaults, entry direction, RSI cross-back trigger, and exit
+//! semantics all match the video-spec "verbesserte Variante" (see
+//! `01_Projectplan/specs/bb_rsi_spec.md` §1–§6, Diff D-01..D-05 and
+//! D-11). Positions are now closed exclusively by the SL/TP placeholders
+//! attached at entry — no BB-middle or RSI-extreme indicator exits.
+//! The R:R 1:3 + swing-low SL + break-even-trail + risk-2 % sizing
+//! (D-06/D-07/D-08/D-09) land in Welle 2.
 //!
 //! # Parameters
 //! | Name            | Default | Range    | Description                                  |
@@ -18,7 +20,7 @@
 
 use std::collections::HashMap;
 
-use crate::models::{Candle, ExitReason, Timeframe};
+use crate::models::{Candle, Timeframe};
 use crate::strategy::{
     AddinManifest, Context, InputSpec, ParameterSchema, Signal, StrategyAddin, StrategyCategory,
 };
@@ -183,10 +185,6 @@ pub struct BbRsiState {
     /// check. `None` on the first valid bar after warm-up, in which case
     /// no cross can be observed yet.
     pub prev_rsi: Option<f64>,
-    /// Whether we are in a long position.
-    pub in_long: bool,
-    /// Whether we are in a short position.
-    pub in_short: bool,
 }
 
 /// Bollinger Bands + RSI Mean Reversion strategy add-in.
@@ -289,31 +287,6 @@ impl StrategyAddin for BbRsiStrategy {
 
         let price = ctx.current_price();
 
-        // ── Exit logic (checked first) ──────────────────────────────────
-        // Phase-2 Diff D-03/D-04 inverts the strategy from mean-reversion
-        // to trend-following: long enters above the upper band, short
-        // enters below the lower band. The intermediate exit conditions
-        // here mirror the OLD mean-reversion exits so the strategy stays
-        // coherent at this commit (price reverting to the middle band
-        // means the trend pullback is over). Diff D-11 (next commit)
-        // removes these blocks entirely; the final spec uses only SL/TP
-        // exits set at entry.
-        if self.state.in_long && (price <= bb.middle || rsi < rsi_oversold) {
-            self.state.in_long = false;
-            ctx.in_position = false;
-            return Some(Signal::Exit {
-                reason: ExitReason::Signal("BB middle / RSI exit".to_string()),
-            });
-        }
-
-        if self.state.in_short && (price >= bb.middle || rsi > rsi_overbought) {
-            self.state.in_short = false;
-            ctx.in_position = false;
-            return Some(Signal::Exit {
-                reason: ExitReason::Signal("BB middle / RSI exit".to_string()),
-            });
-        }
-
         // ── Entry logic ─────────────────────────────────────────────────
         // Diff D-03/D-04 + Diff D-05: trend-follow + RSI cross-back
         // through the oversold/overbought level per video-spec §2/§3.
@@ -327,8 +300,6 @@ impl StrategyAddin for BbRsiStrategy {
         if !ctx.in_position {
             if let Some(prev) = prev_rsi {
                 if price > bb.upper && prev < rsi_oversold && rsi >= rsi_oversold {
-                    self.state.in_long = true;
-                    self.state.in_short = false;
                     ctx.in_position = true;
                     return Some(Signal::long(
                         Some(bb.middle),
@@ -337,8 +308,6 @@ impl StrategyAddin for BbRsiStrategy {
                 }
 
                 if price < bb.lower && prev > rsi_overbought && rsi <= rsi_overbought {
-                    self.state.in_short = true;
-                    self.state.in_long = false;
                     ctx.in_position = true;
                     return Some(Signal::short(
                         Some(bb.middle),
@@ -677,11 +646,11 @@ mod tests {
     #[test]
     fn test_strategy_reset() {
         let mut strategy = BbRsiStrategy::new();
-        strategy.state.in_long = true;
         strategy.state.last_rsi = Some(42.0);
+        strategy.state.prev_rsi = Some(40.0);
         strategy.on_reset();
-        assert!(!strategy.state.in_long);
         assert!(strategy.state.last_rsi.is_none());
+        assert!(strategy.state.prev_rsi.is_none());
     }
 
     #[test]

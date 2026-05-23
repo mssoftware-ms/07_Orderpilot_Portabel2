@@ -150,10 +150,10 @@ class _PendingEnterShort extends _PendingOrder {
   _PendingEnterShort(this.stopLoss, this.takeProfit);
 }
 
-class _PendingExit extends _PendingOrder {
-  final String reason;
-  _PendingExit(this.reason);
-}
+// Diff D-11 removed the BB-middle / RSI-extreme indicator exits, so
+// the pending-order queue no longer carries `_PendingExit` entries —
+// positions close exclusively via Step B intra-bar SL/TP, or via the
+// end-of-data force-close in `runBbRsi`.
 
 // ─── Backtest Engine ────────────────────────────────────────────────────────
 
@@ -337,14 +337,6 @@ class BacktestService {
             );
             balance = 0;
             totalFees += fee;
-          case _PendingExit p:
-            final pos = position;
-            if (pos != null) {
-              final exitPrice = pos.isLong
-                  ? candle.open * (1 - slipFactor)
-                  : candle.open * (1 + slipFactor);
-              closePosition(exitPrice, candle.timestamp, p.reason);
-            }
         }
         pending = null;
       }
@@ -417,26 +409,10 @@ class BacktestService {
                 pending = _PendingEnterShort(middle, 2 * lower - middle);
               }
             }
-          } else {
-            // Intermediate exit conditions, removed entirely in Diff
-            // D-11 (next commit). Direction mirrors the new trend-follow
-            // entries (close past middle = trend over; RSI flipping to
-            // the opposite extreme = trend reversal).
-            final pos = position!;
-            if (pos.isLong) {
-              if (close <= middle) {
-                pending = _PendingExit('BB Middle');
-              } else if (rsi < params.rsiOversold) {
-                pending = _PendingExit('RSI Oversold');
-              }
-            } else {
-              if (close >= middle) {
-                pending = _PendingExit('BB Middle');
-              } else if (rsi > params.rsiOverbought) {
-                pending = _PendingExit('RSI Overbought');
-              }
-            }
           }
+          // Diff D-11 (Phase-2): BB-middle and RSI-extreme indicator
+          // exits removed. Positions are closed exclusively by SL/TP
+          // (Step B intra-bar) or end-of-data force-close.
         }
 
         // Rotate prevRsi for the next iteration regardless of whether a
