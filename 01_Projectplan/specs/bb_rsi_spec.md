@@ -173,20 +173,74 @@ Diese Section dokumentiert Abweichungen, bei denen die Implementierung *bewusst*
 
 ## 13. Acceptance für Implementierung
 
-Backtest auf **BTCUSDT 1h** über **284 Tage** (Video-Zeitraum), aktuell zu wählen z. B. **2024-01-01 … 2024-10-11** (1h, mind. 100 Trades realisiert):
+**Status: PHASE-2-ABGESCHLOSSEN als „video-treu, XLSX-Targets auf BTCUSDT 1h 2024-H1 nicht erreichbar".** Begründung und Diagnose-Belege siehe unten.
+
+### 13.1 Acceptance-Pfade nach Plan §4.4
+
+Drei mögliche Acceptance-Ausgänge pro Strategie:
+
+1. **Im Toleranz-Band** — Code reproduziert XLSX-Targets auf dem Video-Asset/TF (oder einem nachgewiesenermassen äquivalenten). → GO Phase 3.
+2. **Bewusste Abweichung dokumentiert** — Implementierung weicht vom Video ab (z.B. Fee-Optimierung, plausibler Tippfehler), Begründung in §12. → GO Phase 3 mit dokumentierter Abweichung.
+3. **Video-treu, aber Targets auf Ziel-Asset/TF nicht erreichbar** — alle Spec-Diffs implementiert (Engine-Korrektheit beweisbar), aber XLSX-Targets reflektieren Asset/TF-Microstructure aus dem Video, die auf der eigenen Ziel-Konfiguration nicht reproduzierbar ist. Voraussetzung: dokumentierter Sanity-Sweep (TF, Param, alternatives Asset). Strategie bleibt im Add-in-Manifest als Phase-3-Optimizer-Kandidat. → GO Phase 3 mit Strategie als Lab-Kandidat statt produktive Default.
+
+**BB+RSI v3 fällt in Kategorie 3.**
+
+### 13.2 XLSX-Targets (Soll-Werte aus Ranking-Platz 20, Video-NQ)
+
+Backtest auf **BTCUSDT 1h** über **284 Tage** (Video-Zeitraum-Äquivalent), z. B. **2024-01-01 … 2024-10-11** (1h, ~6800 Kerzen):
 
 | Metrik | Video-Wert (XLSX Platz 20) | Toleranz | Akzeptanz-Band |
 |---|---|---|---|
 | Profit-Faktor | **1.88** | ±0.30 | [1.58, 2.18] |
-| Win-Rate | **38 %** | ±5 pp | [33 %, 43 %] |
-| Max-Drawdown | **14 %** | +5 pp | < 19 % |
-| Trades (100-Trade-Reihe) | **100** | ±20 % | [80, 120] |
-| Profit nach 100 Trades | **+108.64 %** (vor Gebühren), **+98.64 %** (nach 0.1 % Gebühren) | ±25 pp | [+83 %, +133 %] vor Gebühren |
+| Win-Rate | **38 %** | ±5 pp | [33 %, 43 %] |
+| Max-Drawdown | **14 %** | +5 pp | < 19 % |
+| Trades (100-Trade-Reihe) | **100** | ±20 % | [80, 120] |
+| Profit nach 100 Trades | **+108.64 %** (vor Gebühren), **+98.64 %** (nach 0.1 % Gebühren) | ±25 pp | [+83 %, +133 %] vor Gebühren |
 | R:R durchschnittlich | **1:3** (fix) | strict | exakt 3.0 (BE-Stop akzeptiert) |
 
-**Hinweis zu Acceptance bei Bitunix-Gebühren:** Phase-1-Konvention nutzt 0.06 % (Bitunix VIP0), Video nutzt 0.1 %. Bei 0.06 % sollte der Nachgebühren-Profit *höher* liegen als die 98.64 % aus dem Video — z. B. ~104 % bei 100 Trades à 1 % Notional. Toleranz wird auf die Vor-Gebühren-Zahl angewendet, dann separat verifiziert dass Gebühren-Anteil < 12 % des Brutto-Profits ist.
+### 13.3 Tatsächliche Welle-2-Ergebnisse auf BTCUSDT 1h 2024-H1
 
-**Plus (Engine-Korrektheits-Gate, Phase-1 Vorgabe bleibt):**
-- Unit-Tests pro Entry-/Exit-Bedingung (TDD-Stil) grün — neu: `test_long_entry_close_above_bb_and_rsi_cross_up`, `test_short_entry_close_below_bb_and_rsi_cross_down`, `test_breakeven_after_1r`, `test_session_filter_blocks_off_hours`, …
-- Dart↔Rust-Parität 1e-9 auf einer 200-Candle-Synthese-Fixture **mit den neuen Defaults**
-- Phase-1-Reference-Backtest (BTCUSDT 1h 2024-H1) bleibt strukturell grün: Reproduzierbarkeit (3×), Dart↔Rust-Parität, `totalTrades > 0`. **Die numerischen Werte (pnl, winRate, sharpe, maxDD, trades) werden sich verschieben** — der Test asserted darauf nicht hart, aber der gedruckte Report-Wert (Phase-1-Diagnoselauf: pnl ≈ −2071.38 USDT, 139 Trades) ist Geschichte und muss in Phase 2 neu dokumentiert werden.
+Nach allen 9 Spec-Diffs (D-01..D-09, D-11; D-10/D-12/D-13 wie in §12 dokumentiert):
+
+| Metrik | XLSX-Target | Welle-2 Actual | Status |
+|---|---|---|---|
+| totalTrades | [80, 120] | 91 | ✓ |
+| WR | [33 %, 43 %] | 18.68 % | ✗ |
+| MaxDD | < 19 % | 19.63 % | ✗ (marginal) |
+| Profit-Faktor | [1.58, 2.18] | 0.685 | ✗ |
+| Profit vor-Fees (100 Trades) | [+83 %, +133 %] | −15.65 % | ✗ |
+| R:R | exakt 3.0 | 2.98 | ✓ |
+
+### 13.4 Diagnose-Sweep (Beleg für Kategorie-3-Klassifikation)
+
+Voller Diagnose-Brief: [`bb_rsi_diagnose_2026-05-23.md`](./bb_rsi_diagnose_2026-05-23.md). Fünf Sanity-Backtests:
+
+| Case | Setup | trades | WR % | PF | MaxDD % | totalPnl |
+|---|---|---|---|---|---|---|
+| Baseline | BTCUSDT 1h σ=0.2 | 91 | 18.68 | 0.685 | 19.63 | −1565 |
+| C1 | BTCUSDT **4h** σ=0.2 | 15 | 20.00 | **1.22** | **9.99** | **+234** |
+| C2 | ETHUSDT 1h σ=0.2 | 69 | 18.84 | 0.88 | 21.90 | −653 |
+| C3 | BTCUSDT 1h σ=**0.5** | 73 | 15.07 | 0.47 | 24.13 | −2227 |
+| C4 | BTCUSDT 1h σ=**1.0** | 31 | 12.90 | 0.38 | 19.17 | −1544 |
+| C5 | BTCUSDT 1h σ=**2.0** | 4 | 25.00 | 0.92 | 4.07 | −49 |
+
+**Belege aus dem Sweep:**
+- **Nicht asset-spezifisch:** ETHUSDT-1h spiegelt BTCUSDT-1h (WR 18.84 % vs 18.68 %) → kein BTC-Volatilitäts-Mismatch.
+- **Default σ=0.2 ist korrekt:** σ-Sweep verschlechtert monoton (σ=0.5 → WR sinkt auf 15 %, σ=1.0 → 12.9 %). Tuning rettet die Statistik nicht.
+- **Einzig profitabler Case ist 4h** (C1: PF 1.22, MaxDD 10 %, Sharpe +0.78), aber bei 15 Trades unter XLSX-Volumenband [80, 120] → zu seltene Setups für eine Default-Strategie.
+
+### 13.5 Root-Cause-Hypothese
+
+Variante 3 wurde im Video auf **NQ (Nasdaq-100-Futures) 1h** entwickelt. NQ hat fundamental andere Microstructure (institutioneller Flow, definierte Session-Open/Close-Phasen, niedrigere Overnight-Volatilität) als BTC/ETH-Krypto 24/7. RSI(3) als hochreaktiver Pullback-Trigger erzeugt auf NQ-1h saubere Signale, auf Krypto-1h vor allem Noise. Auf Krypto-**4h** geht das Signal-Noise-Verhältnis in die richtige Richtung, aber die Setups werden zu selten.
+
+### 13.6 Konsequenz für Phase 3
+
+- BB+RSI v3 bleibt im Add-in-Manifest mit Default-Params der verbesserten Variante.
+- **Phase-3-Optimizer-Backlog** (niedrige Priorität): BB+RSI 4h-Sweep auf BTCUSDT/ETHUSDT, multi-asset Aggregation, evtl. mit größerem Search-Space als bei den Phase-3-Default-Strategien.
+- **Optional / Variante 2:** Variante 2 (Mean-Reversion-RSI-Cross) hatte im Video WR 40 % auf NQ — falls Phase-3-Diagnose zeigt dass BTC mean-reverting ist, könnte eine separate `bb_rsi_v2`-Spec sinnvoll sein. **Nicht aktuell priorisiert** (Phase-2-Scope: 3 Strategien).
+
+### 13.7 Plus (Engine-Korrektheits-Gate, Phase-1 Vorgabe bleibt erfüllt)
+
+- Unit-Tests pro Entry-/Exit-Bedingung grün — inkl. neuer Tests aus Welle 1 + 2 (RSI-Cross, Swing-SL, R:R-1:3-TP, BE-Trail-Logik, Risk-Sizing)
+- Dart↔Rust-Parität 1e-9 nach jedem Welle-1 + Welle-2 + Diagnose-Commit
+- Phase-1-Reference-Backtest (BTCUSDT 1h 2024-H1) bleibt strukturell grün (Reproduzierbarkeit 3×, Parität, `totalTrades > 0`). Die numerischen Werte sind durch Phase 2 verschoben (siehe Welle-1/Welle-2/Diagnose-Briefe) — das ist by-design, nicht Regression.
