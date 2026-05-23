@@ -49,7 +49,7 @@ pub struct BollingerBands {
     pub lower: f64,
 }
 
-/// Calculate Bollinger Bands from a series of close prices.
+/// Calculate Bollinger Bands from a series of close prices using SMA basis.
 ///
 /// Returns `None` if there are fewer data points than `period`.
 pub fn calc_bollinger_bands(closes: &[f64], period: usize, num_stddev: f64) -> Option<BollingerBands> {
@@ -64,6 +64,36 @@ pub fn calc_bollinger_bands(closes: &[f64], period: usize, num_stddev: f64) -> O
         middle,
         lower: middle - num_stddev * sd,
     })
+}
+
+/// Compute the Exponential Moving Average over a full close-price history.
+///
+/// Convention (locked for Dart↔Rust parity):
+/// - Period must be > 0 and `values.len() >= period`, otherwise returns `None`.
+/// - Alpha = `2 / (period + 1)` (the standard "smoothing factor").
+/// - The EMA is **SMA-seeded**: the first `period` values are averaged to
+///   form the initial EMA, then the recursive update
+///   `ema = alpha * v + (1 - alpha) * ema` is applied for every subsequent
+///   value. This matches the conventions used by TA-Lib, pandas-ta, and
+///   TradingView (`ta.ema`).
+/// - When `values.len() == period`, the return value equals the seed SMA
+///   (no recursive updates applied yet).
+///
+/// EMA is path-dependent: feeding only the last N closes restarts the seed
+/// from a different SMA and drifts compared to the cumulative computation.
+/// Callers that need the BB(EMA) basis on bar `i` must therefore pass the
+/// **full** prior close history `closes[..=i]`, mirroring the F-02b RSI
+/// contract.
+pub fn calc_ema(values: &[f64], period: usize) -> Option<f64> {
+    if period == 0 || values.len() < period {
+        return None;
+    }
+    let alpha = 2.0 / (period as f64 + 1.0);
+    let mut ema = values[..period].iter().sum::<f64>() / period as f64;
+    for &v in &values[period..] {
+        ema = alpha * v + (1.0 - alpha) * ema;
+    }
+    Some(ema)
 }
 
 /// Calculate RSI using Wilder's smoothing method.
@@ -365,6 +395,78 @@ mod tests {
         let closes = vec![100.0, 200.0, 10.0, 10.0, 10.0];
         let bb = calc_bollinger_bands(&closes, 3, 2.0).unwrap();
         assert!((bb.middle - 10.0).abs() < 1e-10);
+    }
+
+    // ── EMA tests ────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_ema_insufficient_data() {
+        assert!(calc_ema(&[1.0, 2.0, 3.0], 5).is_none());
+    }
+
+    #[test]
+    fn test_ema_zero_period() {
+        assert!(calc_ema(&[1.0, 2.0, 3.0], 0).is_none());
+    }
+
+    #[test]
+    fn test_ema_seed_equals_sma_when_history_equals_period() {
+        // values.len() == period → EMA equals seed SMA (no recursive step yet)
+        let closes = vec![10.0, 12.0, 14.0, 16.0, 18.0];
+        let ema = calc_ema(&closes, 5).unwrap();
+        assert!((ema - 14.0).abs() < 1e-12, "EMA seed: {}", ema);
+    }
+
+    #[test]
+    fn test_ema_period_1_tracks_last_value() {
+        // alpha = 2/(1+1) = 1 → EMA always equals current value
+        let closes = vec![10.0, 20.0, 5.0, 7.0];
+        let ema = calc_ema(&closes, 1).unwrap();
+        assert!((ema - 7.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_ema_constant_series() {
+        let closes = vec![100.0; 50];
+        let ema = calc_ema(&closes, 14).unwrap();
+        assert!((ema - 100.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_ema_known_values_period_5() {
+        // Hand-computed reference (locked for Dart↔Rust parity):
+        //   alpha = 2/(5+1) = 1/3
+        //   SMA seed of [10,12,11,13,14] = 12.0
+        //   EMA after 15 = (1/3)*15 + (2/3)*12 = 13.0
+        //   EMA after 14 = (1/3)*14 + (2/3)*13 = 13.333333333333334
+        let closes = vec![10.0, 12.0, 11.0, 13.0, 14.0, 15.0, 14.0];
+        let ema = calc_ema(&closes, 5).unwrap();
+        let expected = 13.333_333_333_333_334;
+        assert!(
+            (ema - expected).abs() < 1e-12,
+            "EMA(5): expected {} got {}",
+            expected,
+            ema
+        );
+    }
+
+    #[test]
+    fn test_ema_path_dependent_on_history_length() {
+        // Same final 5 closes but different prior history → different EMA.
+        // This pins WHY the strategy must feed the full prior-close history
+        // (mirrors the F-02b contract for RSI).
+        let long_history = vec![100.0, 105.0, 102.0, 108.0, 110.0, 115.0, 120.0];
+        let short_window = &long_history[long_history.len() - 5..]; // [102,108,110,115,120]
+
+        let ema_full = calc_ema(&long_history, 5).unwrap();
+        let ema_partial = calc_ema(short_window, 5).unwrap();
+        // ema_full uses 7 closes, ema_partial only the last 5 → seeds differ.
+        assert!(
+            (ema_full - ema_partial).abs() > 1e-3,
+            "EMA must be path-dependent on history length: full={} partial={}",
+            ema_full,
+            ema_partial
+        );
     }
 
     // ── RSI tests ────────────────────────────────────────────────────────
