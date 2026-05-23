@@ -86,6 +86,141 @@ pub fn calc_atr(
     Some(atr)
 }
 
+/// Compute an EMA series over `values` with explicit warm-up start.
+///
+/// The first `start + period - 1` output indices are `NaN` (gathering
+/// seed values); `out[start + period - 1]` equals the SMA seed
+/// `mean(values[start..start + period])`; subsequent indices apply the
+/// standard EMA recursion `ema = alpha * v + (1 - alpha) * ema` with
+/// `alpha = 2 / (period + 1)`. Matches the SMA-seeded convention of
+/// [`calc_ema`](crate::addins::bb_rsi::calc_ema) and Pinescript's
+/// `ta.ema` (which seeds with `ta.sma(source, length)` on the first
+/// bar). Caller is responsible for ensuring `values[start..start + period]`
+/// contains no `NaN`s — otherwise the seed itself becomes `NaN` and
+/// every downstream sample stays `NaN`.
+///
+/// Returns an all-`NaN` vec when `period == 0` or `start + period > n`.
+fn ema_series_from(values: &[f64], period: usize, start: usize) -> Vec<f64> {
+    let n = values.len();
+    let mut out = vec![f64::NAN; n];
+    if period == 0 || start + period > n {
+        return out;
+    }
+    let alpha = 2.0 / (period as f64 + 1.0);
+    let mut ema = 0.0;
+    for &v in &values[start..start + period] {
+        ema += v;
+    }
+    ema /= period as f64;
+    out[start + period - 1] = ema;
+    for i in (start + period)..n {
+        ema = alpha * values[i] + (1.0 - alpha) * ema;
+        out[i] = ema;
+    }
+    out
+}
+
+/// Compute the Stochastic Momentum Index (SMI, Blau 1993) and its
+/// EMA signal line over a candle stream.
+///
+/// Variant: TradingView Pinescript-standard double-EMA-smoothed SMI per
+/// `01_Projectplan/specs/ut_bot_spec.md` §12.4 (Blau-1993-Standard with
+/// three free parameters: `length`, `k_smoothing`, `d_smoothing`).
+///
+/// Formula (locked for Dart↔Rust parity, mirrors `calcSmi` in
+/// `lib/services/indicators.dart`):
+///
+/// ```text
+/// hh[i]   = highest(high, length) over the last `length` bars (inclusive)
+/// ll[i]   = lowest(low,  length)
+/// mid[i]  = (hh[i] + ll[i]) / 2
+/// diff[i] = close[i] - mid[i]
+/// rng[i]  = hh[i] - ll[i]
+///
+/// dk  = EMA(diff, k_smoothing)
+/// dkd = EMA(dk,   d_smoothing)
+/// rk  = EMA(rng,  k_smoothing)
+/// rkd = EMA(rk,   d_smoothing)
+///
+/// smi[i]    = 200 * dkd[i] / rkd[i]              (NaN where rkd == 0)
+/// signal[i] = EMA(smi, d_smoothing)               (uses d_smoothing again
+///                                                   per QuantNomad / Blau
+///                                                   defaults; spec §12.4
+///                                                   does not introduce a
+///                                                   separate signal_length)
+/// ```
+///
+/// Returns `None` if any period is zero, if input slices have mismatched
+/// lengths, or if there is not enough data to seed the SMI itself
+/// (warm-up = `length - 1 + k_smoothing - 1 + d_smoothing - 1`). The
+/// signal line requires `d_smoothing - 1` additional bars on top of that.
+///
+/// Returned tuple is `(smi, signal)`, each a `Vec<f64>` of length
+/// `closes.len()` with `NaN` in the warm-up region.
+#[allow(clippy::type_complexity)]
+pub fn calc_smi(
+    highs: &[f64],
+    lows: &[f64],
+    closes: &[f64],
+    length: usize,
+    k_smoothing: usize,
+    d_smoothing: usize,
+) -> Option<(Vec<f64>, Vec<f64>)> {
+    if length == 0 || k_smoothing == 0 || d_smoothing == 0 {
+        return None;
+    }
+    if highs.len() != closes.len() || lows.len() != closes.len() {
+        return None;
+    }
+    let n = closes.len();
+    // SMI warm-up: length-1 (diff/rng seed) + k_smoothing-1 (first EMA)
+    // + d_smoothing-1 (second EMA). At that index the first SMI value is
+    // available; signal[smi_start + d_smoothing - 1] is the first signal.
+    let smi_start = length
+        .saturating_sub(1)
+        .saturating_add(k_smoothing.saturating_sub(1))
+        .saturating_add(d_smoothing.saturating_sub(1));
+    if n <= smi_start {
+        return None;
+    }
+
+    // Step 1: per-bar diff (close - midpoint) and range (HH - LL).
+    let mut diff = vec![f64::NAN; n];
+    let mut rng = vec![f64::NAN; n];
+    for i in (length - 1)..n {
+        let win_h = &highs[i + 1 - length..=i];
+        let win_l = &lows[i + 1 - length..=i];
+        let hh = win_h.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        let ll = win_l.iter().copied().fold(f64::INFINITY, f64::min);
+        diff[i] = closes[i] - (hh + ll) / 2.0;
+        rng[i] = hh - ll;
+    }
+
+    // Step 2: double-EMA smooth both series.
+    let diff_k = ema_series_from(&diff, k_smoothing, length - 1);
+    let diff_kd =
+        ema_series_from(&diff_k, d_smoothing, length - 1 + k_smoothing - 1);
+    let rng_k = ema_series_from(&rng, k_smoothing, length - 1);
+    let rng_kd =
+        ema_series_from(&rng_k, d_smoothing, length - 1 + k_smoothing - 1);
+
+    // Step 3: SMI = 200 * diff_kd / rng_kd, NaN-safe.
+    let mut smi = vec![f64::NAN; n];
+    for i in smi_start..n {
+        let dkd = diff_kd[i];
+        let rkd = rng_kd[i];
+        if !dkd.is_nan() && !rkd.is_nan() && rkd > 0.0 {
+            smi[i] = 200.0 * dkd / rkd;
+        }
+    }
+
+    // Step 4: signal = EMA(SMI, d_smoothing), starting from the first
+    // valid SMI index.
+    let signal = ema_series_from(&smi, d_smoothing, smi_start);
+
+    Some((smi, signal))
+}
+
 // ─── Tests ──────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -223,6 +358,209 @@ mod tests {
         assert!((atr[1] - 2.0).abs() < 1e-12);
         // tr[2] = max(3.5, |103.5-101|=2.5, |100-101|=1.0) = 3.5
         assert!((atr[2] - 3.5).abs() < 1e-12);
+    }
+
+    // ── SMI helper tests ────────────────────────────────────────────────
+
+    #[test]
+    fn test_smi_zero_period_returns_none() {
+        let h = vec![1.0; 5];
+        let l = vec![0.5; 5];
+        let c = vec![0.7; 5];
+        assert!(calc_smi(&h, &l, &c, 0, 2, 2).is_none());
+        assert!(calc_smi(&h, &l, &c, 3, 0, 2).is_none());
+        assert!(calc_smi(&h, &l, &c, 3, 2, 0).is_none());
+    }
+
+    #[test]
+    fn test_smi_mismatched_lengths_return_none() {
+        let h = vec![1.0, 2.0, 3.0];
+        let l = vec![0.5, 1.5];
+        let c = vec![0.7, 1.7, 2.7];
+        assert!(calc_smi(&h, &l, &c, 2, 1, 1).is_none());
+    }
+
+    #[test]
+    fn test_smi_insufficient_data_returns_none() {
+        // length=3, k=2, d=2 → smi_start = 2+1+1 = 4 → need at least 5 bars
+        let h = vec![1.0, 2.0, 3.0, 4.0];
+        let l = vec![0.5, 1.5, 2.5, 3.5];
+        let c = vec![0.8, 1.8, 2.8, 3.8];
+        assert!(calc_smi(&h, &l, &c, 3, 2, 2).is_none());
+    }
+
+    #[test]
+    fn test_smi_zero_at_perfect_midrange() {
+        // Constant range with close exactly at the midpoint: diff is 0,
+        // so SMI is 0 (numerator 0, denominator > 0). Engineering plan §2
+        // Welle U2 test list: "konstanter Range mit close in der Mitte
+        // → SMI ≈ 0".
+        let n = 20;
+        let highs = vec![101.0; n];
+        let lows = vec![99.0; n];
+        let closes = vec![100.0; n];
+        let (smi, _signal) = calc_smi(&highs, &lows, &closes, 5, 3, 3).unwrap();
+        // smi_start = 5-1 + 3-1 + 3-1 = 8 → first valid SMI at index 8.
+        for (i, &v) in smi.iter().enumerate().skip(8) {
+            assert!(v.abs() < 1e-12, "SMI at {}: {}", i, v);
+        }
+    }
+
+    #[test]
+    fn test_smi_positive_in_uptrend() {
+        // Monotonically rising closes → close trends above the midpoint
+        // of (HH, LL), so diff > 0 and SMI > 0.
+        let n = 50;
+        let highs: Vec<f64> = (0..n).map(|i| 100.0 + i as f64 + 0.5).collect();
+        let lows: Vec<f64> = (0..n).map(|i| 100.0 + i as f64 - 0.5).collect();
+        let closes: Vec<f64> = (0..n).map(|i| 100.0 + i as f64).collect();
+        let (smi, _signal) =
+            calc_smi(&highs, &lows, &closes, 10, 5, 3).unwrap();
+        // smi_start = 9+4+2 = 15. After 15 the SMI must settle positive.
+        // Allow a small tolerance for the initial Wilder ramp.
+        for (i, &v) in smi.iter().enumerate().skip(30) {
+            assert!(v > 0.0, "SMI at {} expected > 0, got {}", i, v);
+        }
+    }
+
+    #[test]
+    fn test_smi_negative_in_downtrend() {
+        // Monotonically falling closes → mirror of the uptrend test.
+        let n = 50;
+        let highs: Vec<f64> =
+            (0..n).map(|i| 200.0 - i as f64 + 0.5).collect();
+        let lows: Vec<f64> =
+            (0..n).map(|i| 200.0 - i as f64 - 0.5).collect();
+        let closes: Vec<f64> = (0..n).map(|i| 200.0 - i as f64).collect();
+        let (smi, _signal) =
+            calc_smi(&highs, &lows, &closes, 10, 5, 3).unwrap();
+        for (i, &v) in smi.iter().enumerate().skip(30) {
+            assert!(v < 0.0, "SMI at {} expected < 0, got {}", i, v);
+        }
+    }
+
+    #[test]
+    fn test_smi_bounded_by_minus_200_to_200() {
+        // SMI is bounded by ±200 by construction (numerator |diff_kd|
+        // can never exceed rkd/2 by the highest/lowest range definition).
+        let n = 60;
+        let mut highs = Vec::with_capacity(n);
+        let mut lows = Vec::with_capacity(n);
+        let mut closes = Vec::with_capacity(n);
+        for i in 0..n {
+            let phase = (i as f64) * 0.4;
+            let price = 100.0 + 10.0 * phase.sin();
+            highs.push(price + 0.5);
+            lows.push(price - 0.5);
+            closes.push(price);
+        }
+        let (smi, _) = calc_smi(&highs, &lows, &closes, 10, 5, 3).unwrap();
+        for v in smi.iter().filter(|v| !v.is_nan()) {
+            assert!(v.abs() <= 200.0 + 1e-9, "SMI out of bounds: {}", v);
+        }
+    }
+
+    #[test]
+    fn test_smi_known_values_small_fixture() {
+        // Hand-computed reference (also enforced bit-exact by the Dart
+        // mirror in `test/services/indicators_test.dart`):
+        //
+        // length=3, k=2, d=2.
+        // Bars 0..9 with body=0 (open==close==listed), tight ±1.0 wicks
+        // around the close so HH/LL inside the window collapse to the
+        // close itself ±0/±1 depending on the position in the window.
+        //
+        // Closes:  [100, 101, 102, 103, 104, 103, 102, 101, 100, 99]
+        // Highs:   close + 1.0
+        // Lows:    close - 1.0
+        //
+        // Resulting first valid SMI at index 4 = 50.0; subsequent values
+        // computed below by walking the double-EMA chain by hand. See
+        // commit message for the full derivation.
+        let closes: Vec<f64> = (0..10)
+            .map(|i| if i <= 4 { 100.0 + i as f64 } else { 100.0 + (8 - i) as f64 })
+            .collect();
+        let highs: Vec<f64> = closes.iter().map(|c| c + 1.0).collect();
+        let lows: Vec<f64> = closes.iter().map(|c| c - 1.0).collect();
+
+        let (smi, signal) = calc_smi(&highs, &lows, &closes, 3, 2, 2).unwrap();
+        // smi_start = 2 + 1 + 1 = 4
+        for v in smi.iter().take(4) {
+            assert!(v.is_nan());
+        }
+        // Reference values derived analytically (HH/LL window
+        // [i-2..=i]; close 100,101,102,103,104,103,102,101,100,99;
+        // diff/rng walked through two EMA(2) passes; SMI = 200 * dkd/rkd).
+        // Tolerance 1e-9 — locks bit-parity contract with the Dart mirror.
+        assert!((smi[4] - 50.0).abs() < 1e-9, "smi[4] = {}", smi[4]);
+        assert!((smi[5] - 18.75).abs() < 1e-9, "smi[5] = {}", smi[5]);
+        assert!((smi[6] - (-18.0)).abs() < 1e-9, "smi[6] = {}", smi[6]);
+        assert!(
+            (smi[7] - (-36.538_461_538_461_54)).abs() < 1e-9,
+            "smi[7] = {}",
+            smi[7]
+        );
+        assert!(
+            (smi[8] - (-44.560_669_456_066_95)).abs() < 1e-9,
+            "smi[8] = {}",
+            smi[8]
+        );
+        assert!(
+            (smi[9] - (-47.859_116_022_099_45)).abs() < 1e-9,
+            "smi[9] = {}",
+            smi[9]
+        );
+
+        // Signal: EMA(SMI, 2) starting at index 4 → first valid at index 5.
+        // signal[5] = mean(smi[4..6]) = (50 + 18.75) / 2 = 34.375
+        // signal[6] = (2/3)*-18 + (1/3)*34.375 = -12 + 11.458333... = -0.5416666...
+        for v in signal.iter().take(5) {
+            assert!(v.is_nan());
+        }
+        assert!((signal[5] - 34.375).abs() < 1e-9, "signal[5] = {}", signal[5]);
+        assert!(
+            (signal[6] - (-0.541_666_666_666_666_5)).abs() < 1e-9,
+            "signal[6] = {}",
+            signal[6]
+        );
+        assert!(
+            (signal[7] - (-24.539_529_914_529_92)).abs() < 1e-9,
+            "signal[7] = {}",
+            signal[7]
+        );
+        assert!(
+            (signal[8] - (-37.886_956_275_552_57)).abs() < 1e-9,
+            "signal[8] = {}",
+            signal[8]
+        );
+        assert!(
+            (signal[9] - (-44.535_062_773_250_49)).abs() < 1e-9,
+            "signal[9] = {}",
+            signal[9]
+        );
+    }
+
+    #[test]
+    fn test_smi_signal_lags_smi_in_uptrend() {
+        // The signal line is an EMA of the SMI, so it must lag behind
+        // the SMI itself during a rising SMI phase (signal <= smi).
+        let n = 60;
+        let highs: Vec<f64> = (0..n).map(|i| 100.0 + i as f64 + 0.5).collect();
+        let lows: Vec<f64> = (0..n).map(|i| 100.0 + i as f64 - 0.5).collect();
+        let closes: Vec<f64> = (0..n).map(|i| 100.0 + i as f64).collect();
+        let (smi, signal) =
+            calc_smi(&highs, &lows, &closes, 10, 5, 3).unwrap();
+        // After the warm-up plus a few bars of ramp, signal should be
+        // consistently below smi in this monotonic uptrend.
+        for i in 30..n {
+            assert!(
+                signal[i] <= smi[i] + 1e-9,
+                "signal {} > smi {} at index {}",
+                signal[i],
+                smi[i],
+                i
+            );
+        }
     }
 
     #[test]

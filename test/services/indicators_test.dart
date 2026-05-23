@@ -132,6 +132,140 @@ void main() {
     });
   });
 
+  group('calcSmi', () {
+    // Mirror of `mod tests::test_smi_*` in
+    // `rust/trading_engine/src/addins/ut_bot.rs`. Every reference value
+    // is shared bit-for-bit with the Rust unit tests so the SMI helper
+    // stays in lock-step at the algorithm level (Welle-U1/U2 parity
+    // pattern). End-to-end Dart↔Rust parity through the full UT-Bot
+    // strategy lands in Welle U2-4.
+
+    test('returns null for zero periods', () {
+      final h = List<double>.filled(5, 1.0);
+      final l = List<double>.filled(5, 0.5);
+      final c = List<double>.filled(5, 0.7);
+      expect(calcSmi(h, l, c, 0, 2, 2), isNull);
+      expect(calcSmi(h, l, c, 3, 0, 2), isNull);
+      expect(calcSmi(h, l, c, 3, 2, 0), isNull);
+    });
+
+    test('returns null for mismatched lengths', () {
+      expect(
+        calcSmi([1.0, 2.0, 3.0], [0.5, 1.5], [0.7, 1.7, 2.7], 2, 1, 1),
+        isNull,
+      );
+    });
+
+    test('returns null for insufficient data', () {
+      expect(
+        calcSmi(
+          [1.0, 2.0, 3.0, 4.0],
+          [0.5, 1.5, 2.5, 3.5],
+          [0.8, 1.8, 2.8, 3.8],
+          3,
+          2,
+          2,
+        ),
+        isNull,
+      );
+    });
+
+    test('zero at perfect midrange', () {
+      // Constant range with close at midpoint → diff is 0 → SMI is 0.
+      const n = 20;
+      final highs = List<double>.filled(n, 101.0);
+      final lows = List<double>.filled(n, 99.0);
+      final closes = List<double>.filled(n, 100.0);
+      final result = calcSmi(highs, lows, closes, 5, 3, 3)!;
+      for (int i = 8; i < n; i++) {
+        expect(result.smi[i], closeTo(0.0, 1e-12));
+      }
+    });
+
+    test('positive in monotone uptrend', () {
+      const n = 50;
+      final highs = [for (var i = 0; i < n; i++) 100.0 + i + 0.5];
+      final lows = [for (var i = 0; i < n; i++) 100.0 + i - 0.5];
+      final closes = [for (var i = 0; i < n; i++) 100.0 + i.toDouble()];
+      final result = calcSmi(highs, lows, closes, 10, 5, 3)!;
+      for (int i = 30; i < n; i++) {
+        expect(result.smi[i], greaterThan(0.0),
+            reason: 'SMI at $i expected > 0, got ${result.smi[i]}');
+      }
+    });
+
+    test('negative in monotone downtrend', () {
+      const n = 50;
+      final highs = [for (var i = 0; i < n; i++) 200.0 - i + 0.5];
+      final lows = [for (var i = 0; i < n; i++) 200.0 - i - 0.5];
+      final closes = [for (var i = 0; i < n; i++) 200.0 - i.toDouble()];
+      final result = calcSmi(highs, lows, closes, 10, 5, 3)!;
+      for (int i = 30; i < n; i++) {
+        expect(result.smi[i], lessThan(0.0));
+      }
+    });
+
+    test('bounded by ±200', () {
+      const n = 60;
+      final highs = <double>[];
+      final lows = <double>[];
+      final closes = <double>[];
+      for (int i = 0; i < n; i++) {
+        final price = 100.0 + 10.0 * math.sin(i * 0.4);
+        highs.add(price + 0.5);
+        lows.add(price - 0.5);
+        closes.add(price);
+      }
+      final result = calcSmi(highs, lows, closes, 10, 5, 3)!;
+      for (final v in result.smi.where((v) => !v.isNaN)) {
+        expect(v.abs(), lessThanOrEqualTo(200.0 + 1e-9));
+      }
+    });
+
+    test('known values on small fixture mirror Rust expectations', () {
+      // Mirror of `test_smi_known_values_small_fixture` in Rust.
+      // closes = [100,101,102,103,104,103,102,101,100,99]; high/low ±1.0;
+      // length=3, k=2, d=2 → smi_start = 4; signal_start = 5.
+      final closes = [
+        for (var i = 0; i < 10; i++)
+          if (i <= 4) 100.0 + i else 100.0 + (8 - i),
+      ];
+      final highs = [for (final c in closes) c + 1.0];
+      final lows = [for (final c in closes) c - 1.0];
+      final r = calcSmi(highs, lows, closes, 3, 2, 2)!;
+
+      for (int i = 0; i < 4; i++) {
+        expect(r.smi[i].isNaN, isTrue);
+      }
+      expect(r.smi[4], closeTo(50.0, 1e-9));
+      expect(r.smi[5], closeTo(18.75, 1e-9));
+      expect(r.smi[6], closeTo(-18.0, 1e-9));
+      expect(r.smi[7], closeTo(-36.53846153846154, 1e-9));
+      expect(r.smi[8], closeTo(-44.56066945606695, 1e-9));
+      expect(r.smi[9], closeTo(-47.85911602209945, 1e-9));
+
+      for (int i = 0; i < 5; i++) {
+        expect(r.signal[i].isNaN, isTrue);
+      }
+      expect(r.signal[5], closeTo(34.375, 1e-9));
+      expect(r.signal[6], closeTo(-0.5416666666666665, 1e-9));
+      expect(r.signal[7], closeTo(-24.53952991452992, 1e-9));
+      expect(r.signal[8], closeTo(-37.88695627555257, 1e-9));
+      expect(r.signal[9], closeTo(-44.53506277325049, 1e-9));
+    });
+
+    test('signal lags SMI in monotone uptrend', () {
+      const n = 60;
+      final highs = [for (var i = 0; i < n; i++) 100.0 + i + 0.5];
+      final lows = [for (var i = 0; i < n; i++) 100.0 + i - 0.5];
+      final closes = [for (var i = 0; i < n; i++) 100.0 + i.toDouble()];
+      final r = calcSmi(highs, lows, closes, 10, 5, 3)!;
+      for (int i = 30; i < n; i++) {
+        expect(r.signal[i], lessThanOrEqualTo(r.smi[i] + 1e-9));
+      }
+    });
+  });
+
   group('calcEma', () {
     test('returns null for insufficient data', () {
       expect(calcEma([1.0, 2.0, 3.0], 5), isNull);
