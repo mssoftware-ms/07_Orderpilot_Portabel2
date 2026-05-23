@@ -53,12 +53,20 @@ class BbRsiParams {
   final double rsiOversold;
   final double rsiOverbought;
 
+  /// One-side slippage in basis points applied at each execution
+  /// (entry and exit) against the trader. Plan rev2 §3.4 F-04 sets the
+  /// default to 0 bps for Binance / Bitunix BTC + ETH at retail size;
+  /// raise for thin alts or large orders. Must match the Rust
+  /// BacktestConfig.slippage_bps for Dart↔Rust parity.
+  final double slippageBps;
+
   const BbRsiParams({
     this.bbPeriod = 20,
     this.bbStdDev = 2.0,
     this.rsiPeriod = 14,
     this.rsiOversold = 30.0,
     this.rsiOverbought = 70.0,
+    this.slippageBps = 0.0,
   });
 }
 
@@ -88,6 +96,30 @@ class _OpenPosition {
     this.stopLoss,
     this.takeProfit,
   });
+}
+
+// ─── Pending order (F-04 next-bar-open execution) ────────────────────────────
+
+/// A trade decision made at bar `i`, filled at bar `i+1`'s open. Plan §3.4
+/// F-04: strategy signals must NOT execute at the bar that produced them
+/// (that uses information unavailable at order-send time — look-ahead).
+sealed class _PendingOrder {}
+
+class _PendingEnterLong extends _PendingOrder {
+  final double stopLoss;
+  final double takeProfit;
+  _PendingEnterLong(this.stopLoss, this.takeProfit);
+}
+
+class _PendingEnterShort extends _PendingOrder {
+  final double stopLoss;
+  final double takeProfit;
+  _PendingEnterShort(this.stopLoss, this.takeProfit);
+}
+
+class _PendingExit extends _PendingOrder {
+  final String reason;
+  _PendingExit(this.reason);
 }
 
 // ─── Backtest Engine ────────────────────────────────────────────────────────
@@ -153,6 +185,7 @@ class BacktestService {
     double maxDrawdownPct = 0;
     double totalFees = 0;
     _OpenPosition? position;
+    _PendingOrder? pending;
 
     final trades = <ClosedTrade>[];
     final equityCurve = <EquityPoint>[];
@@ -160,19 +193,134 @@ class BacktestService {
     double prevEquity = initialBalance;
 
     final startIdx = math.max(params.bbPeriod, params.rsiPeriod + 1);
+    final slipFactor = params.slippageBps / 10000.0;
+
+    // Local helper: close the open position at `exitPrice` and record the
+    // ClosedTrade. Direction-agnostic balance update mirrors close_position
+    // in rust/.../backtest/mod.rs:311-348 bit-exact (F-02c).
+    void closePosition(double exitPrice, int exitTs, String reason) {
+      final pos = position!;
+      final exitNotional = pos.quantity * exitPrice;
+      final exitFee = exitNotional * feeRate;
+      totalFees += exitFee;
+
+      final grossPnl = pos.isLong
+          ? (exitPrice - pos.entryPrice) * pos.quantity
+          : (pos.entryPrice - exitPrice) * pos.quantity;
+      final netPnl = grossPnl - pos.entryFee - exitFee;
+      final entryNotional = pos.entryPrice * pos.quantity;
+      final pnlPct = entryNotional > 0 ? (netPnl / entryNotional) * 100 : 0.0;
+      final alloc = entryNotional + pos.entryFee;
+      balance = alloc + netPnl;
+
+      trades.add(ClosedTrade(
+        entryTimestamp: pos.entryTimestamp,
+        exitTimestamp: exitTs,
+        direction: pos.isLong ? 'LONG' : 'SHORT',
+        entryPrice: pos.entryPrice,
+        exitPrice: exitPrice,
+        quantity: pos.quantity,
+        pnl: netPnl,
+        pnlPercent: pnlPct,
+        fees: pos.entryFee + exitFee,
+        exitReason: reason,
+      ));
+      position = null;
+    }
 
     for (int i = 0; i < candles.length; i++) {
       final candle = candles[i];
 
-      // F-03b: trade/strategy logic runs FIRST in each bar, then equity is
-      // recorded against the post-trade position state — mirrors Rust
-      // BacktestEngine::run step order (rust/.../backtest/mod.rs:154-235:
-      // SL/TP → strategy → record equity). The pre-F-03b Dart loop sampled
-      // equity at bar-start, which silently diverged from Rust on any bar
-      // where SL/TP closed a position.
-      //
-      // --- Strategy logic (skipped during indicator warm-up) ---
-      if (i >= startIdx) {
+      // F-04 bar order: A pending → B SL/TP intra-bar → C strategy decisions
+      // queue new pending → D equity. Mirrors rust/.../backtest/mod.rs::run
+      // exactly so the parity test stays bit-identical to 1e-9.
+
+      // ── Step A: Execute pending order at this bar's OPEN (F-04). ──
+      // The decision was made at the previous bar's close; the fill happens
+      // at this bar's open with one-side slippage against the trader.
+      if (pending != null) {
+        switch (pending) {
+          case _PendingEnterLong p:
+            final entryPrice = candle.open * (1 + slipFactor);
+            final fee = balance * feeRate;
+            final qty = (balance - fee) / entryPrice;
+            position = _OpenPosition(
+              isLong: true,
+              entryPrice: entryPrice,
+              quantity: qty,
+              entryTimestamp: candle.timestamp,
+              entryFee: fee,
+              stopLoss: p.stopLoss,
+              takeProfit: p.takeProfit,
+            );
+            balance = 0;
+            totalFees += fee;
+          case _PendingEnterShort p:
+            final entryPrice = candle.open * (1 - slipFactor);
+            final fee = balance * feeRate;
+            final qty = (balance - fee) / entryPrice;
+            position = _OpenPosition(
+              isLong: false,
+              entryPrice: entryPrice,
+              quantity: qty,
+              entryTimestamp: candle.timestamp,
+              entryFee: fee,
+              stopLoss: p.stopLoss,
+              takeProfit: p.takeProfit,
+            );
+            balance = 0;
+            totalFees += fee;
+          case _PendingExit p:
+            final pos = position;
+            if (pos != null) {
+              final exitPrice = pos.isLong
+                  ? candle.open * (1 - slipFactor)
+                  : candle.open * (1 + slipFactor);
+              closePosition(exitPrice, candle.timestamp, p.reason);
+            }
+        }
+        pending = null;
+      }
+
+      // ── Step B: SL / TP intra-bar (price-triggered, same-bar fill). ──
+      // These are not strategy decisions — they're stop / limit orders
+      // already resting on the book, so they execute the moment price
+      // touches them. Ambiguous SL+TP → SL wins (conservative).
+      final posForRiskCheck = position;
+      if (posForRiskCheck != null) {
+        if (posForRiskCheck.isLong) {
+          final slHit = posForRiskCheck.stopLoss != null &&
+              candle.low <= posForRiskCheck.stopLoss!;
+          final tpHit = posForRiskCheck.takeProfit != null &&
+              candle.high >= posForRiskCheck.takeProfit!;
+          if (slHit) {
+            closePosition(
+                posForRiskCheck.stopLoss!, candle.timestamp, 'StopLoss');
+          } else if (tpHit) {
+            closePosition(
+                posForRiskCheck.takeProfit!, candle.timestamp, 'TakeProfit');
+          }
+        } else {
+          final slHit = posForRiskCheck.stopLoss != null &&
+              candle.high >= posForRiskCheck.stopLoss!;
+          final tpHit = posForRiskCheck.takeProfit != null &&
+              candle.low <= posForRiskCheck.takeProfit!;
+          if (slHit) {
+            closePosition(
+                posForRiskCheck.stopLoss!, candle.timestamp, 'StopLoss');
+          } else if (tpHit) {
+            closePosition(
+                posForRiskCheck.takeProfit!, candle.timestamp, 'TakeProfit');
+          }
+        }
+      }
+
+      // ── Step C: Strategy decisions queue a pending order for next bar. ──
+      // Entry conditions (no position) AND indicator-based exit conditions
+      // (BB middle / opposite RSI extreme) both queue pending; only the
+      // price-triggered SL/TP exits in Step B fill on the same bar.
+      // Skipped during indicator warm-up.
+      if (i >= startIdx && pending == null) {
         final close = candle.close;
         final rsi = rsiValues[i];
         final lower = bbLower[i];
@@ -180,142 +328,46 @@ class BacktestService {
         final upper = bbUpper[i];
 
         if (position == null) {
-        // Entry: price below lower BB AND RSI oversold → LONG
-        // SL/TP mirror Rust BbRsiStrategy::on_candle (bb_rsi.rs:224):
-        //   long SL = lower - (middle - lower) = 2*lower - middle
-        //   long TP = middle
-        if (close <= lower && rsi < params.rsiOversold) {
-          final fee = balance * feeRate;
-          final availableBalance = balance - fee;
-          final qty = availableBalance / close;
-          position = _OpenPosition(
-            isLong: true,
-            entryPrice: close,
-            quantity: qty,
-            entryTimestamp: candle.timestamp,
-            entryFee: fee,
-            stopLoss: 2 * lower - middle,
-            takeProfit: middle,
-          );
-          balance = 0;
-          totalFees += fee;
-        }
-        // Entry: price above upper BB AND RSI overbought → SHORT
-        // SL/TP mirror Rust BbRsiStrategy::on_candle (bb_rsi.rs:232):
-        //   short SL = upper + (upper - middle) = 2*upper - middle
-        //   short TP = middle
-        else if (close >= upper && rsi > params.rsiOverbought) {
-          final notional = balance;
-          final fee = notional * feeRate;
-          final qty = (notional - fee) / close;
-          position = _OpenPosition(
-            isLong: false,
-            entryPrice: close,
-            quantity: qty,
-            entryTimestamp: candle.timestamp,
-            entryFee: fee,
-            stopLoss: 2 * upper - middle,
-            takeProfit: middle,
-          );
-          balance = 0;
-          totalFees += fee;
-        }
-      } else {
-        // Exit logic — F-02 priority: intra-candle SL/TP first, then the
-        // indicator-based BB-middle / RSI exits. Mirrors the step order in
-        // Rust BacktestEngine::run (backtest/mod.rs:158-217).
-        String? exitReason;
-        double exitPrice = close;
-
-        if (position.isLong) {
-          // Long SL = candle.low ≤ SL; ambiguous SL+TP → SL wins (conservative).
-          final slHit =
-              position.stopLoss != null && candle.low <= position.stopLoss!;
-          final tpHit = position.takeProfit != null &&
-              candle.high >= position.takeProfit!;
-          if (slHit) {
-            exitReason = 'StopLoss';
-            exitPrice = position.stopLoss!;
-          } else if (tpHit) {
-            exitReason = 'TakeProfit';
-            exitPrice = position.takeProfit!;
-          } else if (close >= middle) {
-            exitReason = 'BB Middle';
-          } else if (rsi > params.rsiOverbought) {
-            exitReason = 'RSI Overbought';
+          // Entry: SL/TP computed at SIGNAL bar's BB (i), filled at i+1
+          // open. Mirrors Rust BbRsiStrategy::on_candle (bb_rsi.rs:224, :232).
+          if (close <= lower && rsi < params.rsiOversold) {
+            pending = _PendingEnterLong(2 * lower - middle, middle);
+          } else if (close >= upper && rsi > params.rsiOverbought) {
+            pending = _PendingEnterShort(2 * upper - middle, middle);
           }
         } else {
-          // Short SL = candle.high ≥ SL; short TP = candle.low ≤ TP.
-          final slHit =
-              position.stopLoss != null && candle.high >= position.stopLoss!;
-          final tpHit = position.takeProfit != null &&
-              candle.low <= position.takeProfit!;
-          if (slHit) {
-            exitReason = 'StopLoss';
-            exitPrice = position.stopLoss!;
-          } else if (tpHit) {
-            exitReason = 'TakeProfit';
-            exitPrice = position.takeProfit!;
-          } else if (close <= middle) {
-            exitReason = 'BB Middle';
-          } else if (rsi < params.rsiOversold) {
-            exitReason = 'RSI Oversold';
+          final pos = position!;
+          if (pos.isLong) {
+            if (close >= middle) {
+              pending = _PendingExit('BB Middle');
+            } else if (rsi > params.rsiOverbought) {
+              pending = _PendingExit('RSI Overbought');
+            }
+          } else {
+            if (close <= middle) {
+              pending = _PendingExit('BB Middle');
+            } else if (rsi < params.rsiOversold) {
+              pending = _PendingExit('RSI Oversold');
+            }
           }
         }
-
-        if (exitReason != null) {
-          final exitNotional = position.quantity * exitPrice;
-          final exitFee = exitNotional * feeRate;
-          totalFees += exitFee;
-
-          final grossPnl = position.isLong
-              ? (exitPrice - position.entryPrice) * position.quantity
-              : (position.entryPrice - exitPrice) * position.quantity;
-          final netPnl = grossPnl - position.entryFee - exitFee;
-          final entryNotional = position.entryPrice * position.quantity;
-          final pnlPct = entryNotional > 0 ? (netPnl / entryNotional) * 100 : 0.0;
-
-          // Direction-agnostic balance update (F-02c): return reserved margin
-          // (alloc = entry_notional + entry_fee) plus realised net P&L. For
-          // LONGs this collapses algebraically to `exitNotional - exitFee`;
-          // for SHORTs the previous branch missed one entry_fee per close.
-          final alloc = entryNotional + position.entryFee;
-          balance = alloc + netPnl;
-
-          trades.add(ClosedTrade(
-            entryTimestamp: position.entryTimestamp,
-            exitTimestamp: candle.timestamp,
-            direction: position.isLong ? 'LONG' : 'SHORT',
-            entryPrice: position.entryPrice,
-            exitPrice: exitPrice,
-            quantity: position.quantity,
-            pnl: netPnl,
-            pnlPercent: pnlPct,
-            fees: position.entryFee + exitFee,
-            exitReason: exitReason,
-          ));
-          position = null;
-        }
       }
-      } // end: if (i >= startIdx) — strategy block
 
-      // --- Equity, drawdown, returns: recorded against POST-trade state ---
-      // F-03b mirror of Rust BacktestEngine::current_equity. When the
-      // position is open, equity restores the reserved margin and deducts
-      // an estimated exit fee at the current mark, matching the Rust
-      // engine bit-for-bit (rust/.../backtest/mod.rs:349-359).
+      // ── Step D: equity + drawdown + per-candle return. ──
+      // F-03b: equity is recorded against the POST-trade position state.
       final double equity;
-      if (position == null) {
+      final posForEquity = position;
+      if (posForEquity == null) {
         equity = balance;
       } else {
         equity = midTradeEquity(
           balance: balance,
-          entryPrice: position.entryPrice,
-          quantity: position.quantity,
-          entryFee: position.entryFee,
+          entryPrice: posForEquity.entryPrice,
+          quantity: posForEquity.quantity,
+          entryFee: posForEquity.entryFee,
           markPrice: candle.close,
           feeRate: feeRate,
-          isLong: position.isLong,
+          isLong: posForEquity.isLong,
         );
       }
 
@@ -339,36 +391,14 @@ class BacktestService {
       prevEquity = equity;
     }
 
-    // Close any remaining position at last candle
+    // End-of-data: any pending order is discarded (no next bar to fill on);
+    // any still-open position is force-closed at the last bar's close with
+    // reason 'End of Data', no slippage (mark-to-last). Matches Rust
+    // backtest/mod.rs::run end-of-loop handling.
+    pending = null;
     if (position != null && candles.isNotEmpty) {
       final lastCandle = candles.last;
-      final exitNotional = position.quantity * lastCandle.close;
-      final exitFee = exitNotional * feeRate;
-      totalFees += exitFee;
-      final grossPnl = position.isLong
-          ? (lastCandle.close - position.entryPrice) * position.quantity
-          : (position.entryPrice - lastCandle.close) * position.quantity;
-      final netPnl = grossPnl - position.entryFee - exitFee;
-      final entryNotional = position.entryPrice * position.quantity;
-      final pnlPct = entryNotional > 0 ? (netPnl / entryNotional) * 100 : 0.0;
-
-      // Same direction-agnostic balance update as the in-loop exit branch
-      // (F-02c). Mirrors close_position in rust/.../backtest/mod.rs.
-      final alloc = entryNotional + position.entryFee;
-      balance = alloc + netPnl;
-
-      trades.add(ClosedTrade(
-        entryTimestamp: position.entryTimestamp,
-        exitTimestamp: lastCandle.timestamp,
-        direction: position.isLong ? 'LONG' : 'SHORT',
-        entryPrice: position.entryPrice,
-        exitPrice: lastCandle.close,
-        quantity: position.quantity,
-        pnl: netPnl,
-        pnlPercent: pnlPct,
-        fees: position.entryFee + exitFee,
-        exitReason: 'End of Data',
-      ));
+      closePosition(lastCandle.close, lastCandle.timestamp, 'End of Data');
     }
 
     // Compute aggregate metrics

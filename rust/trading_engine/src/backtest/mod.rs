@@ -29,6 +29,12 @@ pub struct BacktestConfig {
     pub fee_rate: f64,
     /// Timeframe of the input candles.
     pub timeframe: Timeframe,
+    /// One-side slippage in basis points applied at every execution
+    /// (entry and exit) against the trader. Plan rev2 §3.4 F-04 sets
+    /// the default to 0 bps for Binance / Bitunix BTC + ETH at common
+    /// retail sizes; raise for thin alts or large orders.
+    #[serde(default)]
+    pub slippage_bps: f64,
 }
 
 impl BacktestConfig {
@@ -42,7 +48,14 @@ impl BacktestConfig {
             initial_balance,
             fee_rate,
             timeframe,
+            slippage_bps: 0.0,
         }
+    }
+
+    /// Builder: set slippage_bps (default 0.0 per Plan rev2).
+    pub fn with_slippage_bps(mut self, slippage_bps: f64) -> Self {
+        self.slippage_bps = slippage_bps;
+        self
     }
 }
 
@@ -52,8 +65,31 @@ impl Default for BacktestConfig {
             initial_balance: 10_000.0,
             fee_rate: Self::default_fee_rate(),
             timeframe: Timeframe::H1,
+            slippage_bps: 0.0,
         }
     }
+}
+
+// ─── Pending Order (F-04 next-bar-open execution) ────────────────────────────
+
+/// An order queued during one bar's strategy.on_candle, to be filled at
+/// the next bar's open. Plan §3.4 F-04: any strategy signal must execute
+/// one bar later than it was decided to remove look-ahead bias.
+#[derive(Debug, Clone)]
+enum PendingOrder {
+    EnterLong {
+        sl: Option<f64>,
+        tp: Option<f64>,
+        size_pct: f64,
+    },
+    EnterShort {
+        sl: Option<f64>,
+        tp: Option<f64>,
+        size_pct: f64,
+    },
+    Exit {
+        reason: ExitReason,
+    },
 }
 
 // ─── Equity Point ────────────────────────────────────────────────────────────
@@ -101,6 +137,8 @@ pub struct BacktestEngine {
     peak_equity: f64,
     /// Fee amounts for the currently open position's entry.
     current_entry_fee: f64,
+    /// F-04: order queued on the prior bar, filled at this bar's open.
+    pending_order: Option<PendingOrder>,
 }
 
 impl BacktestEngine {
@@ -116,18 +154,27 @@ impl BacktestEngine {
             total_fees: 0.0,
             peak_equity: initial,
             current_entry_fee: 0.0,
+            pending_order: None,
         }
     }
 
     /// Run a strategy against a list of candles with the given parameters.
     ///
-    /// This is the primary entry point.  It:
-    /// 1. Resets the strategy
-    /// 2. Iterates through candles one-by-one
-    /// 3. On each candle: check SL/TP first, then call the strategy
-    /// 4. Records equity at every candle close
-    /// 5. Force-closes any open position at end-of-data
-    /// 6. Computes aggregate metrics via `BacktestMetrics::from_trades`
+    /// Per-bar order of operations (Plan §3.4 F-04, no look-ahead bias):
+    /// 1. Execute any order queued on the previous bar at this bar's OPEN
+    ///    (with one-side slippage_bps applied against the trader).
+    /// 2. Check intra-bar SL / TP against this bar's OHLC. Stop and take-
+    ///    profit are price-triggered orders that can fire during the bar,
+    ///    so they execute on the same bar.
+    /// 3. Call strategy.on_candle. Any signal it emits is QUEUED — it will
+    ///    fill at the next bar's open, not at this bar's close. This is the
+    ///    F-04 invariant; opening at this bar's close is look-ahead bias.
+    /// 4. Record equity at this bar's close.
+    ///
+    /// End-of-data: a pending order on the final bar is discarded (there is
+    /// no next bar to fill it on). Any still-open position is then force-
+    /// closed at the final bar's close with `ExitReason::EndOfData`, no
+    /// slippage (settle-to-last-mark convention).
     pub fn run(
         &mut self,
         strategy: &mut dyn StrategyAddin,
@@ -142,6 +189,7 @@ impl BacktestEngine {
         self.total_fees = 0.0;
         self.peak_equity = self.config.initial_balance;
         self.current_entry_fee = 0.0;
+        self.pending_order = None;
 
         // Reset strategy
         strategy.on_reset();
@@ -155,7 +203,12 @@ impl BacktestEngine {
             ctx.set_index(i);
             let candle = &candles[i];
 
-            // ── Step 1: Check SL / TP on current candle OHLC ──
+            // ── Step 1: Execute pending order at this bar's OPEN ──
+            if let Some(pending) = self.pending_order.take() {
+                self.execute_pending(pending, candle);
+            }
+
+            // ── Step 2: Check SL / TP on current candle OHLC ──
             if self.position.is_some() {
                 let sl_hit = self.position.as_ref().unwrap().is_stop_hit(candle.low, candle.high);
                 let tp_hit = self.position.as_ref().unwrap().is_tp_hit(candle.low, candle.high);
@@ -164,59 +217,22 @@ impl BacktestEngine {
                     // Ambiguous: assume SL hit first (conservative)
                     let sl_price = self.position.as_ref().unwrap().stop_loss.unwrap();
                     self.close_position(sl_price, candle.timestamp, ExitReason::StopLoss);
-                    ctx.in_position = false;
                 } else if sl_hit {
                     let sl_price = self.position.as_ref().unwrap().stop_loss.unwrap();
                     self.close_position(sl_price, candle.timestamp, ExitReason::StopLoss);
-                    ctx.in_position = false;
                 } else if tp_hit {
                     let tp_price = self.position.as_ref().unwrap().take_profit.unwrap();
                     self.close_position(tp_price, candle.timestamp, ExitReason::TakeProfit);
-                    ctx.in_position = false;
                 }
             }
 
-            // ── Step 2: Call strategy ──
+            // ── Step 3: Call strategy, queue any signal for next bar ──
+            ctx.in_position = self.position.is_some();
             if let Some(signal) = strategy.on_candle(&mut ctx, candle) {
-                match signal {
-                    Signal::EnterLong { sl, tp, size_pct } if self.position.is_none() => {
-                        let first_tp = tp.first().copied();
-                        self.open_position(
-                            candle.close,
-                            candle.timestamp,
-                            PositionSide::Long,
-                            sl,
-                            first_tp,
-                            size_pct,
-                        );
-                        ctx.in_position = true;
-                    }
-                    Signal::EnterShort { sl, tp, size_pct } if self.position.is_none() => {
-                        let first_tp = tp.first().copied();
-                        self.open_position(
-                            candle.close,
-                            candle.timestamp,
-                            PositionSide::Short,
-                            sl,
-                            first_tp,
-                            size_pct,
-                        );
-                        ctx.in_position = true;
-                    }
-                    Signal::Exit { reason } if self.position.is_some() => {
-                        self.close_position(candle.close, candle.timestamp, reason);
-                        ctx.in_position = false;
-                    }
-                    Signal::MoveStop { new_sl } if self.position.is_some() => {
-                        if let Some(ref mut pos) = self.position {
-                            pos.stop_loss = Some(new_sl);
-                        }
-                    }
-                    _ => {} // ignore invalid combinations (e.g. enter while in position)
-                }
+                self.queue_signal(signal);
             }
 
-            // ── Step 3: Record equity at candle close ──
+            // ── Step 4: Record equity at candle close ──
             let equity = self.current_equity(candle.close);
             if equity > self.peak_equity {
                 self.peak_equity = equity;
@@ -235,7 +251,9 @@ impl BacktestEngine {
             });
         }
 
-        // ── Step 4: Force-close open position at end-of-data ──
+        // ── End-of-data: pending order discarded (no next bar to fill), ──
+        // ── then force-close any open position at the final bar's close.  ──
+        self.pending_order = None;
         if self.position.is_some() && !candles.is_empty() {
             let last = candles.last().unwrap();
             self.close_position(last.close, last.timestamp, ExitReason::EndOfData);
@@ -265,6 +283,82 @@ impl BacktestEngine {
     }
 
     // ─── Private helpers ─────────────────────────────────────────────────────
+
+    /// Translate a strategy `Signal` into the queued `PendingOrder` that
+    /// will fill at the NEXT bar's open. Invalid combinations (enter while
+    /// in position, exit while flat) are silently ignored — same policy as
+    /// the pre-F-04 inline match. `MoveStop` does not need a fill and
+    /// adjusts the current position's SL immediately.
+    fn queue_signal(&mut self, signal: Signal) {
+        match signal {
+            Signal::EnterLong { sl, tp, size_pct } if self.position.is_none() => {
+                let first_tp = tp.first().copied();
+                self.pending_order = Some(PendingOrder::EnterLong {
+                    sl,
+                    tp: first_tp,
+                    size_pct,
+                });
+            }
+            Signal::EnterShort { sl, tp, size_pct } if self.position.is_none() => {
+                let first_tp = tp.first().copied();
+                self.pending_order = Some(PendingOrder::EnterShort {
+                    sl,
+                    tp: first_tp,
+                    size_pct,
+                });
+            }
+            Signal::Exit { reason } if self.position.is_some() => {
+                self.pending_order = Some(PendingOrder::Exit { reason });
+            }
+            Signal::MoveStop { new_sl } if self.position.is_some() => {
+                if let Some(ref mut pos) = self.position {
+                    pos.stop_loss = Some(new_sl);
+                }
+            }
+            _ => {} // ignore invalid combinations
+        }
+    }
+
+    /// Execute a previously-queued order at the current bar's OPEN, applying
+    /// one-side slippage against the trader (long buy / short sell exit get
+    /// `open * (1 + s)`; long sell / short buy entry get `open * (1 - s)`).
+    /// Default slippage_bps = 0 → executes bit-exact at the open.
+    fn execute_pending(&mut self, pending: PendingOrder, candle: &Candle) {
+        let s = self.config.slippage_bps / 10_000.0;
+        match pending {
+            PendingOrder::EnterLong { sl, tp, size_pct } => {
+                let price = candle.open * (1.0 + s);
+                self.open_position(
+                    price,
+                    candle.timestamp,
+                    PositionSide::Long,
+                    sl,
+                    tp,
+                    size_pct,
+                );
+            }
+            PendingOrder::EnterShort { sl, tp, size_pct } => {
+                let price = candle.open * (1.0 - s);
+                self.open_position(
+                    price,
+                    candle.timestamp,
+                    PositionSide::Short,
+                    sl,
+                    tp,
+                    size_pct,
+                );
+            }
+            PendingOrder::Exit { reason } => {
+                if let Some(pos) = self.position.as_ref() {
+                    let price = match pos.side {
+                        PositionSide::Long => candle.open * (1.0 - s),
+                        PositionSide::Short => candle.open * (1.0 + s),
+                    };
+                    self.close_position(price, candle.timestamp, reason);
+                }
+            }
+        }
+    }
 
     /// Open a new position, deducting entry fee from balance.
     fn open_position(
@@ -648,12 +742,21 @@ mod tests {
             fn on_reset(&mut self) { self.trade_num = 0; }
         }
 
+        // F-04: signals execute at next-bar OPEN. The strategy signals
+        // Enter@i=1, Exit@i=2, Enter@i=3, Exit@i=4, so the four executions
+        // land at candle[2].open, candle[3].open, candle[4].open, and
+        // candle[5].open respectively. Original 5-candle fixture had no
+        // candle[5]; extended to 6 candles so both trades close on their
+        // pending Exit (not via EndOfData). Trade 1: 100→98 (loss).
+        // Trade 2: 98→105 (win). Same shape as the pre-F-04 close-based
+        // fixture, just sourced from different OHLC slots.
         let candles = vec![
             candle(1000, 100.0, 101.0, 99.0, 100.0),
-            candle(2000, 100.0, 101.0, 99.0, 100.0), // enter at 100
-            candle(3000, 98.0, 99.0, 97.0, 98.0),     // exit at 98 (loss)
-            candle(4000, 98.0, 99.0, 97.0, 98.0),     // enter at 98
-            candle(5000, 105.0, 106.0, 104.0, 105.0), // exit at 105 (win)
+            candle(2000, 100.0, 101.0, 99.0, 100.0),  // trade 1 entry @ open=100
+            candle(3000, 100.0, 101.0, 99.0, 100.0),  // signal Exit
+            candle(4000, 98.0, 99.0, 97.0, 98.0),     // trade 1 exit @ open=98 (loss); signal Enter
+            candle(5000, 98.0, 99.0, 97.0, 98.0),     // trade 2 entry @ open=98; signal Exit
+            candle(6000, 105.0, 106.0, 104.0, 105.0), // trade 2 exit @ open=105 (win)
         ];
 
         let config = BacktestConfig::new(10_000.0, 0.0, Timeframe::H1);
@@ -711,12 +814,18 @@ mod tests {
 
     #[test]
     fn test_bitunix_vip0_fees() {
-        // Verify exact Bitunix VIP0 fee calculation (0.06% per side)
+        // F-04: FixedLongStrategy signals Enter@i=1 and Exit@i=3, so entry
+        // fires at candle[2].open and exit at candle[4].open. The original
+        // 4-candle fixture had no candle[4]; the new 5-candle fixture
+        // assigns the entry/exit prices to candle[2].open / candle[4].open
+        // (rather than the close of candle[1] / candle[3]) to preserve the
+        // 50000 → 52000 trade the test was designed around.
         let candles = vec![
             candle(1000, 50000.0, 50100.0, 49900.0, 50000.0),
-            candle(2000, 50000.0, 50100.0, 49900.0, 50000.0), // enter at 50000
-            candle(3000, 51000.0, 51100.0, 50900.0, 51000.0),
-            candle(4000, 52000.0, 52100.0, 51900.0, 52000.0), // exit at 52000
+            candle(2000, 50000.0, 50100.0, 49900.0, 50000.0), // signal Enter
+            candle(3000, 50000.0, 50100.0, 49900.0, 50000.0), // entry @ open=50000
+            candle(4000, 51000.0, 51100.0, 50900.0, 51000.0), // signal Exit
+            candle(5000, 52000.0, 52100.0, 51900.0, 52000.0), // exit  @ open=52000
         ];
 
         let fee_rate = 0.0006; // Bitunix VIP0
