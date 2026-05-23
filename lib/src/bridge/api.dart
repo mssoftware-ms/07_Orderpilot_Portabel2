@@ -86,3 +86,27 @@ Future<String> runBbRsiBacktest({
   initialBalance: initialBalance,
   feeRate: feeRate,
 );
+
+/// Run a full backtest of the UT Bot Alerts (verbesserte Variante) strategy
+/// on historical candles.
+///
+/// `candles_json`    – JSON array of `Candle` objects.
+/// `params_json`     – JSON object with parameter overrides (e.g.
+///                     `{"key_value": 3.0, "atr_period": 5}`).
+/// `initial_balance` – Starting account balance in quote currency.
+/// `fee_rate`        – Taker fee rate per side.
+///
+/// Returns a JSON-serialised `BacktestResult` identical in shape to
+/// `run_bb_rsi_backtest`. The Phase-2 video-spec defaults map to the BTCUSDT
+/// 5-minute timeframe; pass overrides via `params_json` for sweeps.
+Future<String> runUtBotBacktest({
+  required String candlesJson,
+  required String paramsJson,
+  required double initialBalance,
+  required double feeRate,
+}) => RustLib.instance.api.crateApiRunUtBotBacktest(
+  candlesJson: candlesJson,
+  paramsJson: paramsJson,
+  initialBalance: initialBalance,
+  feeRate: feeRate,
+);

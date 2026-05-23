@@ -424,12 +424,17 @@ use crate::strategy::{
 use super::bb_rsi::{calc_ema, position_size_pct, swing_high, swing_low};
 
 /// UT Bot Alerts (verbesserte Variante) strategy add-in.
+///
+/// Body-struct (not unit-struct) so the flutter_rust_bridge codegen
+/// pipeline can introspect it — FRB rejects unit structs with the hint
+/// "what about using `struct UtBotStrategy {}` instead". The strategy
+/// is fully stateless; all per-run state lives on `Context`.
 #[derive(Debug, Clone, Default)]
-pub struct UtBotStrategy;
+pub struct UtBotStrategy {}
 
 impl UtBotStrategy {
     pub fn new() -> Self {
-        Self
+        Self {}
     }
 }
 

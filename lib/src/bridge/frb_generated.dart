@@ -67,7 +67,7 @@ class RustLib extends BaseEntrypoint<RustLibApi, RustLibApiImpl, RustLibWire> {
   String get codegenVersion => '2.12.0';
 
   @override
-  int get rustContentHash => -3652998;
+  int get rustContentHash => -845801149;
 
   static const kDefaultExternalLibraryLoaderConfig =
       ExternalLibraryLoaderConfig(
@@ -111,6 +111,13 @@ abstract class RustLibApi extends BaseApi {
   Future<String> crateApiRunBbRsiStrategy({
     required String candlesJson,
     required String paramsJson,
+  });
+
+  Future<String> crateApiRunUtBotBacktest({
+    required String candlesJson,
+    required String paramsJson,
+    required double initialBalance,
+    required double feeRate,
   });
 }
 
@@ -499,6 +506,44 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   TaskConstMeta get kCrateApiRunBbRsiStrategyConstMeta => const TaskConstMeta(
     debugName: "run_bb_rsi_strategy",
     argNames: ["candlesJson", "paramsJson"],
+  );
+
+  @override
+  Future<String> crateApiRunUtBotBacktest({
+    required String candlesJson,
+    required String paramsJson,
+    required double initialBalance,
+    required double feeRate,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_String(candlesJson, serializer);
+          sse_encode_String(paramsJson, serializer);
+          sse_encode_f_64(initialBalance, serializer);
+          sse_encode_f_64(feeRate, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 14,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_String,
+          decodeErrorData: null,
+        ),
+        constMeta: kCrateApiRunUtBotBacktestConstMeta,
+        argValues: [candlesJson, paramsJson, initialBalance, feeRate],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiRunUtBotBacktestConstMeta => const TaskConstMeta(
+    debugName: "run_ut_bot_backtest",
+    argNames: ["candlesJson", "paramsJson", "initialBalance", "feeRate"],
   );
 
   @protected

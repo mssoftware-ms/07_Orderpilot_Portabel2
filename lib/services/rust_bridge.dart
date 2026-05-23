@@ -380,6 +380,56 @@ class RustBridge {
     );
   }
 
+  /// Run a UT Bot Alerts (verbesserte Variante) backtest on the given candles.
+  ///
+  /// Mirrors [runBacktest] for the second Phase-2 strategy. Delegates to
+  /// `run_ut_bot_backtest` via flutter_rust_bridge when the native engine
+  /// is available; logs a warning and returns an empty [BacktestMetrics]
+  /// otherwise — same fail-soft contract as the BB+RSI wrapper.
+  ///
+  /// [strategyParams] is a JSON-compatible parameter override map matching
+  /// the keys in `ut_bot_manifest()` (e.g. `{'key_value': 3.0, 'atr_period': 5}`).
+  /// Empty = use Rust defaults (strict spec per `ut_bot_spec.md` §1).
+  static Future<BacktestMetrics> runUtBotBacktest({
+    required List<CandleData> candles,
+    required double initialBalance,
+    required double feeRate,
+    Map<String, double> strategyParams = const {},
+  }) async {
+    if (!_nativeAvailable) {
+      // ignore: avoid_print
+      print('[RustBridge] runUtBotBacktest called without native engine — '
+          'returning empty metrics');
+      return BacktestMetrics.empty();
+    }
+
+    final candlesJson =
+        jsonEncode(candles.map((c) => c.toRustJson()).toList());
+    final paramsJson = jsonEncode(strategyParams);
+
+    final responseJson = await rust.runUtBotBacktest(
+      candlesJson: candlesJson,
+      paramsJson: paramsJson,
+      initialBalance: initialBalance,
+      feeRate: feeRate,
+    );
+
+    final decoded = jsonDecode(responseJson) as Map<String, dynamic>;
+    if (decoded.containsKey('error')) {
+      throw Exception('Rust UT Bot backtest failed: ${decoded['error']}');
+    }
+
+    final metricsJson = decoded['metrics'] as Map<String, dynamic>;
+    final totalFees = (decoded['total_fees'] as num).toDouble();
+    final candlesProcessed = decoded['candles_processed'] as int;
+
+    final rustMetrics = RustBacktestMetrics.fromJson(metricsJson);
+    return rustMetrics.toBacktestMetrics(
+      totalFees: totalFees,
+      candlesProcessed: candlesProcessed,
+    );
+  }
+
   /// Start paper trading with live data.
   static Future<bool> startPaperTrading({
     required String symbol,
