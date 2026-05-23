@@ -136,6 +136,49 @@ class BbRsiParams {
   });
 }
 
+// ─── UT Bot Strategy Parameters ─────────────────────────────────────────────
+
+/// Parameters for [BacktestService.runUtBot] — pure-Dart mirror of
+/// `ut_bot_manifest()` in `rust/trading_engine/src/addins/ut_bot.rs`.
+///
+/// All defaults match the Rust manifest bit-for-bit so the engines stay
+/// in lock-step without a parameter map dance. Spec §1 of
+/// `01_Projectplan/specs/ut_bot_spec.md` documents the source for every
+/// default; the QA decisions for the open questions (key_value default,
+/// SMI variant, session filter scope, helper location) are recorded in
+/// the commit history for Welle U2-3.
+class UtBotParams {
+  final int emaPeriod;
+  final double keyValue;
+  final int atrPeriod;
+  final int smiLength;
+  final int smiKSmoothing;
+  final int smiDSmoothing;
+  final int swingLookbackBars;
+  final double tpRrRatio;
+  final double riskPerTrade;
+  final bool sessionFilterEnabled;
+  final int sessionStartHourLocal;
+  final int sessionEndHourLocal;
+  final double slippageBps;
+
+  const UtBotParams({
+    this.emaPeriod = 200,
+    this.keyValue = 2.0,
+    this.atrPeriod = 1,
+    this.smiLength = 14,
+    this.smiKSmoothing = 5,
+    this.smiDSmoothing = 3,
+    this.swingLookbackBars = 20,
+    this.tpRrRatio = 2.0,
+    this.riskPerTrade = 0.02,
+    this.sessionFilterEnabled = false,
+    this.sessionStartHourLocal = 9,
+    this.sessionEndHourLocal = 23,
+    this.slippageBps = 0.0,
+  });
+}
+
 // ─── Internal position tracking ─────────────────────────────────────────────
 
 class _OpenPosition {
@@ -640,6 +683,401 @@ class BacktestService {
       equityCurve: equityCurve,
       trades: trades,
     );
+  }
+
+  /// Run a UT Bot Alerts (verbesserte Variante) backtest on the given
+  /// candle data — pure-Dart mirror of the Rust [`UtBotStrategy`] in
+  /// `rust/trading_engine/src/addins/ut_bot.rs`.
+  ///
+  /// Confluence-triggered trend follower per Spec §2/§3:
+  ///   Long  ⇔ close > EMA AND direction flip −1→+1 AND SMI cross-up below 0
+  ///   Short ⇔ close < EMA AND direction flip +1→−1 AND SMI cross-dn above 0
+  ///   SL = swing-low / swing-high of `swingLookbackBars` pre-signal bars
+  ///   TP = signal-bar close ± `tpRrRatio × |close − SL|`
+  ///   Size = `riskPerTrade × close / sl_distance`, clamped to [0, 1]
+  ///   BE-trail at +1R = engine-side D-08 mechanic (reused unchanged).
+  ///
+  /// The engine bar loop reuses the F-04 order from [runBbRsi] — Step A
+  /// pending → Step B intra-bar SL/TP/BE → Step C strategy decisions →
+  /// Step D equity — so the two strategies share the execution-order
+  /// guarantees and equity-curve semantics required by the Phase-1
+  /// gate (cf. `test/regression/f04_no_lookahead_test.dart`).
+  ///
+  /// `timeframe` defaults to [Timeframe.m5] per Spec §1 (NQ-5min in the
+  /// video; we map to BTCUSDT 5min for the Phase-2 acceptance backtest).
+  static BacktestResult runUtBot({
+    required List<CandleData> candles,
+    required double initialBalance,
+    required double feeRate,
+    UtBotParams params = const UtBotParams(),
+    Timeframe timeframe = Timeframe.m5,
+  }) {
+    final n = candles.length;
+    // Sanity warm-up gate. EMA(200) dominates for the default Phase-2
+    // configuration; smaller smi/atr periods always fit inside it.
+    if (n < params.emaPeriod + 1) {
+      return BacktestResult(
+        metrics: BacktestMetrics(
+          totalTrades: 0, winningTrades: 0, losingTrades: 0,
+          winRate: 0, profitFactor: 0, totalPnl: 0, totalPnlPercent: 0,
+          maxDrawdown: 0, maxDrawdownPercent: 0, sharpeRatio: 0,
+          totalFees: 0, candlesProcessed: n,
+        ),
+        equityCurve: const [],
+        trades: const [],
+      );
+    }
+
+    final highs = [for (final c in candles) c.high];
+    final lows = [for (final c in candles) c.low];
+    final closes = [for (final c in candles) c.close];
+
+    // Pre-compute indicator series ONCE (O(N) per series) — avoids the
+    // O(N²) per-bar full-recompute that the StrategyAddin path uses on
+    // the Rust side. Same numerical result either way; the pre-compute
+    // is just the Dart-side optimization for the 19k-bar 5min backtest.
+
+    // EMA series with NaN warm-up: SMA-seeded, alpha = 2/(period+1).
+    final emaSeries = List<double>.filled(n, double.nan);
+    {
+      double sum = 0.0;
+      for (int i = 0; i < params.emaPeriod; i++) {
+        sum += closes[i];
+      }
+      double ema = sum / params.emaPeriod;
+      emaSeries[params.emaPeriod - 1] = ema;
+      final alpha = 2.0 / (params.emaPeriod + 1);
+      for (int i = params.emaPeriod; i < n; i++) {
+        ema = alpha * closes[i] + (1 - alpha) * ema;
+        emaSeries[i] = ema;
+      }
+    }
+
+    final atrSeries = calcAtr(highs, lows, closes, params.atrPeriod);
+    if (atrSeries == null) return _emptyUtBotResult(n);
+
+    final trailResult = calcUtBotTrail(closes, atrSeries, params.keyValue);
+    if (trailResult == null) return _emptyUtBotResult(n);
+    final directionSeries = trailResult.direction;
+
+    final smiResult = calcSmi(
+      highs,
+      lows,
+      closes,
+      params.smiLength,
+      params.smiKSmoothing,
+      params.smiDSmoothing,
+    );
+    if (smiResult == null) return _emptyUtBotResult(n);
+    final smiSeries = smiResult.smi;
+    final signalSeries = smiResult.signal;
+
+    // Warm-up gate aligned with the Rust strategy's `start_idx`.
+    final smiSignalWarmup = (params.smiLength - 1) +
+        (params.smiKSmoothing - 1) +
+        2 * (params.smiDSmoothing - 1);
+    final startIdx = [
+      params.emaPeriod,
+      params.atrPeriod,
+      smiSignalWarmup + 1,
+      params.swingLookbackBars,
+    ].reduce((a, b) => a > b ? a : b);
+
+    // Strategy execution — shape mirrors runBbRsi's Step A/B/C/D pattern.
+    double balance = initialBalance;
+    double peakEquity = initialBalance;
+    double maxDrawdown = 0;
+    double maxDrawdownPct = 0;
+    double totalFees = 0;
+    _OpenPosition? position;
+    _PendingOrder? pending;
+
+    final trades = <ClosedTrade>[];
+    final equityCurve = <EquityPoint>[];
+    final returns = <double>[];
+    double prevEquity = initialBalance;
+    final slipFactor = params.slippageBps / 10000.0;
+
+    void closePosition(double exitPrice, int exitTs, String reason) {
+      final pos = position!;
+      final exitNotional = pos.quantity * exitPrice;
+      final exitFee = exitNotional * feeRate;
+      totalFees += exitFee;
+
+      final grossPnl = pos.isLong
+          ? (exitPrice - pos.entryPrice) * pos.quantity
+          : (pos.entryPrice - exitPrice) * pos.quantity;
+      final netPnl = grossPnl - pos.entryFee - exitFee;
+      final entryNotional = pos.entryPrice * pos.quantity;
+      final pnlPct =
+          entryNotional > 0 ? (netPnl / entryNotional) * 100 : 0.0;
+      final alloc = entryNotional + pos.entryFee;
+      balance += alloc + netPnl;
+
+      trades.add(ClosedTrade(
+        entryTimestamp: pos.entryTimestamp,
+        exitTimestamp: exitTs,
+        direction: pos.isLong ? 'LONG' : 'SHORT',
+        entryPrice: pos.entryPrice,
+        exitPrice: exitPrice,
+        quantity: pos.quantity,
+        pnl: netPnl,
+        pnlPercent: pnlPct,
+        fees: pos.entryFee + exitFee,
+        exitReason: reason,
+      ));
+      position = null;
+    }
+
+    for (int i = 0; i < n; i++) {
+      final candle = candles[i];
+
+      // Step A — fill pending at this bar's open with slippage.
+      if (pending != null) {
+        switch (pending) {
+          case _PendingEnterLong p:
+            final entryPrice = candle.open * (1 + slipFactor);
+            final alloc = balance * p.sizeFraction;
+            final fee = alloc * feeRate;
+            final qty = (alloc - fee) / entryPrice;
+            position = _OpenPosition(
+              isLong: true,
+              entryPrice: entryPrice,
+              quantity: qty,
+              entryTimestamp: candle.timestamp,
+              entryFee: fee,
+              stopLoss: p.stopLoss,
+              takeProfit: p.takeProfit,
+              initialSlDistance: (entryPrice - p.stopLoss).abs(),
+            );
+            balance -= alloc;
+            totalFees += fee;
+          case _PendingEnterShort p:
+            final entryPrice = candle.open * (1 - slipFactor);
+            final alloc = balance * p.sizeFraction;
+            final fee = alloc * feeRate;
+            final qty = (alloc - fee) / entryPrice;
+            position = _OpenPosition(
+              isLong: false,
+              entryPrice: entryPrice,
+              quantity: qty,
+              entryTimestamp: candle.timestamp,
+              entryFee: fee,
+              stopLoss: p.stopLoss,
+              takeProfit: p.takeProfit,
+              initialSlDistance: (p.stopLoss - entryPrice).abs(),
+            );
+            balance -= alloc;
+            totalFees += fee;
+        }
+        pending = null;
+      }
+
+      // Step B — intra-bar TP-first, BE-trail, then SL (D-08 ordering).
+      final posPre = position;
+      if (posPre != null) {
+        final tpHitFirst = posPre.takeProfit != null &&
+            (posPre.isLong
+                ? candle.high >= posPre.takeProfit!
+                : candle.low <= posPre.takeProfit!);
+        if (tpHitFirst) {
+          closePosition(posPre.takeProfit!, candle.timestamp, 'TakeProfit');
+        } else {
+          if (!posPre.breakevenApplied && posPre.initialSlDistance != null) {
+            final dist = posPre.initialSlDistance!;
+            final reached = posPre.isLong
+                ? candle.high >= posPre.entryPrice + dist
+                : candle.low <= posPre.entryPrice - dist;
+            if (reached) {
+              posPre.stopLoss = posPre.entryPrice;
+              posPre.breakevenApplied = true;
+            }
+          }
+          final slHit = posPre.stopLoss != null &&
+              (posPre.isLong
+                  ? candle.low <= posPre.stopLoss!
+                  : candle.high >= posPre.stopLoss!);
+          if (slHit) {
+            closePosition(posPre.stopLoss!, candle.timestamp, 'StopLoss');
+          }
+        }
+      }
+
+      // Step C — strategy decision queues a pending order for next bar.
+      if (i >= startIdx && pending == null && position == null) {
+        // Session filter (default off). Berlin-local hour-of-day using
+        // fixed UTC+1 (no DST) — see `is_in_session` doc in the Rust
+        // module. With BTC + filter-disabled this is a no-op.
+        bool sessionOk = true;
+        if (params.sessionFilterEnabled) {
+          sessionOk = _isInSession(
+            candle.timestamp,
+            params.sessionStartHourLocal,
+            params.sessionEndHourLocal,
+          );
+        }
+        if (sessionOk) {
+          final ema = emaSeries[i];
+          final dirPrev = directionSeries[i - 1];
+          final dirNow = directionSeries[i];
+          final smiPrev = smiSeries[i - 1];
+          final sigPrev = signalSeries[i - 1];
+          final smiNow = smiSeries[i];
+          final sigNow = signalSeries[i];
+
+          final flipUp = dirPrev == -1 && dirNow == 1;
+          final flipDown = dirPrev == 1 && dirNow == -1;
+          final smiCrossUp = smiPrev < sigPrev && smiNow >= sigNow;
+          final smiCrossDown = smiPrev > sigPrev && smiNow <= sigNow;
+          final smiBelowZero = smiNow < 0.0 && sigNow < 0.0;
+          final smiAboveZero = smiNow > 0.0 && sigNow > 0.0;
+
+          final allValid = !ema.isNaN &&
+              !smiPrev.isNaN &&
+              !sigPrev.isNaN &&
+              !smiNow.isNaN &&
+              !sigNow.isNaN;
+          if (allValid) {
+            final price = candle.close;
+            if (price > ema && flipUp && smiCrossUp && smiBelowZero) {
+              final preLows = [
+                for (int j = i - params.swingLookbackBars; j < i;
+                    j++)
+                  candles[j].low,
+              ];
+              final swing = swingLow(preLows);
+              if (swing != null && swing < price) {
+                final slDist = price - swing;
+                final tp = price + params.tpRrRatio * slDist;
+                final size = (params.riskPerTrade * price / slDist)
+                    .clamp(0.0, 1.0);
+                pending = _PendingEnterLong(swing, tp, size);
+              }
+            } else if (price < ema &&
+                flipDown &&
+                smiCrossDown &&
+                smiAboveZero) {
+              final preHighs = [
+                for (int j = i - params.swingLookbackBars; j < i;
+                    j++)
+                  candles[j].high,
+              ];
+              final swing = swingHigh(preHighs);
+              if (swing != null && swing > price) {
+                final slDist = swing - price;
+                final tp = price - params.tpRrRatio * slDist;
+                final size = (params.riskPerTrade * price / slDist)
+                    .clamp(0.0, 1.0);
+                pending = _PendingEnterShort(swing, tp, size);
+              }
+            }
+          }
+        }
+      }
+
+      // Step D — equity + drawdown + per-bar return.
+      final double equity;
+      final posForEquity = position;
+      if (posForEquity == null) {
+        equity = balance;
+      } else {
+        equity = midTradeEquity(
+          balance: balance,
+          entryPrice: posForEquity.entryPrice,
+          quantity: posForEquity.quantity,
+          entryFee: posForEquity.entryFee,
+          markPrice: candle.close,
+          feeRate: feeRate,
+          isLong: posForEquity.isLong,
+        );
+      }
+      if (equity > peakEquity) peakEquity = equity;
+      final dd = peakEquity - equity;
+      final ddPct = peakEquity > 0 ? (dd / peakEquity) * 100 : 0.0;
+      if (dd > maxDrawdown) maxDrawdown = dd;
+      if (ddPct > maxDrawdownPct) maxDrawdownPct = ddPct;
+      equityCurve.add(EquityPoint(
+        timestamp: candle.timestamp,
+        equity: equity,
+        drawdown: dd,
+        drawdownPct: ddPct,
+      ));
+      if (i > 0) {
+        final ret = prevEquity > 0 ? (equity - prevEquity) / prevEquity : 0.0;
+        returns.add(ret);
+      }
+      prevEquity = equity;
+    }
+
+    // End-of-data: discard pending, force-close any still-open position.
+    pending = null;
+    if (position != null && candles.isNotEmpty) {
+      final lastCandle = candles.last;
+      closePosition(lastCandle.close, lastCandle.timestamp, 'End of Data');
+    }
+
+    final winningTrades = trades.where((t) => t.pnl > 0).toList();
+    final losingTrades = trades.where((t) => t.pnl <= 0).toList();
+    final totalPnl = trades.fold<double>(0, (s, t) => s + t.pnl);
+    final totalPnlPct =
+        initialBalance > 0 ? (totalPnl / initialBalance) * 100 : 0.0;
+    final winRate = trades.isNotEmpty
+        ? (winningTrades.length / trades.length) * 100
+        : 0.0;
+    final grossProfit = winningTrades.fold<double>(0, (s, t) => s + t.pnl);
+    final grossLoss = losingTrades.fold<double>(0, (s, t) => s + t.pnl.abs());
+    double profitFactor = grossLoss > 0 ? grossProfit / grossLoss : 0;
+    if (profitFactor > 999.99) profitFactor = 999.99;
+    if (grossLoss == 0 && grossProfit > 0) profitFactor = 999.99;
+    final sharpe = annualizedSharpe(returns, timeframe);
+
+    return BacktestResult(
+      metrics: BacktestMetrics(
+        totalTrades: trades.length,
+        winningTrades: winningTrades.length,
+        losingTrades: losingTrades.length,
+        winRate: winRate,
+        profitFactor: profitFactor,
+        totalPnl: totalPnl,
+        totalPnlPercent: totalPnlPct,
+        maxDrawdown: maxDrawdown,
+        maxDrawdownPercent: maxDrawdownPct,
+        sharpeRatio: sharpe,
+        totalFees: totalFees,
+        candlesProcessed: n,
+      ),
+      equityCurve: equityCurve,
+      trades: trades,
+    );
+  }
+
+  static BacktestResult _emptyUtBotResult(int candlesProcessed) {
+    return BacktestResult(
+      metrics: BacktestMetrics(
+        totalTrades: 0, winningTrades: 0, losingTrades: 0,
+        winRate: 0, profitFactor: 0, totalPnl: 0, totalPnlPercent: 0,
+        maxDrawdown: 0, maxDrawdownPercent: 0, sharpeRatio: 0,
+        totalFees: 0, candlesProcessed: candlesProcessed,
+      ),
+      equityCurve: const [],
+      trades: const [],
+    );
+  }
+
+  /// Berlin-local session window check used by [runUtBot].
+  /// Fixed UTC+1 (no DST) — mirrors `is_in_session` in
+  /// `rust/trading_engine/src/addins/ut_bot.rs`.
+  static bool _isInSession(int timestampMs, int startHour, int endHour) {
+    final secsUtc = timestampMs ~/ 1000;
+    final secsLocal = secsUtc + 3600;
+    final hour = ((secsLocal ~/ 3600) % 24).toInt();
+    final start = startHour % 24;
+    final end = endHour % 24;
+    if (start == end) return false;
+    if (start < end) {
+      return hour >= start && hour < end;
+    }
+    return hour >= start || hour < end;
   }
 
   /// Compute RSI using Wilder's smoothing method.
