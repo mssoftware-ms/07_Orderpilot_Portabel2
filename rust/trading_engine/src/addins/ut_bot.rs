@@ -319,6 +319,339 @@ pub fn calc_ut_bot_trail(
     Some((trail, direction))
 }
 
+// ─── Session filter ─────────────────────────────────────────────────────────
+
+/// Return `true` if the bar's timestamp falls inside the local-hour
+/// window `[start_hour, end_hour)` in Europe/Berlin time.
+///
+/// Convention:
+/// - Berlin offset is approximated as **fixed UTC+1** (no DST). For BTC
+///   the session filter is shipped disabled (`session_filter_enabled = 0`),
+///   so DST drift has no real effect on the default Phase-2 backtests.
+///   Spec §7 documents the 09:00–23:00 window; this helper enforces it
+///   in a parity-friendly way that works identically in Dart.
+/// - `start_hour <= end_hour` → straightforward inclusive-exclusive
+///   window (so `end_hour = 23` excludes 23:00:00 itself).
+/// - `start_hour > end_hour` → overnight wrap-around window
+///   `[start_hour, 24) ∪ [0, end_hour)`.
+///
+/// Hours outside `[0, 24]` are treated as their modulo-24 value.
+pub fn is_in_session(timestamp_ms: i64, start_hour: i32, end_hour: i32) -> bool {
+    // Convert ms → seconds → local hour-of-day (fixed UTC+1).
+    let secs_utc = timestamp_ms.div_euclid(1000);
+    let secs_local = secs_utc + 3600; // Berlin = UTC+1 (no DST)
+    let hour = (secs_local.div_euclid(3600).rem_euclid(24)) as i32;
+    let start = start_hour.rem_euclid(24);
+    let end = end_hour.rem_euclid(24);
+    if start == end {
+        // Degenerate window — treat as "all day off" so the filter is a
+        // no-op rather than silently activating 24/7.
+        return false;
+    }
+    if start < end {
+        hour >= start && hour < end
+    } else {
+        hour >= start || hour < end
+    }
+}
+
+// ─── Confluence detection (pure, unit-testable) ─────────────────────────────
+
+/// Result of the per-bar UT-Bot confluence check (Spec §2 / §3).
+///
+/// Both fields are mutually exclusive at most one is `true`; both can be
+/// `false` (no entry this bar). Computing them via a single pure
+/// function keeps the [`StrategyAddin::on_candle`] implementation thin
+/// and lets the tests pin the confluence semantics directly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct UtBotEntrySignal {
+    pub long: bool,
+    pub short: bool,
+}
+
+/// Evaluate the three-way UT-Bot confluence at the current bar.
+///
+/// - **Long** ⇔ `price > ema` AND UT-Bot direction flipped from −1 to +1
+///   on this bar AND the SMI line crossed up through its signal AND
+///   both SMI and signal are still strictly below zero (Spec §2, condition 3:
+///   "unterhalb der Nullinie").
+/// - **Short** is the mirror with all comparisons reversed (Spec §3).
+///
+/// Any input being `NaN` (warm-up) suppresses the signal — the helper
+/// returns `UtBotEntrySignal::default()`.
+#[allow(clippy::too_many_arguments)] // 8 independent per-bar samples — flattening into a struct hurts test ergonomics.
+pub fn detect_entry(
+    price: f64,
+    ema: f64,
+    direction_prev: i8,
+    direction_now: i8,
+    smi_prev: f64,
+    signal_prev: f64,
+    smi_now: f64,
+    signal_now: f64,
+) -> UtBotEntrySignal {
+    if price.is_nan()
+        || ema.is_nan()
+        || smi_prev.is_nan()
+        || signal_prev.is_nan()
+        || smi_now.is_nan()
+        || signal_now.is_nan()
+    {
+        return UtBotEntrySignal::default();
+    }
+    let flip_up = direction_prev == -1 && direction_now == 1;
+    let flip_down = direction_prev == 1 && direction_now == -1;
+    let smi_cross_up = smi_prev < signal_prev && smi_now >= signal_now;
+    let smi_cross_down = smi_prev > signal_prev && smi_now <= signal_now;
+    let smi_below_zero = smi_now < 0.0 && signal_now < 0.0;
+    let smi_above_zero = smi_now > 0.0 && signal_now > 0.0;
+    UtBotEntrySignal {
+        long: price > ema && flip_up && smi_cross_up && smi_below_zero,
+        short: price < ema && flip_down && smi_cross_down && smi_above_zero,
+    }
+}
+
+// ─── UtBotStrategy ──────────────────────────────────────────────────────────
+
+use std::collections::HashMap;
+
+use crate::models::{Candle, Timeframe};
+use crate::strategy::{
+    AddinManifest, Context, InputSpec, ParameterSchema, Signal, StrategyAddin,
+    StrategyCategory,
+};
+
+use super::bb_rsi::{calc_ema, position_size_pct, swing_high, swing_low};
+
+/// UT Bot Alerts (verbesserte Variante) strategy add-in.
+#[derive(Debug, Clone, Default)]
+pub struct UtBotStrategy;
+
+impl UtBotStrategy {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl StrategyAddin for UtBotStrategy {
+    fn manifest(&self) -> AddinManifest {
+        ut_bot_manifest()
+    }
+
+    fn required_inputs(&self) -> Vec<InputSpec> {
+        // EMA(200) dominates the warm-up requirement; SMI + ATR + swing
+        // lookback all fit inside the same window for the default
+        // parameter set.
+        vec![
+            InputSpec::OhlcvTimeframe(Timeframe::M5),
+            InputSpec::MinCandles(220),
+            InputSpec::Indicator("EMA".to_string()),
+            InputSpec::Indicator("ATR".to_string()),
+            InputSpec::Indicator("SMI".to_string()),
+        ]
+    }
+
+    fn on_candle(&mut self, ctx: &mut Context, _candle: &Candle) -> Option<Signal> {
+        // Defaults from `ut_bot_manifest()` — verbesserte Variante per
+        // `01_Projectplan/specs/ut_bot_spec.md` §1.
+        let ema_period = ctx.param_or("ema_period", 200.0) as usize;
+        let key_value = ctx.param_or("key_value", 2.0);
+        let atr_period = ctx.param_or("atr_period", 1.0) as usize;
+        let smi_length = ctx.param_or("smi_length", 14.0) as usize;
+        let smi_k = ctx.param_or("smi_k_smoothing", 5.0) as usize;
+        let smi_d = ctx.param_or("smi_d_smoothing", 3.0) as usize;
+        let swing_lookback = ctx.param_or("swing_lookback_bars", 20.0) as usize;
+        let tp_rr_ratio = ctx.param_or("tp_rr_ratio", 2.0);
+        let risk_per_trade = ctx.param_or("risk_per_trade", 0.02);
+        let session_enabled = ctx.param_or("session_filter_enabled", 0.0) >= 0.5;
+        let session_start = ctx.param_or("session_start_hour_local", 9.0) as i32;
+        let session_end = ctx.param_or("session_end_hour_local", 23.0) as i32;
+
+        // Warm-up: SMI signal needs `(length - 1) + (k - 1) + (d - 1) + (d - 1)`
+        // bars; we also need at least one prior bar for the SMI cross and
+        // direction-flip detection. EMA needs `ema_period`. Swing-lookback
+        // needs that many bars BEFORE the signal bar.
+        let smi_signal_warmup =
+            smi_length.saturating_sub(1) + smi_k.saturating_sub(1)
+                + smi_d.saturating_sub(1) + smi_d.saturating_sub(1);
+        let start_idx = ema_period
+            .max(atr_period)
+            .max(smi_signal_warmup + 1)
+            .max(swing_lookback);
+        let i = ctx.index();
+        if i < start_idx {
+            return None;
+        }
+
+        // Pull everything needed from `ctx.all_candles()` as owned data so
+        // the borrow ends before the mutable `set_state` block below.
+        let (closes, highs, lows, lows_pre, highs_pre, current_ts, current_close) = {
+            let candles = ctx.all_candles();
+            let cs: Vec<f64> = candles[..=i].iter().map(|c| c.close).collect();
+            let hs: Vec<f64> = candles[..=i].iter().map(|c| c.high).collect();
+            let ls: Vec<f64> = candles[..=i].iter().map(|c| c.low).collect();
+            let pre = &candles[i - swing_lookback..i];
+            let lp: Vec<f64> = pre.iter().map(|c| c.low).collect();
+            let hp: Vec<f64> = pre.iter().map(|c| c.high).collect();
+            (cs, hs, ls, lp, hp, candles[i].timestamp, candles[i].close)
+        };
+
+        let ema = calc_ema(&closes, ema_period)?;
+        let atr_series = calc_atr(&highs, &lows, &closes, atr_period)?;
+        let (_trail, direction_series) =
+            calc_ut_bot_trail(&closes, &atr_series, key_value)?;
+        let (smi_series, signal_series) =
+            calc_smi(&highs, &lows, &closes, smi_length, smi_k, smi_d)?;
+
+        // Snapshot state for UI / debugging (mirrors BB+RSI convention).
+        ctx.set_state("ut_ema", ema);
+        ctx.set_state("ut_atr", atr_series[i]);
+        ctx.set_state("ut_smi", smi_series[i]);
+        ctx.set_state("ut_smi_signal", signal_series[i]);
+        ctx.set_state("ut_direction", direction_series[i] as f64);
+
+        // Session filter — default off (encoded as f64 0.0). When
+        // enabled and the bar falls outside `[start, end)` local Berlin
+        // time, no new entries fire. Open positions are unaffected
+        // (engine-side SL/TP/BE-trail still applies).
+        if session_enabled && !is_in_session(current_ts, session_start, session_end) {
+            return Some(Signal::NoAction);
+        }
+
+        if ctx.in_position {
+            return Some(Signal::NoAction);
+        }
+
+        let entry = detect_entry(
+            current_close,
+            ema,
+            direction_series[i - 1],
+            direction_series[i],
+            smi_series[i - 1],
+            signal_series[i - 1],
+            smi_series[i],
+            signal_series[i],
+        );
+
+        if entry.long {
+            let swing = swing_low(&lows_pre)?;
+            if swing < current_close {
+                let sl_dist = current_close - swing;
+                let tp = current_close + tp_rr_ratio * sl_dist;
+                let size_pct =
+                    position_size_pct(current_close, sl_dist, risk_per_trade);
+                ctx.in_position = true;
+                return Some(Signal::EnterLong {
+                    sl: Some(swing),
+                    tp: vec![tp],
+                    size_pct,
+                });
+            }
+        }
+
+        if entry.short {
+            let swing = swing_high(&highs_pre)?;
+            if swing > current_close {
+                let sl_dist = swing - current_close;
+                let tp = current_close - tp_rr_ratio * sl_dist;
+                let size_pct =
+                    position_size_pct(current_close, sl_dist, risk_per_trade);
+                ctx.in_position = true;
+                return Some(Signal::EnterShort {
+                    sl: Some(swing),
+                    tp: vec![tp],
+                    size_pct,
+                });
+            }
+        }
+
+        Some(Signal::NoAction)
+    }
+
+    fn on_reset(&mut self) {
+        // The strategy is fully stateless: every on_candle call rebuilds
+        // the indicator series from `ctx.all_candles()`. Nothing to clear.
+    }
+
+    fn validate_params(&self, params: &HashMap<String, f64>) -> Result<(), String> {
+        for schema in &self.manifest().parameters {
+            if let Some(&val) = params.get(&schema.name) {
+                schema.validate(val)?;
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Build the canonical AddinManifest for UT Bot Alerts.
+pub fn ut_bot_manifest() -> AddinManifest {
+    AddinManifest {
+        id: "ut_bot_v1".to_string(),
+        name: "UT Bot Alerts (verbesserte Variante)".to_string(),
+        version: "1.0.0".to_string(),
+        author: "Trading App Team".to_string(),
+        description:
+            "Trend-following strategy: EMA(200) bias, UT-Bot ATR-trail direction \
+             flip, Stochastic Momentum Index cross trigger, swing-low/high SL, \
+             R:R 1:2 with engine-side break-even trail."
+                .to_string(),
+        category: StrategyCategory::Trend,
+        timeframes: vec![Timeframe::M5, Timeframe::M15, Timeframe::H1],
+        parameters: vec![
+            // Spec §1 / engineering plan §2 — all defaults documented in
+            // 01_Projectplan/specs/ut_bot_spec.md.
+            ParameterSchema::new("ema_period", "EMA Trend Period", 200.0, 20.0, 500.0, 1.0),
+            // QA F2 = C: default key_value = 2.0 (TradingView/QuantNomad
+            // default). Spec §12.1 documents the open question — Welle U3
+            // will sweep if defaults miss the XLSX band.
+            ParameterSchema::new("key_value", "UT Bot Sensitivity", 2.0, 0.5, 5.0, 0.5),
+            ParameterSchema::new("atr_period", "ATR Period", 1.0, 1.0, 50.0, 1.0),
+            // QA F3 = C: Blau-1993-Standard SMI defaults.
+            ParameterSchema::new("smi_length", "SMI Length", 14.0, 5.0, 50.0, 1.0),
+            ParameterSchema::new("smi_k_smoothing", "SMI %K Smoothing", 5.0, 1.0, 20.0, 1.0),
+            ParameterSchema::new("smi_d_smoothing", "SMI %D Smoothing", 3.0, 1.0, 20.0, 1.0),
+            ParameterSchema::new(
+                "swing_lookback_bars",
+                "Swing Lookback Bars",
+                20.0,
+                5.0,
+                100.0,
+                1.0,
+            ),
+            ParameterSchema::new("tp_rr_ratio", "TP R:R Ratio", 2.0, 0.5, 10.0, 0.1),
+            ParameterSchema::new("risk_per_trade", "Risk Per Trade", 0.02, 0.001, 1.0, 0.001),
+            // QA F4 = A: session filter local to ut_bot.rs, default OFF
+            // (BTC trades 24/7 — the filter is a no-op for the Phase-2
+            // baseline; left in the manifest so Phase-3 / alt-asset runs
+            // can enable it without touching code).
+            ParameterSchema::new(
+                "session_filter_enabled",
+                "Session Filter Enabled (0/1)",
+                0.0,
+                0.0,
+                1.0,
+                1.0,
+            ),
+            ParameterSchema::new(
+                "session_start_hour_local",
+                "Session Start Hour (Berlin)",
+                9.0,
+                0.0,
+                23.0,
+                1.0,
+            ),
+            ParameterSchema::new(
+                "session_end_hour_local",
+                "Session End Hour (Berlin)",
+                23.0,
+                1.0,
+                24.0,
+                1.0,
+            ),
+        ],
+    }
+}
+
 // ─── Tests ──────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -835,6 +1168,338 @@ mod tests {
                 direction[i], expected_dir[i],
                 "direction[{}] expected {} got {}", i, expected_dir[i], direction[i],
             );
+        }
+    }
+
+    // ── Session filter tests ────────────────────────────────────────────
+
+    /// Helper: build a UTC timestamp for `hour` (0..23) on 2024-01-15.
+    /// Berlin offset is fixed UTC+1 in the helper, so the local hour
+    /// equals `hour_utc + 1` (mod 24).
+    fn ts_at_utc_hour(hour: i64) -> i64 {
+        // 2024-01-15 00:00:00 UTC = 1705276800000 ms (no DST in January).
+        const BASE_UTC_MS: i64 = 1_705_276_800_000;
+        BASE_UTC_MS + hour * 3_600_000
+    }
+
+    #[test]
+    fn test_session_filter_inside_window() {
+        // Window 09:00–23:00 Berlin (= 08:00–22:00 UTC).
+        // UTC 10:00 → local 11:00 → inside.
+        assert!(is_in_session(ts_at_utc_hour(10), 9, 23));
+    }
+
+    #[test]
+    fn test_session_filter_before_window() {
+        // UTC 03:00 → local 04:00 → outside (before 09:00).
+        assert!(!is_in_session(ts_at_utc_hour(3), 9, 23));
+    }
+
+    #[test]
+    fn test_session_filter_at_window_start_inclusive() {
+        // UTC 08:00 → local 09:00 exactly → inside (`>= start`).
+        assert!(is_in_session(ts_at_utc_hour(8), 9, 23));
+    }
+
+    #[test]
+    fn test_session_filter_at_window_end_exclusive() {
+        // UTC 22:00 → local 23:00 exactly → outside (`< end`).
+        assert!(!is_in_session(ts_at_utc_hour(22), 9, 23));
+    }
+
+    #[test]
+    fn test_session_filter_overnight_wrap() {
+        // Window 22:00–06:00 Berlin: bars at local 23 and local 02
+        // are inside, bar at local 10 is outside.
+        // local 23 = UTC 22
+        assert!(is_in_session(ts_at_utc_hour(22), 22, 6));
+        // local 02 = UTC 01
+        assert!(is_in_session(ts_at_utc_hour(1), 22, 6));
+        // local 10 = UTC 09
+        assert!(!is_in_session(ts_at_utc_hour(9), 22, 6));
+    }
+
+    #[test]
+    fn test_session_filter_degenerate_window_is_off() {
+        // start == end → no-op (always returns false). Pins the
+        // documented degenerate behavior so an accidental `start=end`
+        // config does not silently enable a 24/7 filter.
+        assert!(!is_in_session(ts_at_utc_hour(10), 12, 12));
+    }
+
+    // ── detect_entry confluence tests ───────────────────────────────────
+
+    #[test]
+    fn test_detect_entry_long_when_all_three_conditions_met() {
+        // price > ema, direction flipped −1→+1, SMI crossed up while
+        // both lines still negative.
+        let r = detect_entry(
+            /* price */ 105.0,
+            /* ema */ 100.0,
+            /* dir_prev */ -1,
+            /* dir_now */ 1,
+            /* smi_prev */ -50.0,
+            /* sig_prev */ -40.0,
+            /* smi_now */ -20.0,
+            /* sig_now */ -30.0,
+        );
+        assert!(r.long);
+        assert!(!r.short);
+    }
+
+    #[test]
+    fn test_detect_entry_short_when_all_three_conditions_met_mirrored() {
+        let r = detect_entry(
+            /* price */ 95.0,
+            /* ema */ 100.0,
+            /* dir_prev */ 1,
+            /* dir_now */ -1,
+            /* smi_prev */ 50.0,
+            /* sig_prev */ 40.0,
+            /* smi_now */ 20.0,
+            /* sig_now */ 30.0,
+        );
+        assert!(!r.long);
+        assert!(r.short);
+    }
+
+    #[test]
+    fn test_detect_entry_long_suppressed_when_price_below_ema() {
+        let r = detect_entry(95.0, 100.0, -1, 1, -50.0, -40.0, -20.0, -30.0);
+        assert!(!r.long);
+    }
+
+    #[test]
+    fn test_detect_entry_long_suppressed_when_no_direction_flip() {
+        // direction stays at +1 across bars (no flip).
+        let r = detect_entry(105.0, 100.0, 1, 1, -50.0, -40.0, -20.0, -30.0);
+        assert!(!r.long);
+    }
+
+    #[test]
+    fn test_detect_entry_long_suppressed_when_no_smi_cross() {
+        // SMI already above its signal on prev bar → no cross-up here.
+        let r = detect_entry(105.0, 100.0, -1, 1, -20.0, -30.0, -10.0, -25.0);
+        assert!(!r.long);
+    }
+
+    #[test]
+    fn test_detect_entry_long_suppressed_when_smi_above_zero() {
+        // All other conditions met but SMI/signal already positive.
+        let r = detect_entry(105.0, 100.0, -1, 1, 10.0, 20.0, 30.0, 25.0);
+        assert!(!r.long);
+    }
+
+    #[test]
+    fn test_detect_entry_nan_inputs_suppress_signal() {
+        let r = detect_entry(105.0, f64::NAN, -1, 1, -50.0, -40.0, -20.0, -30.0);
+        assert!(!r.long && !r.short);
+        let r = detect_entry(105.0, 100.0, -1, 1, f64::NAN, -40.0, -20.0, -30.0);
+        assert!(!r.long && !r.short);
+    }
+
+    // ── Strategy integration tests ──────────────────────────────────────
+
+    #[test]
+    fn test_strategy_manifest() {
+        let s = UtBotStrategy::new();
+        let m = s.manifest();
+        assert_eq!(m.id, "ut_bot_v1");
+        assert_eq!(m.category, StrategyCategory::Trend);
+        // ema_period, key_value, atr_period, smi_length, smi_k_smoothing,
+        // smi_d_smoothing, swing_lookback_bars, tp_rr_ratio, risk_per_trade,
+        // session_filter_enabled, session_start_hour_local,
+        // session_end_hour_local → 12 parameters.
+        assert_eq!(m.parameters.len(), 12);
+        for required in [
+            "ema_period",
+            "key_value",
+            "atr_period",
+            "smi_length",
+            "smi_k_smoothing",
+            "smi_d_smoothing",
+            "swing_lookback_bars",
+            "tp_rr_ratio",
+            "risk_per_trade",
+            "session_filter_enabled",
+            "session_start_hour_local",
+            "session_end_hour_local",
+        ] {
+            assert!(
+                m.parameters.iter().any(|p| p.name == required),
+                "manifest missing parameter '{}'", required,
+            );
+        }
+        // Default key_value = 2.0 per QA F2 = C.
+        let key = m.parameters.iter().find(|p| p.name == "key_value").unwrap();
+        assert_eq!(key.default, 2.0);
+        // Default session_filter_enabled = 0.0 (OFF) per QA F4 = A.
+        let sess = m
+            .parameters
+            .iter()
+            .find(|p| p.name == "session_filter_enabled")
+            .unwrap();
+        assert_eq!(sess.default, 0.0);
+        // Default tp_rr_ratio = 2.0 per Spec §5.
+        let tp = m.parameters.iter().find(|p| p.name == "tp_rr_ratio").unwrap();
+        assert_eq!(tp.default, 2.0);
+    }
+
+    #[test]
+    fn test_strategy_validate_params_ok_and_out_of_range() {
+        let s = UtBotStrategy::new();
+        let mut ok = HashMap::new();
+        ok.insert("key_value".to_string(), 2.5);
+        ok.insert("tp_rr_ratio".to_string(), 2.0);
+        assert!(s.validate_params(&ok).is_ok());
+
+        let mut bad = HashMap::new();
+        bad.insert("key_value".to_string(), 99.0); // max is 5.0
+        assert!(s.validate_params(&bad).is_err());
+    }
+
+    #[test]
+    fn test_strategy_reset_is_noop_on_stateless_struct() {
+        // UtBotStrategy is stateless (every on_candle rebuilds series).
+        // The test pins that reset does not panic and the struct
+        // remains valid for re-use.
+        let mut s = UtBotStrategy::new();
+        s.on_reset();
+        let _ = s.manifest();
+    }
+
+    #[test]
+    fn test_strategy_no_signal_during_warmup() {
+        // Only 10 candles — far below the 200-bar EMA warm-up.
+        let mut s = UtBotStrategy::new();
+        let candles: Vec<Candle> = (0..10)
+            .map(|i| Candle::new(i * 60000, 100.0, 101.0, 99.0, 100.0, 1.0))
+            .collect();
+        let mut ctx = Context::new(candles.clone(), Timeframe::M5, HashMap::new());
+        for (i, candle) in candles.iter().enumerate() {
+            ctx.set_index(i);
+            assert!(s.on_candle(&mut ctx, candle).is_none());
+        }
+    }
+
+    #[test]
+    fn test_strategy_smoke_run_on_synthetic_fixture_does_not_panic() {
+        // 500-candle sinusoid with smaller indicator periods so the
+        // strategy actually clears warm-up inside the fixture. We do
+        // NOT assert a specific trade count — the parity test in
+        // Welle U2-4 owns end-to-end signal-emission correctness.
+        // Here we only prove on_candle is robust on real-shape input
+        // and produces a Signal enum on every post-warm-up bar.
+        let mut s = UtBotStrategy::new();
+        let n = 500;
+        let candles: Vec<Candle> = (0..n)
+            .map(|i| {
+                let phase = (i as f64) * 0.15;
+                let base = 50000.0 + 500.0 * phase.sin();
+                Candle::new(
+                    i * 60_000,
+                    base,
+                    base + 30.0,
+                    base - 30.0,
+                    base,
+                    100.0 + i as f64,
+                )
+            })
+            .collect();
+        let params = HashMap::from([
+            ("ema_period".to_string(), 50.0),
+            ("smi_length".to_string(), 10.0),
+            ("smi_k_smoothing".to_string(), 5.0),
+            ("smi_d_smoothing".to_string(), 3.0),
+        ]);
+        let mut ctx = Context::new(candles.clone(), Timeframe::M5, params);
+        let mut produced_any = false;
+        for (i, candle) in candles.iter().enumerate() {
+            ctx.set_index(i);
+            if s.on_candle(&mut ctx, candle).is_some() {
+                produced_any = true;
+            }
+        }
+        assert!(
+            produced_any,
+            "strategy must emit at least Signal::NoAction once past warm-up"
+        );
+        // State snapshot should be populated by the last call.
+        assert!(ctx.get_state("ut_ema").is_some());
+        assert!(ctx.get_state("ut_atr").is_some());
+        assert!(ctx.get_state("ut_smi").is_some());
+    }
+
+    #[test]
+    fn test_strategy_session_filter_default_off_does_not_block() {
+        // With session_filter_enabled=0 (default) the bar timestamp is
+        // ignored — on_candle must return some Signal on every
+        // post-warm-up bar instead of being filtered out. Construct a
+        // bar timestamp deep in the night (03:00 Berlin) and verify
+        // no filter blocks it.
+        let mut s = UtBotStrategy::new();
+        let n = 300;
+        let night_base = ts_at_utc_hour(2); // local 03:00 → off-hours
+        let candles: Vec<Candle> = (0..n)
+            .map(|i| {
+                Candle::new(
+                    night_base + i * 300_000, // 5-min spacing
+                    100.0,
+                    101.0,
+                    99.0,
+                    100.0 + (i as f64 * 0.01),
+                    1.0,
+                )
+            })
+            .collect();
+        let mut ctx = Context::new(
+            candles.clone(),
+            Timeframe::M5,
+            HashMap::from([("ema_period".to_string(), 50.0)]),
+        );
+        let mut got_signal = false;
+        for (i, candle) in candles.iter().enumerate() {
+            ctx.set_index(i);
+            if s.on_candle(&mut ctx, candle).is_some() {
+                got_signal = true;
+            }
+        }
+        assert!(got_signal);
+    }
+
+    #[test]
+    fn test_strategy_session_filter_when_enabled_blocks_off_hours() {
+        // Same fixture, but session_filter_enabled = 1. All bars are
+        // night-time → on_candle must emit Signal::NoAction (filter
+        // active) on every post-warm-up bar, never an entry.
+        let mut s = UtBotStrategy::new();
+        let n = 300;
+        let night_base = ts_at_utc_hour(2); // 03:00 Berlin — outside default window
+        let candles: Vec<Candle> = (0..n)
+            .map(|i| {
+                Candle::new(
+                    night_base + i * 300_000,
+                    100.0,
+                    101.0,
+                    99.0,
+                    100.0 + (i as f64 * 0.01),
+                    1.0,
+                )
+            })
+            .collect();
+        let params = HashMap::from([
+            ("ema_period".to_string(), 50.0),
+            ("session_filter_enabled".to_string(), 1.0),
+        ]);
+        let mut ctx = Context::new(candles.clone(), Timeframe::M5, params);
+        for (i, candle) in candles.iter().enumerate() {
+            ctx.set_index(i);
+            if let Some(sig) = s.on_candle(&mut ctx, candle) {
+                assert!(
+                    !matches!(sig, Signal::EnterLong { .. } | Signal::EnterShort { .. }),
+                    "session filter must block entries at off-hours bar {}", i,
+                );
+            }
         }
     }
 

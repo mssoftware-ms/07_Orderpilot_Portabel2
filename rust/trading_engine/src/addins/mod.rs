@@ -6,3 +6,4 @@ pub mod bb_rsi;
 pub mod ut_bot;
 
 pub use bb_rsi::BbRsiStrategy;
+pub use ut_bot::UtBotStrategy;
