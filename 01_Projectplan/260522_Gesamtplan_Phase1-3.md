@@ -416,11 +416,42 @@ Vorschlag: **Phase 1 löschen** (Backtest-only), **Phase 3 entscheiden** ob Live
 
 ### 4.4 Phase-2-Akzeptanz (Gate für Phase 3)
 
-- [ ] 3 Spec-MDs in `01_Projectplan/specs/` vollständig
-- [ ] 3 Diff-MDs dokumentieren Abweichungen Code vs Video
-- [ ] Pro Strategie ein Backtest auf XLSX-Referenz-Setup mit Ergebnis im Toleranz-Band
-- [ ] Sollte eine Implementierung *nicht* dem Video folgen (bewusste Abweichung), ist das in der Spec-MD unter „Abweichung von Vorlage" dokumentiert
+Drei mögliche Acceptance-Ausgänge pro Strategie (jeder eindeutig in der Spec-MD §13 dokumentiert):
+
+**Pfad A — Im Toleranz-Band**
+- [ ] Backtest auf Video-Asset/TF (oder nachgewiesenermassen äquivalent) reproduziert XLSX-Targets im jeweils festgelegten Toleranz-Band.
+- → Strategie wird **produktiver Default-Kandidat** in Phase 3.
+
+**Pfad B — Bewusste Abweichung dokumentiert**
+- [ ] Implementierung weicht vom Video ab (Fee-Optimierung, plausibler Tippfehler im Video, vereinfachte Sub-Logik), Begründung in Spec §12.
+- [ ] Diff-MD enthält die Abweichung als „dokumentiert" (nicht als „Fix erforderlich").
+- → Strategie wird **produktiver Default-Kandidat** in Phase 3 mit dokumentierter Abweichung.
+
+**Pfad C — Video-treu, aber Targets auf Ziel-Asset/TF nicht erreichbar** (eingeführt nach BB+RSI v3-Erkenntnis, 2026-05-23)
+- [ ] Alle Spec-Diffs implementiert, Engine-Korrektheit per Test beweisbar (R:R / Parität / Reproduzierbarkeit).
+- [ ] **Pflicht-Sanity-Sweep vor Klassifikation** in mindestens drei Variationen, dokumentiert als `01_Projectplan/specs/{strategy}_diagnose_{date}.md`:
+  - Mindestens **eine alternative TF** auf demselben Asset
+  - Mindestens **ein alternatives Asset** auf derselben TF
+  - Mindestens **ein Parameter-Sweep** über die Haupt-Sensitivität der Strategie
+- [ ] Sweep zeigt: Targets sind durch Param-Tuning *nicht* erreichbar; einzige profitable Variation hat zu wenig Volume oder andere Trade-off-Charakteristik.
+- [ ] Spec §13 als Pfad-C-Acceptance markiert mit Root-Cause-Hypothese (Asset-Mismatch / Microstructure-Diskrepanz / Sample-Size-Limit).
+- → Strategie bleibt im Add-in-Manifest als **Phase-3-Optimizer-Lab-Kandidat** (niedrigere Priorität als Default-Kandidaten), nicht als produktiver Default.
+
+**Gemeinsame Voraussetzungen für alle drei Pfade:**
+- [ ] Spec-MD nach Template (siehe 4.2) vollständig
+- [ ] Diff-MD dokumentiert Abweichungen Code vs Video
+- [ ] Engine-Korrektheits-Gate aus Phase 1 bleibt strukturell grün (Parität, Reproduzierbarkeit, totalTrades > 0)
+- [ ] flutter analyze + cargo clippy 0 warnings nach allen Strategie-Commits
+
+**Phase-2-Tag wird gesetzt** wenn:
+- [ ] Drei Strategien (BB+RSI, UT Bot, Ichimoku) jeweils einem der drei Pfade zugeordnet sind
+- [ ] Mindestens **eine** Strategie auf Pfad A oder B liegt (sonst hat Phase 3 keinen produktiven Default-Kandidaten — dann Phase 2 nicht abgeschlossen, Sub-Diagnose-Session erforderlich)
 - [ ] Commit-Tag `v0.3.0-strategies-verified`
+
+**Status nach BB+RSI-Abschluss (2026-05-23):**
+- BB+RSI v3: **Pfad C** (Diagnose-Sweep: `bb_rsi_diagnose_2026-05-23.md`)
+- UT Bot: pending
+- Ichimoku: pending
 
 ---
 
