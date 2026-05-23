@@ -6,7 +6,11 @@
 /// level even before any integration parity test exercises EMA.
 library;
 
+import 'dart:math' as math;
+
 import 'package:flutter_test/flutter_test.dart';
+import 'package:trading_app/core/models/candle.dart';
+import 'package:trading_app/services/backtest_service.dart';
 import 'package:trading_app/services/indicators.dart';
 
 void main() {
@@ -67,6 +71,101 @@ void main() {
         greaterThan(1e-3),
         reason: 'EMA must drift when the seed window changes',
       );
+    });
+  });
+
+  group('BbMaType wiring through BacktestService.runBbRsi', () {
+    // Deterministic 200-candle sinusoidal fixture, mirror of the F-01
+    // parity fixture (cf. test/integration/dart_rust_parity_test.dart).
+    // Designed to trigger several BB(20)+RSI(14) entries on both bands so
+    // SMA-vs-EMA basis differences propagate visibly into trade outcomes.
+    List<CandleData> sineFixture(int n) {
+      final out = <CandleData>[];
+      const baseTs = 1700000000000;
+      const baseline = 50000.0;
+      const amplitude = 8000.0;
+      const period = 30.0;
+      for (int i = 0; i < n; i++) {
+        final phase = 2 * math.pi * i / period;
+        final price = baseline + amplitude * math.sin(phase);
+        out.add(CandleData(
+          timestamp: baseTs + i * 3600000,
+          open: price - 20,
+          high: price + 100,
+          low: price - 100,
+          close: price,
+          volume: 1000.0 + i,
+        ));
+      }
+      return out;
+    }
+
+    test('SMA basis (default) keeps Phase-1 numeric behavior', () {
+      final candles = sineFixture(200);
+      final resultDefault = BacktestService.runBbRsi(
+        candles: candles,
+        initialBalance: 10000.0,
+        feeRate: 0.0,
+      );
+      final resultExplicitSma = BacktestService.runBbRsi(
+        candles: candles,
+        initialBalance: 10000.0,
+        feeRate: 0.0,
+        params: const BbRsiParams(bbMaType: BbMaType.sma),
+      );
+      // Explicit SMA must equal the unset default.
+      expect(resultExplicitSma.equityCurve.last.equity,
+          closeTo(resultDefault.equityCurve.last.equity, 1e-12));
+      expect(resultExplicitSma.metrics.totalTrades,
+          equals(resultDefault.metrics.totalTrades));
+    });
+
+    test('EMA basis diverges from SMA on the F-01 sinusoid', () {
+      // On the sinusoidal fixture the SMA-BB triggers several entries
+      // (verified by the F-01 parity test). EMA basis tracks price more
+      // tightly, shifting the BB middle and bands per bar — at least one
+      // engine-observable metric (trade count or final equity) is expected
+      // to differ. This verifies the EMA branch is actually wired into
+      // the backtest loop, not silently ignored.
+      final candles = sineFixture(200);
+      final sma = BacktestService.runBbRsi(
+        candles: candles,
+        initialBalance: 10000.0,
+        feeRate: 0.0,
+        params: const BbRsiParams(bbMaType: BbMaType.sma),
+      );
+      final ema = BacktestService.runBbRsi(
+        candles: candles,
+        initialBalance: 10000.0,
+        feeRate: 0.0,
+        params: const BbRsiParams(bbMaType: BbMaType.ema),
+      );
+      // We do not assert a specific direction (trade-count vs equity can
+      // both shift); we only require that SMA and EMA produce non-identical
+      // engine state, which is sufficient to prove the parameter is live.
+      final smaTrades = sma.metrics.totalTrades;
+      final emaTrades = ema.metrics.totalTrades;
+      final smaEquity = sma.equityCurve.isEmpty
+          ? 10000.0
+          : sma.equityCurve.last.equity;
+      final emaEquity = ema.equityCurve.isEmpty
+          ? 10000.0
+          : ema.equityCurve.last.equity;
+      expect(
+        smaTrades != emaTrades || (smaEquity - emaEquity).abs() > 1e-9,
+        isTrue,
+        reason: 'EMA branch must visibly affect the backtest output on a '
+            'monotonic ramp; smaTrades=$smaTrades emaTrades=$emaTrades '
+            'smaEquity=$smaEquity emaEquity=$emaEquity',
+      );
+    });
+
+    test('rustParamValue encoding round-trips through f64', () {
+      // The Rust engine receives `bb_ma_type` as f64 in {0.0, 1.0}.
+      // Pin the encoding here so a Dart-side refactor of the enum
+      // cannot silently break the FFI parity contract.
+      expect(BbMaType.sma.rustParamValue, 0.0);
+      expect(BbMaType.ema.rustParamValue, 1.0);
     });
   });
 }

@@ -96,6 +96,38 @@ pub fn calc_ema(values: &[f64], period: usize) -> Option<f64> {
     Some(ema)
 }
 
+/// Calculate Bollinger Bands using an EMA basis.
+///
+/// Convention (locked for Dart↔Rust parity):
+/// - `closes_full` must be the **full prior-close history** up to and
+///   including the bar being evaluated, because the EMA basis is
+///   path-dependent (see `calc_ema`). Passing only the last `period`
+///   closes restarts the seed and drifts.
+/// - `stddev` is computed against the **window-SMA** of the last `period`
+///   closes — i.e. the standard-deviation component is identical to the
+///   SMA-BB variant, so only the basis differs between SMA-BB and EMA-BB.
+///   This keeps band-width comparable across MA-type switches and matches
+///   the most common community convention (pandas-ta, Pine custom
+///   indicators).
+/// - Returns `None` if `period == 0` or `closes_full.len() < period`.
+pub fn calc_bollinger_bands_ema(
+    closes_full: &[f64],
+    period: usize,
+    num_stddev: f64,
+) -> Option<BollingerBands> {
+    if period == 0 || closes_full.len() < period {
+        return None;
+    }
+    let middle = calc_ema(closes_full, period)?;
+    let window = &closes_full[closes_full.len() - period..];
+    let sd = stddev(window);
+    Some(BollingerBands {
+        upper: middle + num_stddev * sd,
+        middle,
+        lower: middle - num_stddev * sd,
+    })
+}
+
 /// Calculate RSI using Wilder's smoothing method.
 ///
 /// Returns `None` if there are fewer than `period + 1` data points.
@@ -194,6 +226,11 @@ impl StrategyAddin for BbRsiStrategy {
     fn on_candle(&mut self, ctx: &mut Context, _candle: &Candle) -> Option<Signal> {
         let bb_period = ctx.param_or("bb_period", 20.0) as usize;
         let bb_stddev_mult = ctx.param_or("bb_stddev", 2.0);
+        // bb_ma_type: 0.0 = SMA (default, backwards compatible), 1.0 = EMA.
+        // Encoded as f64 because the strategy parameter map is f64-typed;
+        // the schema clamps to {0, 1} via min/max/step.
+        let bb_ma_type_raw = ctx.param_or("bb_ma_type", 0.0);
+        let use_ema_basis = bb_ma_type_raw >= 0.5;
         let rsi_period = ctx.param_or("rsi_period", 14.0) as usize;
         let rsi_oversold = ctx.param_or("rsi_oversold", 30.0);
         let rsi_overbought = ctx.param_or("rsi_overbought", 70.0);
@@ -207,11 +244,13 @@ impl StrategyAddin for BbRsiStrategy {
             return None;
         }
 
-        // BB uses a fixed `bb_period` rolling window. RSI must run cumulative
-        // Wilder smoothing across the FULL prior-close history (F-02b) to
-        // match the Dart engine — feeding only the last 20 closes restarts
-        // the smoothing every bar and drifts noticeably on non-stationary
-        // series (cf. tests/regression_f02b_rsi_wilder.rs).
+        // BB uses a fixed `bb_period` rolling window for the SMA-stddev
+        // component. The EMA basis (when enabled) and the RSI must both run
+        // across the FULL prior-close history (F-02b for RSI, same path-
+        // dependence requirement for EMA) to match the Dart engine — feeding
+        // only the last `bb_period` closes restarts seeds every bar and
+        // drifts noticeably on non-stationary series
+        // (cf. tests/regression_f02b_rsi_wilder.rs).
         let bb_closes = ctx.closes(bb_period);
         let rsi_closes = ctx.closes(ctx.index() + 1);
         if bb_closes.len() < bb_period || rsi_closes.len() < rsi_period + 1 {
@@ -219,7 +258,11 @@ impl StrategyAddin for BbRsiStrategy {
         }
 
         // Compute indicators
-        let bb = calc_bollinger_bands(&bb_closes, bb_period, bb_stddev_mult)?;
+        let bb = if use_ema_basis {
+            calc_bollinger_bands_ema(&rsi_closes, bb_period, bb_stddev_mult)?
+        } else {
+            calc_bollinger_bands(&bb_closes, bb_period, bb_stddev_mult)?
+        };
         let rsi = calc_rsi(&rsi_closes, rsi_period)?;
 
         // Persist indicator values in context state for external access
@@ -313,6 +356,8 @@ pub fn bb_rsi_manifest() -> AddinManifest {
         parameters: vec![
             ParameterSchema::new("bb_period", "BB Period", 20.0, 10.0, 50.0, 1.0),
             ParameterSchema::new("bb_stddev", "BB Std Dev", 2.0, 1.0, 3.0, 0.1),
+            // bb_ma_type: 0=SMA (default, backwards compatible), 1=EMA.
+            ParameterSchema::new("bb_ma_type", "BB MA Type (0=SMA,1=EMA)", 0.0, 0.0, 1.0, 1.0),
             ParameterSchema::new("rsi_period", "RSI Period", 14.0, 7.0, 30.0, 1.0),
             ParameterSchema::new("rsi_oversold", "RSI Oversold", 30.0, 20.0, 40.0, 1.0),
             ParameterSchema::new("rsi_overbought", "RSI Overbought", 70.0, 60.0, 80.0, 1.0),
@@ -451,6 +496,59 @@ mod tests {
     }
 
     #[test]
+    fn test_bb_ema_basis_equals_sma_when_period_equals_history() {
+        // values.len() == period → EMA seed = SMA, so BB-EMA basis equals
+        // BB-SMA basis. Stddev component is identical by construction.
+        let closes = vec![10.0, 12.0, 11.0, 13.0, 14.0];
+        let bb_sma = calc_bollinger_bands(&closes, 5, 2.0).unwrap();
+        let bb_ema = calc_bollinger_bands_ema(&closes, 5, 2.0).unwrap();
+        assert!((bb_ema.middle - bb_sma.middle).abs() < 1e-12);
+        assert!((bb_ema.upper - bb_sma.upper).abs() < 1e-12);
+        assert!((bb_ema.lower - bb_sma.lower).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_bb_ema_basis_drifts_from_sma_on_long_history() {
+        // With more history than period and a non-linear path, EMA
+        // diverges from the window-SMA basis. A strictly linear ramp
+        // hits a numeric coincidence where EMA(period=5) lands exactly
+        // on the window SMA after 3 alpha steps, so we use an early-jump
+        // pattern: low base, then a sharp step up, then a plateau.
+        let closes = vec![10.0, 10.0, 10.0, 10.0, 10.0, 80.0, 80.0, 80.0];
+        let bb_sma = calc_bollinger_bands(&closes, 5, 2.0).unwrap();
+        let bb_ema = calc_bollinger_bands_ema(&closes, 5, 2.0).unwrap();
+        // Window-SMA of [10,10,80,80,80] = 52.0. EMA-after-step:
+        //   seed = mean(10,10,10,10,10) = 10
+        //   ema_5 = (1/3)*80 + (2/3)*10 = 33.333...
+        //   ema_6 = (1/3)*80 + (2/3)*33.333... = 48.888...
+        //   ema_7 = (1/3)*80 + (2/3)*48.888... = 59.259...
+        // → EMA basis is well below the window SMA on this pattern.
+        assert!(
+            (bb_ema.middle - bb_sma.middle).abs() > 1.0,
+            "ema={} sma={}",
+            bb_ema.middle,
+            bb_sma.middle
+        );
+        // Stddev is computed against the window-SMA in both variants → the
+        // band-width (upper - lower) must match exactly.
+        let width_sma = bb_sma.upper - bb_sma.lower;
+        let width_ema = bb_ema.upper - bb_ema.lower;
+        assert!(
+            (width_ema - width_sma).abs() < 1e-12,
+            "BB band width must be identical between SMA and EMA variants \
+             (stddev component is independent of basis); width_sma={} \
+             width_ema={}",
+            width_sma,
+            width_ema
+        );
+    }
+
+    #[test]
+    fn test_bb_ema_insufficient_data() {
+        assert!(calc_bollinger_bands_ema(&[1.0, 2.0], 5, 2.0).is_none());
+    }
+
+    #[test]
     fn test_ema_path_dependent_on_history_length() {
         // Same final 5 closes but different prior history → different EMA.
         // This pins WHY the strategy must feed the full prior-close history
@@ -537,8 +635,13 @@ mod tests {
         let strategy = BbRsiStrategy::new();
         let manifest = strategy.manifest();
         assert_eq!(manifest.id, "bb_rsi_v1");
-        assert_eq!(manifest.parameters.len(), 5);
+        // bb_period, bb_stddev, bb_ma_type, rsi_period, rsi_oversold, rsi_overbought
+        assert_eq!(manifest.parameters.len(), 6);
         assert_eq!(manifest.category, StrategyCategory::MeanReversion);
+        assert!(manifest
+            .parameters
+            .iter()
+            .any(|p| p.name == "bb_ma_type"));
     }
 
     #[test]
@@ -656,6 +759,39 @@ mod tests {
             last_signal.is_entry(),
             "Expected short entry after sharp rise, got {:?}",
             last_signal
+        );
+    }
+
+    #[test]
+    fn test_strategy_ema_basis_changes_bb_state() {
+        // With ma_type=EMA the published bb_middle in ctx state must equal
+        // the EMA of the full prior-close history, not the SMA of the last
+        // `bb_period` closes. Pins the on_candle EMA branch.
+        let mut strategy = BbRsiStrategy::new();
+        let mut closes = vec![100.0; 30];
+        for i in 0..15 {
+            closes.push(100.0 + (i as f64 + 1.0) * 5.0);
+        }
+        let candles: Vec<Candle> = closes
+            .iter()
+            .enumerate()
+            .map(|(i, &c)| Candle::new(i as i64 * 60000, c, c + 0.5, c - 0.5, c, 100.0))
+            .collect();
+        let params = HashMap::from([("bb_ma_type".to_string(), 1.0)]);
+        let mut ctx = Context::new(candles.clone(), Timeframe::H1, params);
+        for (i, candle) in candles.iter().enumerate() {
+            ctx.set_index(i);
+            let _ = strategy.on_candle(&mut ctx, candle);
+        }
+        // After running on the full history with bb_period=20, the basis
+        // should equal calc_ema(&closes, 20).
+        let expected = calc_ema(&closes, 20).unwrap();
+        let got = ctx.get_state("bb_middle").unwrap();
+        assert!(
+            (got - expected).abs() < 1e-12,
+            "ma_type=EMA: bb_middle expected {} got {}",
+            expected,
+            got
         );
     }
 

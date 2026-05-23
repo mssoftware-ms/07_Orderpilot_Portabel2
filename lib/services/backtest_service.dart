@@ -46,9 +46,36 @@ class BacktestResult {
 
 // ─── BB+RSI Strategy Parameters ─────────────────────────────────────────────
 
+/// Moving-average basis for the Bollinger Bands middle line.
+///
+/// Encoded numerically when forwarded to the Rust engine
+/// (`bb_ma_type` strategy parameter: 0=SMA, 1=EMA) so it round-trips
+/// through the f64-typed parameter map. The stddev component is
+/// independent of the basis (always window-SMA stddev) so band-width is
+/// comparable across MA-type switches — see
+/// `calc_bollinger_bands_ema` in `rust/trading_engine/src/addins/bb_rsi.rs`.
+enum BbMaType {
+  /// Simple Moving Average basis (default, backwards-compatible).
+  sma(0.0),
+
+  /// Exponential Moving Average basis (Phase-2 video-spec trend filter).
+  ema(1.0);
+
+  const BbMaType(this.rustParamValue);
+
+  /// Numeric encoding sent to the Rust engine's `bb_ma_type` parameter.
+  final double rustParamValue;
+}
+
 class BbRsiParams {
   final int bbPeriod;
   final double bbStdDev;
+
+  /// Basis MA type for the BB middle line. Default [BbMaType.sma] keeps
+  /// the legacy Phase-1 behavior bit-exact; the upcoming video-spec
+  /// trend filter (Diff D-01) uses [BbMaType.ema].
+  final BbMaType bbMaType;
+
   final int rsiPeriod;
   final double rsiOversold;
   final double rsiOverbought;
@@ -63,6 +90,7 @@ class BbRsiParams {
   const BbRsiParams({
     this.bbPeriod = 20,
     this.bbStdDev = 2.0,
+    this.bbMaType = BbMaType.sma,
     this.rsiPeriod = 14,
     this.rsiOversold = 30.0,
     this.rsiOverbought = 70.0,
@@ -157,22 +185,50 @@ class BacktestService {
     final bbLower = List<double>.filled(candles.length, 0);
     final rsiValues = List<double>.filled(candles.length, 50);
 
-    // Bollinger Bands (SMA + stddev)
+    // Bollinger Bands.
+    //
+    // The stddev component always uses the window-SMA of the last
+    // `bbPeriod` closes — independent of `bbMaType` — so band-width is
+    // comparable when switching between SMA and EMA basis. Mirrors
+    // `calc_bollinger_bands_ema` in
+    // `rust/trading_engine/src/addins/bb_rsi.rs`.
+    //
+    // For EMA basis the running EMA is maintained cumulatively (O(N))
+    // instead of being recomputed from scratch per bar (O(N²)). The
+    // first valid bar is `bbPeriod - 1`; the EMA at that bar equals the
+    // SMA seed (no recursive step yet).
+    final emaAlpha = 2.0 / (params.bbPeriod + 1);
+    double emaBasis = 0.0;
     for (int i = params.bbPeriod - 1; i < candles.length; i++) {
-      double sum = 0;
+      // Window-SMA stddev (shared between SMA-BB and EMA-BB branches).
+      double sumWindow = 0;
       for (int j = i - params.bbPeriod + 1; j <= i; j++) {
-        sum += closes[j];
+        sumWindow += closes[j];
       }
-      final sma = sum / params.bbPeriod;
+      final smaWindow = sumWindow / params.bbPeriod;
       double variance = 0;
       for (int j = i - params.bbPeriod + 1; j <= i; j++) {
-        final diff = closes[j] - sma;
+        final diff = closes[j] - smaWindow;
         variance += diff * diff;
       }
       final stdDev = math.sqrt(variance / params.bbPeriod);
-      bbMiddle[i] = sma;
-      bbUpper[i] = sma + params.bbStdDev * stdDev;
-      bbLower[i] = sma - params.bbStdDev * stdDev;
+
+      final double basis;
+      if (params.bbMaType == BbMaType.sma) {
+        basis = smaWindow;
+      } else {
+        if (i == params.bbPeriod - 1) {
+          // Seed: SMA of the first `bbPeriod` closes
+          emaBasis = smaWindow;
+        } else {
+          emaBasis = emaAlpha * closes[i] + (1 - emaAlpha) * emaBasis;
+        }
+        basis = emaBasis;
+      }
+
+      bbMiddle[i] = basis;
+      bbUpper[i] = basis + params.bbStdDev * stdDev;
+      bbLower[i] = basis - params.bbStdDev * stdDev;
     }
 
     // RSI (Wilder's smoothing)
