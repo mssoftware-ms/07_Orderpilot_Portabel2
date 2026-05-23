@@ -134,12 +134,26 @@ class _OpenPosition {
   final double entryFee;
 
   /// Absolute stop-loss price (null = no SL attached at entry).
-  /// Mirrors `Position::stop_loss` in the Rust engine.
-  final double? stopLoss;
+  /// Mutated by the D-08 break-even trail; the original distance is
+  /// preserved in [initialSlDistance] so the +1R check still works
+  /// after the SL is pulled to entry. Mirrors `Position::stop_loss`
+  /// in the Rust engine.
+  double? stopLoss;
 
   /// Absolute take-profit price (null = no TP attached at entry).
   /// Mirrors `Position::take_profit` in the Rust engine.
   final double? takeProfit;
+
+  /// Original SL distance at entry (`|entryPrice − stopLoss|` at open).
+  /// Captured once and never updated; used by the D-08 break-even
+  /// trail to know when +1R has been reached even after [stopLoss]
+  /// has been pulled to entry. `null` when the position opened
+  /// without an SL — in that case BE-trail does not fire.
+  final double? initialSlDistance;
+
+  /// True once the D-08 break-even trail has pulled [stopLoss] to
+  /// [entryPrice]. Permanent — no further trailing or re-application.
+  bool breakevenApplied;
 
   _OpenPosition({
     required this.isLong,
@@ -149,7 +163,8 @@ class _OpenPosition {
     required this.entryFee,
     this.stopLoss,
     this.takeProfit,
-  });
+    this.initialSlDistance,
+  }) : breakevenApplied = false;
 }
 
 // ─── Pending order (F-04 next-bar-open execution) ────────────────────────────
@@ -349,6 +364,7 @@ class BacktestService {
               entryFee: fee,
               stopLoss: p.stopLoss,
               takeProfit: p.takeProfit,
+              initialSlDistance: (entryPrice - p.stopLoss).abs(),
             );
             balance = 0;
             totalFees += fee;
@@ -364,6 +380,7 @@ class BacktestService {
               entryFee: fee,
               stopLoss: p.stopLoss,
               takeProfit: p.takeProfit,
+              initialSlDistance: (p.stopLoss - entryPrice).abs(),
             );
             balance = 0;
             totalFees += fee;
@@ -371,35 +388,46 @@ class BacktestService {
         pending = null;
       }
 
-      // ── Step B: SL / TP intra-bar (price-triggered, same-bar fill). ──
-      // These are not strategy decisions — they're stop / limit orders
-      // already resting on the book, so they execute the moment price
-      // touches them. Ambiguous SL+TP → SL wins (conservative).
-      final posForRiskCheck = position;
-      if (posForRiskCheck != null) {
-        if (posForRiskCheck.isLong) {
-          final slHit = posForRiskCheck.stopLoss != null &&
-              candle.low <= posForRiskCheck.stopLoss!;
-          final tpHit = posForRiskCheck.takeProfit != null &&
-              candle.high >= posForRiskCheck.takeProfit!;
-          if (slHit) {
-            closePosition(
-                posForRiskCheck.stopLoss!, candle.timestamp, 'StopLoss');
-          } else if (tpHit) {
-            closePosition(
-                posForRiskCheck.takeProfit!, candle.timestamp, 'TakeProfit');
-          }
+      // ── Step B: intra-bar exits, TP-first ordering (D-08). ──
+      // Convention rewritten in D-08:
+      //   a) TP check  — if `high ≥ TP` (long) / `low ≤ TP` (short) the
+      //      limit order fills; exit at TP and skip the rest.
+      //   b) BE-trail  — if no TP and the bar reached +1R, pull the SL
+      //      to entry once and lock the flag.
+      //   c) SL check  — using the possibly-updated SL.
+      //
+      // Pre-D-08 Dart resolved same-bar SL+TP in favour of SL (matching
+      // the Rust pre-D-08 convention). That priority turns the BE-trail
+      // into a strict loss for the trader on any bar that touches the TP
+      // and retraces: BE would pull SL to entry, then SL-first would
+      // close at entry instead of letting the TP fill. TP-first resolves
+      // the ambiguity in favour of the limit order; both engines apply
+      // the same rule so Dart↔Rust parity is preserved.
+      final posPre = position;
+      if (posPre != null) {
+        final tpHitFirst = posPre.takeProfit != null &&
+            (posPre.isLong
+                ? candle.high >= posPre.takeProfit!
+                : candle.low <= posPre.takeProfit!);
+        if (tpHitFirst) {
+          closePosition(posPre.takeProfit!, candle.timestamp, 'TakeProfit');
         } else {
-          final slHit = posForRiskCheck.stopLoss != null &&
-              candle.high >= posForRiskCheck.stopLoss!;
-          final tpHit = posForRiskCheck.takeProfit != null &&
-              candle.low <= posForRiskCheck.takeProfit!;
+          if (!posPre.breakevenApplied && posPre.initialSlDistance != null) {
+            final dist = posPre.initialSlDistance!;
+            final reached = posPre.isLong
+                ? candle.high >= posPre.entryPrice + dist
+                : candle.low <= posPre.entryPrice - dist;
+            if (reached) {
+              posPre.stopLoss = posPre.entryPrice;
+              posPre.breakevenApplied = true;
+            }
+          }
+          final slHit = posPre.stopLoss != null &&
+              (posPre.isLong
+                  ? candle.low <= posPre.stopLoss!
+                  : candle.high >= posPre.stopLoss!);
           if (slHit) {
-            closePosition(
-                posForRiskCheck.stopLoss!, candle.timestamp, 'StopLoss');
-          } else if (tpHit) {
-            closePosition(
-                posForRiskCheck.takeProfit!, candle.timestamp, 'TakeProfit');
+            closePosition(posPre.stopLoss!, candle.timestamp, 'StopLoss');
           }
         }
       }

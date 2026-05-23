@@ -42,12 +42,24 @@ pub struct Position {
     pub quantity: f64,
     /// Position side (Long or Short).
     pub side: PositionSide,
-    /// Stop loss price (absolute).
+    /// Stop loss price (absolute). May be mutated by the D-08
+    /// break-even trail; `initial_sl_distance` preserves the
+    /// original R for the +1R trigger check.
     pub stop_loss: Option<f64>,
     /// Take profit price (absolute).
     pub take_profit: Option<f64>,
     /// Timestamp of entry (Unix ms).
     pub entry_time: i64,
+    /// Original SL distance at entry, captured for the D-08 break-even
+    /// trail (`|entry_price − initial_stop_loss|`). Never updated once
+    /// the position is opened. `None` when the position was opened
+    /// without an SL — in that case the BE-trail does not fire.
+    #[serde(default)]
+    pub initial_sl_distance: Option<f64>,
+    /// True once the D-08 break-even trail has pulled the SL to entry.
+    /// Permanent — there is no further trailing or BE re-application.
+    #[serde(default)]
+    pub breakeven_applied: bool,
 }
 
 impl Position {

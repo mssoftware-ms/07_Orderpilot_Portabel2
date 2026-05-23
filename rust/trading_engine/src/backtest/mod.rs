@@ -207,21 +207,61 @@ impl BacktestEngine {
                 self.execute_pending(pending, candle);
             }
 
-            // ── Step 2: Check SL / TP on current candle OHLC ──
+            // ── Step 2: Intra-bar exits, TP-first ordering (D-08). ──
+            // Convention rewritten in D-08:
+            //   a) TP check  — if `high ≥ TP` (long) / `low ≤ TP` (short)
+            //      the limit order fills; exit at TP and skip the rest.
+            //   b) BE-trail  — if no TP and the bar reached +1R, pull the
+            //      SL to entry once and lock the flag.
+            //   c) SL check  — using the possibly-updated SL.
+            //
+            // Pre-D-08 the engine resolved a same-bar SL+TP collision in
+            // favour of SL (conservative). That convention turns BE-trail
+            // into a strict loss for the trader on any bar that touches
+            // both the TP and the retracement: the BE-trigger would move
+            // the SL to entry, then the SL-first priority would close at
+            // entry instead of letting the TP fill. TP-first resolves the
+            // ambiguity in favour of the limit order that was actually
+            // "first in queue" — both engines apply the same rule so the
+            // Dart↔Rust parity is preserved.
             if self.position.is_some() {
-                let sl_hit = self.position.as_ref().unwrap().is_stop_hit(candle.low, candle.high);
-                let tp_hit = self.position.as_ref().unwrap().is_tp_hit(candle.low, candle.high);
-
-                if sl_hit && tp_hit {
-                    // Ambiguous: assume SL hit first (conservative)
-                    let sl_price = self.position.as_ref().unwrap().stop_loss.unwrap();
-                    self.close_position(sl_price, candle.timestamp, ExitReason::StopLoss);
-                } else if sl_hit {
-                    let sl_price = self.position.as_ref().unwrap().stop_loss.unwrap();
-                    self.close_position(sl_price, candle.timestamp, ExitReason::StopLoss);
-                } else if tp_hit {
+                let tp_hit_first =
+                    self.position.as_ref().unwrap().is_tp_hit(candle.low, candle.high);
+                if tp_hit_first {
                     let tp_price = self.position.as_ref().unwrap().take_profit.unwrap();
                     self.close_position(tp_price, candle.timestamp, ExitReason::TakeProfit);
+                } else {
+                    if let Some(pos) = self.position.as_mut() {
+                        if !pos.breakeven_applied {
+                            if let Some(distance) = pos.initial_sl_distance {
+                                let reached = match pos.side {
+                                    PositionSide::Long => {
+                                        candle.high >= pos.entry_price + distance
+                                    }
+                                    PositionSide::Short => {
+                                        candle.low <= pos.entry_price - distance
+                                    }
+                                };
+                                if reached {
+                                    pos.stop_loss = Some(pos.entry_price);
+                                    pos.breakeven_applied = true;
+                                }
+                            }
+                        }
+                    }
+                    let sl_hit_post = self
+                        .position
+                        .as_ref()
+                        .unwrap()
+                        .is_stop_hit(candle.low, candle.high);
+                    if sl_hit_post {
+                        let sl_price = self.position.as_ref().unwrap().stop_loss.unwrap();
+                        self.close_position(
+                            sl_price,
+                            candle.timestamp,
+                            ExitReason::StopLoss,
+                        );
+                    }
                 }
             }
 
@@ -378,6 +418,11 @@ impl BacktestEngine {
         self.current_entry_fee = entry_fee;
         self.total_fees += entry_fee;
 
+        // D-08 capture: store the original SL distance once at entry so
+        // the BE-trail can decide when +1R is reached even after the SL
+        // has been pulled to entry. `None` SL means no BE trail fires.
+        let initial_sl_distance = sl.map(|sl_price| (entry_price - sl_price).abs());
+
         self.position = Some(Position {
             entry_price,
             quantity,
@@ -385,6 +430,8 @@ impl BacktestEngine {
             stop_loss: sl,
             take_profit: tp,
             entry_time: timestamp,
+            initial_sl_distance,
+            breakeven_applied: false,
         });
     }
 
@@ -901,6 +948,133 @@ mod tests {
         let trade = &result.metrics.trades[0];
         assert_eq!(trade.exit_reason, ExitReason::StopLoss);
         assert_eq!(trade.exit_price, 99.0);
+    }
+
+    /// D-08 fixture-driven strategy used by the BE-trail regression tests.
+    /// Emits a single long entry on bar 1 with the SL/TP passed at
+    /// construction. Mirrors the SlTpStrategy helper but parametrises both
+    /// bracket prices so the BE-trail conditions can be hit deterministically.
+    struct EnterOnceLong {
+        sl: f64,
+        tp: f64,
+    }
+    impl StrategyAddin for EnterOnceLong {
+        fn manifest(&self) -> crate::strategy::AddinManifest {
+            crate::strategy::AddinManifest {
+                id: "be_test".into(), name: "BE Test".into(),
+                version: "0.1.0".into(), author: "test".into(),
+                description: "test".into(),
+                category: crate::strategy::StrategyCategory::Custom,
+                timeframes: vec![Timeframe::H1], parameters: vec![],
+            }
+        }
+        fn required_inputs(&self) -> Vec<crate::strategy::InputSpec> { vec![] }
+        fn on_candle(&mut self, ctx: &mut Context, _candle: &Candle) -> Option<Signal> {
+            if ctx.index() == 1 && !ctx.in_position {
+                Some(Signal::EnterLong {
+                    sl: Some(self.sl),
+                    tp: vec![self.tp],
+                    size_pct: 100.0,
+                })
+            } else {
+                None
+            }
+        }
+        fn on_reset(&mut self) {}
+    }
+
+    #[test]
+    fn test_breakeven_trail_converts_retracement_to_zero_pnl_exit() {
+        // D-08: long enters at 100, SL=90 (-10), TP=200 (well above any
+        // bar). On bar 2 the high reaches 115 (+1.5R) so BE-trail pulls
+        // SL to 100; same bar low retraces to 95. Pre-D-08 the engine
+        // would have closed at the ORIGINAL SL=90 (or never, since 95>90
+        // — but with SL-first priority on a fully-traversing bar
+        // engagement). With the BE-trail + TP-first ordering, the trade
+        // closes at BE = entry = 100 because low=95 ≤ new SL=100.
+        let candles = vec![
+            candle(1000, 100.0, 101.0, 99.0, 100.0),
+            candle(2000, 100.0, 101.0, 99.0, 100.0), // entry @ open=100, SL=90, TP=200
+            candle(3000, 100.0, 115.0, 95.0, 105.0), // +1R touch + retrace to 95 → BE exit @100
+            candle(4000, 105.0, 106.0, 104.0, 105.0),
+        ];
+
+        let config = BacktestConfig::new(10_000.0, 0.0, Timeframe::H1);
+        let mut engine = BacktestEngine::new(config);
+        let mut strategy = EnterOnceLong { sl: 90.0, tp: 200.0 };
+        let result = engine.run(&mut strategy, &candles, HashMap::new());
+
+        assert_eq!(result.metrics.total_trades, 1);
+        let trade = &result.metrics.trades[0];
+        assert_eq!(trade.exit_reason, ExitReason::StopLoss);
+        assert!(
+            (trade.exit_price - 100.0).abs() < 1e-12,
+            "BE-trail must pull SL to entry=100; got exit_price={}",
+            trade.exit_price
+        );
+        assert!(
+            trade.pnl.abs() < 1e-9,
+            "BE exit at entry should produce ~zero PnL (no fees in this \
+             test); got pnl={}",
+            trade.pnl
+        );
+    }
+
+    #[test]
+    fn test_breakeven_trail_inactive_when_one_r_never_reached() {
+        // Control: same setup but bar 2 NEVER touches +1R. The SL must
+        // therefore stay at the original 90, and the low=89 hit closes
+        // the trade at 90 (full SL loss). Pins that BE-trail is a strict
+        // additive protection — it does not modify behaviour on bars that
+        // don't satisfy the trigger condition.
+        let candles = vec![
+            candle(1000, 100.0, 101.0, 99.0, 100.0),
+            candle(2000, 100.0, 101.0, 99.0, 100.0), // entry @ 100, SL=90, TP=200
+            candle(3000, 100.0, 109.5, 89.0, 95.0),  // high=109.5 < 110 (=entry+R), low=89 → SL
+            candle(4000, 95.0, 96.0, 94.0, 95.0),
+        ];
+
+        let config = BacktestConfig::new(10_000.0, 0.0, Timeframe::H1);
+        let mut engine = BacktestEngine::new(config);
+        let mut strategy = EnterOnceLong { sl: 90.0, tp: 200.0 };
+        let result = engine.run(&mut strategy, &candles, HashMap::new());
+
+        assert_eq!(result.metrics.total_trades, 1);
+        let trade = &result.metrics.trades[0];
+        assert_eq!(trade.exit_reason, ExitReason::StopLoss);
+        assert!(
+            (trade.exit_price - 90.0).abs() < 1e-12,
+            "without +1R touch BE-trail must NOT fire; SL stays at 90, \
+             got exit_price={}",
+            trade.exit_price
+        );
+        assert!(trade.pnl < 0.0, "original-SL exit is a loss");
+    }
+
+    #[test]
+    fn test_breakeven_trail_does_not_override_take_profit_same_bar() {
+        // D-08 + D-06 interaction: on a bar where both TP and BE+SL would
+        // fire, TP wins. Setup: long entry at 100, SL=90, TP=120. Bar 2
+        // has high=125 (TP hit @120) AND low=95 (would hit BE-SL=100 if
+        // BE fired first). TP-first priority closes the trade at 120
+        // before the BE-trail can pull the SL down.
+        let candles = vec![
+            candle(1000, 100.0, 101.0, 99.0, 100.0),
+            candle(2000, 100.0, 101.0, 99.0, 100.0), // entry @ 100, SL=90, TP=120
+            candle(3000, 100.0, 125.0, 95.0, 115.0), // TP + retrace
+            candle(4000, 115.0, 116.0, 114.0, 115.0),
+        ];
+
+        let config = BacktestConfig::new(10_000.0, 0.0, Timeframe::H1);
+        let mut engine = BacktestEngine::new(config);
+        let mut strategy = EnterOnceLong { sl: 90.0, tp: 120.0 };
+        let result = engine.run(&mut strategy, &candles, HashMap::new());
+
+        assert_eq!(result.metrics.total_trades, 1);
+        let trade = &result.metrics.trades[0];
+        assert_eq!(trade.exit_reason, ExitReason::TakeProfit);
+        assert!((trade.exit_price - 120.0).abs() < 1e-12);
+        assert!(trade.pnl > 0.0, "TP exit is a win");
     }
 
     #[test]
