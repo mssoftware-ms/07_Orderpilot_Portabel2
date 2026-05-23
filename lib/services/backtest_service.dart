@@ -10,6 +10,7 @@ import '../core/models/candle.dart';
 import '../core/models/timeframe.dart';
 import '../core/models/trade.dart';
 import 'equity.dart';
+import 'indicators.dart';
 import 'sharpe.dart';
 
 // ─── Engine-specific result models ──────────────────────────────────────────
@@ -80,6 +81,15 @@ class BbRsiParams {
   final double rsiOversold;
   final double rsiOverbought;
 
+  /// Swing-low / swing-high lookback (Diff D-07).
+  ///
+  /// Spec §4 algorithmic SL definition: long SL = `min(low[i - N .. i - 1])`,
+  /// short SL = `max(high[i - N .. i - 1])` where `N = swingLookbackBars`.
+  /// Default 20 matches the Rust manifest and approximates a ~one-day
+  /// lookback on 1h candles. Must equal the Rust `swing_lookback_bars`
+  /// parameter for Dart↔Rust parity.
+  final int swingLookbackBars;
+
   /// One-side slippage in basis points applied at each execution
   /// (entry and exit) against the trader. Plan rev2 §3.4 F-04 sets the
   /// default to 0 bps for Binance / Bitunix BTC + ETH at retail size;
@@ -89,7 +99,7 @@ class BbRsiParams {
 
   /// Defaults match the video-spec "verbesserte Variante" — see
   /// `01_Projectplan/specs/bb_rsi_spec.md` §1, Diff D-01 + D-02
-  /// (BB(200, EMA, 0.2σ) + RSI(3, 20/80)).
+  /// (BB(200, EMA, 0.2σ) + RSI(3, 20/80)) plus Diff D-07 swing-SL N=20.
   /// Mirrors the bb_rsi_manifest() defaults in
   /// `rust/trading_engine/src/addins/bb_rsi.rs`.
   const BbRsiParams({
@@ -99,6 +109,7 @@ class BbRsiParams {
     this.rsiPeriod = 3,
     this.rsiOversold = 20.0,
     this.rsiOverbought = 80.0,
+    this.swingLookbackBars = 20,
     this.slippageBps = 0.0,
   });
 }
@@ -259,7 +270,16 @@ class BacktestService {
     // BbRsiStrategy's `prev_rsi` state semantics.
     double? prevRsi;
 
-    final startIdx = math.max(params.bbPeriod, params.rsiPeriod + 1);
+    // Diff D-07 widens the warm-up gate to also cover the swing-low/high
+    // window: signals can only fire when `swingLookbackBars` candles are
+    // available BEFORE the signal bar (exclusive of it), otherwise the
+    // SL would be undefined. Mirrors the Rust strategy's `start_idx`
+    // computation (rust/.../addins/bb_rsi.rs) so both engines emit signals
+    // on the same set of bars.
+    final startIdx = math.max(
+      math.max(params.bbPeriod, params.rsiPeriod + 1),
+      params.swingLookbackBars,
+    );
     final slipFactor = params.slippageBps / 10000.0;
 
     // Local helper: close the open position at `exitPrice` and record the
@@ -389,24 +409,44 @@ class BacktestService {
           final upper = bbUpper[i];
 
           if (position == null) {
-            // Diff D-03/D-04 + Diff D-05: trend-follow + RSI cross-back
-            // through the oversold/overbought level (video spec §2/§3).
+            // Diff D-03/D-04 + Diff D-05 + Diff D-07: trend-follow + RSI
+            // cross-back through the oversold/overbought level + swing-
+            // low / swing-high SL placement (video spec §2/§3/§4).
             //   Long  ⇔ close > upper AND prev_rsi < oversold AND rsi ≥ oversold
             //   Short ⇔ close < lower AND prev_rsi > overbought AND rsi ≤ overbought
             // Null prev_rsi (first bar after warm-up) suppresses the
-            // cross — no signal possible. SL/TP placeholders mirror the
-            // BB-geometry pattern of Diff D-04; the video-spec R:R 1:3 +
-            // swing-low SL land in Welle 2.
+            // cross — no signal possible. SL is the swing-low (long) or
+            // swing-high (short) of the `swingLookbackBars` bars BEFORE
+            // the signal bar (exclusive). Degenerate swings
+            // (swing-low ≥ close for a long, swing-high ≤ close for a
+            // short) suppress the signal so the engine never opens with
+            // the SL on the wrong side of entry. The TP placeholder is
+            // still the BB-geometry mirror from Diff D-04; D-06 converts
+            // it to the R:R 1:3 contract.
             final prev = prevRsi;
             if (prev != null) {
-              if (close > upper &&
+              final preLows = <double>[];
+              final preHighs = <double>[];
+              for (int j = i - params.swingLookbackBars; j < i; j++) {
+                preLows.add(candles[j].low);
+                preHighs.add(candles[j].high);
+              }
+              final slLong = swingLow(preLows);
+              final slShort = swingHigh(preHighs);
+              if (slLong != null &&
+                  slShort != null &&
+                  close > upper &&
                   prev < params.rsiOversold &&
-                  rsi >= params.rsiOversold) {
-                pending = _PendingEnterLong(middle, 2 * upper - middle);
-              } else if (close < lower &&
+                  rsi >= params.rsiOversold &&
+                  slLong < close) {
+                pending = _PendingEnterLong(slLong, 2 * upper - middle);
+              } else if (slLong != null &&
+                  slShort != null &&
+                  close < lower &&
                   prev > params.rsiOverbought &&
-                  rsi <= params.rsiOverbought) {
-                pending = _PendingEnterShort(middle, 2 * lower - middle);
+                  rsi <= params.rsiOverbought &&
+                  slShort > close) {
+                pending = _PendingEnterShort(slShort, 2 * lower - middle);
               }
             }
           }

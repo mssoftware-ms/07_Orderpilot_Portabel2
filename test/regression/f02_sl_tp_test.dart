@@ -148,6 +148,7 @@ void main() {
           rsiPeriod: 14,
           rsiOversold: 30.0,
           rsiOverbought: 70.0,
+          swingLookbackBars: 20,
         ),
       );
 
@@ -202,6 +203,7 @@ void main() {
           rsiPeriod: 14,
           rsiOversold: 30.0,
           rsiOverbought: 70.0,
+          swingLookbackBars: 20,
         ),
       );
 

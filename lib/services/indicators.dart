@@ -7,6 +7,37 @@
 /// can reuse them without dragging in the whole backtest engine.
 library;
 
+/// Compute the swing low: minimum value across the given `lows`.
+///
+/// Convention (locked for Dart↔Rust parity, see `swing_low` in
+/// `rust/trading_engine/src/addins/bb_rsi.rs`): the caller selects which
+/// bars to feed, the helper does no slicing.
+/// `01_Projectplan/specs/bb_rsi_spec.md` §4 defines the swing-low SL for
+/// a long entry at bar `i` as `min(low[i - N .. i - 1])` — the N bars
+/// BEFORE the signal bar, exclusive of the signal bar itself.
+/// Returns `null` if `lows` is empty.
+double? swingLow(List<double> lows) {
+  if (lows.isEmpty) return null;
+  var min = double.infinity;
+  for (final v in lows) {
+    if (v < min) min = v;
+  }
+  return min;
+}
+
+/// Compute the swing high: maximum value across the given `highs`.
+///
+/// Mirror of [swingLow] for the short side. Spec §4 short-entry SL is
+/// `max(high[i - N .. i - 1])` — N highs before the signal bar, exclusive.
+double? swingHigh(List<double> highs) {
+  if (highs.isEmpty) return null;
+  var max = double.negativeInfinity;
+  for (final v in highs) {
+    if (v > max) max = v;
+  }
+  return max;
+}
+
 /// Compute the Exponential Moving Average over a full close-price history.
 ///
 /// Convention (locked for Dart↔Rust parity, see `calc_ema` in

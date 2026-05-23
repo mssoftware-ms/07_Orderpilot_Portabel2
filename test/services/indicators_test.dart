@@ -74,6 +74,31 @@ void main() {
     });
   });
 
+  group('swingLow / swingHigh', () {
+    test('basic min / max', () {
+      expect(swingLow([10.0, 7.5, 8.0, 9.0, 6.5, 11.0]), closeTo(6.5, 1e-12));
+      expect(swingHigh([10.0, 12.5, 8.0, 14.0, 13.5, 11.0]),
+          closeTo(14.0, 1e-12));
+    });
+
+    test('empty slice returns null', () {
+      expect(swingLow(const []), isNull);
+      expect(swingHigh(const []), isNull);
+    });
+
+    test('single-element slice returns that value', () {
+      expect(swingLow([42.5]), closeTo(42.5, 1e-12));
+      expect(swingHigh([42.5]), closeTo(42.5, 1e-12));
+    });
+
+    test('handles negative values via real min/max, not zero-init', () {
+      // Pin the comparison semantics against all-negative inputs — mirrors
+      // the Rust unit test `test_swing_helpers_negative_values`.
+      expect(swingLow([-1.0, -5.0, -3.0, -2.0]), closeTo(-5.0, 1e-12));
+      expect(swingHigh([-1.0, -5.0, -3.0, -2.0]), closeTo(-1.0, 1e-12));
+    });
+  });
+
   group('BbMaType wiring through BacktestService.runBbRsi', () {
     // Deterministic 200-candle sinusoidal fixture, mirror of the F-01
     // parity fixture (cf. test/integration/dart_rust_parity_test.dart).
@@ -121,6 +146,7 @@ void main() {
           rsiPeriod: 14,
           rsiOversold: 30.0,
           rsiOverbought: 70.0,
+          swingLookbackBars: 20,
         ),
       );
       final resultExplicitEma = BacktestService.runBbRsi(
@@ -134,6 +160,7 @@ void main() {
           rsiPeriod: 14,
           rsiOversold: 30.0,
           rsiOverbought: 70.0,
+          swingLookbackBars: 20,
         ),
       );
       expect(resultExplicitEma.equityCurve.last.equity,
@@ -142,96 +169,33 @@ void main() {
           equals(resultDefault.metrics.totalTrades));
     });
 
-    // A dip-then-surge fixture that triggers the Phase-2 cross + close
-    // > upper condition: 20 flat candles + 14-bar decline (drives
-    // RSI(14) toward 0) + a single surge bar (close > upper, RSI crosses
-    // up through 30) + SL-exit candle + flat tail. SMA-BB and EMA-BB
-    // place the middle (and therefore the SL placeholder) at different
-    // levels, so the exit price diverges between the two branches even
-    // though the trigger bar is the same.
-    List<CandleData> dipSurgeFixture() {
-      final out = <CandleData>[];
-      const baseTs = 1700000000000;
-      for (int i = 0; i < 20; i++) {
-        out.add(CandleData(
-          timestamp: baseTs + i * 3600000,
-          open: 99.9, high: 100.3, low: 99.7, close: 100.0, volume: 1000.0,
-        ));
-      }
-      for (int i = 0; i < 14; i++) {
-        final close = 100.0 - (i + 1) * 2.0;
-        out.add(CandleData(
-          timestamp: baseTs + (20 + i) * 3600000,
-          open: close + 0.5, high: close + 0.5, low: close - 0.5,
-          close: close, volume: 1000.0,
-        ));
-      }
-      out.add(CandleData(
-        timestamp: baseTs + 34 * 3600000,
-        open: 72.5, high: 120.5, low: 72.0, close: 120.0, volume: 1000.0,
-      ));
-      out.add(CandleData(
-        timestamp: baseTs + 35 * 3600000,
-        open: 119.0, high: 120.0, low: 0.0, close: 110.0, volume: 1000.0,
-      ));
-      for (int i = 36; i < 60; i++) {
-        out.add(CandleData(
-          timestamp: baseTs + i * 3600000,
-          open: 110.0, high: 110.5, low: 109.5, close: 110.0, volume: 1000.0,
-        ));
-      }
-      return out;
-    }
-
-    test('EMA basis diverges from SMA on a dip+surge fixture', () {
-      // EMA tracks price more tightly than SMA → BB middle (and the SL
-      // placeholder = middle) sit at different prices. The trade exits
-      // through SL at the middle, so the realised PnL differs between
-      // branches even though the entry bar is the same.
-      final candles = dipSurgeFixture();
-      final sma = BacktestService.runBbRsi(
-        candles: candles,
-        initialBalance: 10000.0,
-        feeRate: 0.0,
-        params: const BbRsiParams(
-          bbPeriod: 20,
-          bbStdDev: 2.0,
-          bbMaType: BbMaType.sma,
-          rsiPeriod: 14,
-          rsiOversold: 30.0,
-          rsiOverbought: 70.0,
-        ),
-      );
-      final ema = BacktestService.runBbRsi(
-        candles: candles,
-        initialBalance: 10000.0,
-        feeRate: 0.0,
-        params: const BbRsiParams(
-          bbPeriod: 20,
-          bbStdDev: 2.0,
-          bbMaType: BbMaType.ema,
-          rsiPeriod: 14,
-          rsiOversold: 30.0,
-          rsiOverbought: 70.0,
-        ),
-      );
-      // We do not assert a specific direction (trade-count vs equity can
-      // both shift); we only require that SMA and EMA produce non-identical
-      // engine state, which is sufficient to prove the parameter is live.
-      final smaTrades = sma.metrics.totalTrades;
-      final emaTrades = ema.metrics.totalTrades;
-      final smaEquity = sma.equityCurve.isEmpty
-          ? 10000.0
-          : sma.equityCurve.last.equity;
-      final emaEquity = ema.equityCurve.isEmpty
-          ? 10000.0
-          : ema.equityCurve.last.equity;
+    test('EMA basis produces different middle than window SMA on step-up', () {
+      // Indicator-level proof that bbMaType=EMA wires through to a value
+      // that diverges from the window-SMA. Pre-D-07 a separate test
+      // proved this end-to-end through engine output (SL was BB-middle,
+      // basis-dependent). Post-D-07 the SL is the basis-independent
+      // swing-low, so the engine-output discriminator disappears for the
+      // pre-built dip+surge fixture. We replace that test with this
+      // direct check on the same algorithm the engine's BB pre-compute
+      // loop uses: `calcEma` vs the window-SMA reduction in
+      // `runBbRsi`. If the two collapse to equality, the bbMaType=EMA
+      // branch in the engine would silently behave like SMA.
+      final closes = <double>[
+        ...List.filled(20, 100.0),
+        105.0, 110.0, 115.0, 120.0, 125.0,
+        130.0, 135.0, 140.0, 145.0, 150.0,
+      ];
+      final smaWindow = closes.sublist(closes.length - 20);
+      final smaBasis =
+          smaWindow.reduce((a, b) => a + b) / smaWindow.length;
+      final emaBasis = calcEma(closes, 20);
+      expect(emaBasis, isNotNull);
       expect(
-        smaTrades != emaTrades || (smaEquity - emaEquity).abs() > 1e-9,
-        isTrue,
-        reason: 'EMA branch must visibly affect the backtest output on a '
-            'monotonic ramp; smaTrades=$smaTrades emaTrades=$emaTrades '
-            'smaEquity=$smaEquity emaEquity=$emaEquity',
+        (emaBasis! - smaBasis).abs(),
+        greaterThan(1.0),
+        reason:
+            'EMA tracks recent prices more aggressively → diverges from '
+            'window-SMA on a step-up history; sma=$smaBasis ema=$emaBasis',
       );
     });
 

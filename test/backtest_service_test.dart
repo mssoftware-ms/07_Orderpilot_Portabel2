@@ -112,17 +112,25 @@ void main() {
         ));
       }
 
+      // Custom-params discriminator post-D-07: with swing-low SL the basis
+      // (SMA vs EMA) no longer drives SL placement, so we discriminate via
+      // bbStdDev. result1 uses a narrow band (σ=1.0) → the surge close=120
+      // exceeds upper(≈97) → signal fires + SL trade. result2 uses a wide
+      // band (σ=4.0) → upper(≈136) sits above close=120 → no signal fires.
+      // The totalTrades differ on the same candle stream, which is exactly
+      // what "custom params are respected" needs to prove.
       final result1 = BacktestService.runBbRsi(
         candles: candles,
         initialBalance: 10000,
         feeRate: 0.0006,
         params: const BbRsiParams(
           bbPeriod: 10,
-          bbStdDev: 2.0,
+          bbStdDev: 1.0,
           bbMaType: BbMaType.sma,
           rsiPeriod: 7,
           rsiOversold: 30.0,
           rsiOverbought: 70.0,
+          swingLookbackBars: 20,
         ),
       );
       final result2 = BacktestService.runBbRsi(
@@ -130,12 +138,13 @@ void main() {
         initialBalance: 10000,
         feeRate: 0.0006,
         params: const BbRsiParams(
-          bbPeriod: 30,
-          bbStdDev: 2.0,
+          bbPeriod: 10,
+          bbStdDev: 4.0,
           bbMaType: BbMaType.sma,
-          rsiPeriod: 21,
+          rsiPeriod: 7,
           rsiOversold: 30.0,
           rsiOverbought: 70.0,
+          swingLookbackBars: 20,
         ),
       );
 

@@ -1,22 +1,23 @@
 //! Bollinger Bands + RSI Strategy Add-in.
 //!
-//! Defaults, entry direction, RSI cross-back trigger, and exit
-//! semantics all match the video-spec "verbesserte Variante" (see
-//! `01_Projectplan/specs/bb_rsi_spec.md` §1–§6, Diff D-01..D-05 and
-//! D-11). Positions are now closed exclusively by the SL/TP placeholders
-//! attached at entry — no BB-middle or RSI-extreme indicator exits.
-//! The R:R 1:3 + swing-low SL + break-even-trail + risk-2 % sizing
-//! (D-06/D-07/D-08/D-09) land in Welle 2.
+//! Defaults, entry direction, RSI cross-back trigger, exit semantics, and
+//! swing-low / swing-high SL placement all match the video-spec
+//! "verbesserte Variante" (see `01_Projectplan/specs/bb_rsi_spec.md` §1–§6,
+//! Diff D-01..D-05, D-07, and D-11). Positions are closed exclusively by
+//! the SL/TP placeholders attached at entry — no BB-middle or RSI-extreme
+//! indicator exits. The R:R 1:3 TP, break-even-trail at 1R, and
+//! risk-2 % sizing (D-06/D-08/D-09) land in subsequent Welle-2 commits.
 //!
 //! # Parameters
-//! | Name            | Default | Range    | Description                                  |
-//! |-----------------|---------|----------|----------------------------------------------|
-//! | bb_period       | 200     | 5–500    | Bollinger Bands MA lookback                  |
-//! | bb_stddev       | 0.2     | 0.1–5.0  | Standard-deviation multiplier                |
-//! | bb_ma_type      | 1 (EMA) | 0–1      | Basis MA type (0=SMA, 1=EMA)                 |
-//! | rsi_period      | 3       | 2–50     | RSI lookback period                          |
-//! | rsi_oversold    | 20      | 5–45     | RSI oversold threshold / level for long     |
-//! | rsi_overbought  | 80      | 55–95    | RSI overbought threshold / level for short  |
+//! | Name                | Default | Range    | Description                                  |
+//! |---------------------|---------|----------|----------------------------------------------|
+//! | bb_period           | 200     | 5–500    | Bollinger Bands MA lookback                  |
+//! | bb_stddev           | 0.2     | 0.1–5.0  | Standard-deviation multiplier                |
+//! | bb_ma_type          | 1 (EMA) | 0–1      | Basis MA type (0=SMA, 1=EMA)                 |
+//! | rsi_period          | 3       | 2–50     | RSI lookback period                          |
+//! | rsi_oversold        | 20      | 5–45     | RSI oversold threshold / level for long     |
+//! | rsi_overbought      | 80      | 55–95    | RSI overbought threshold / level for short  |
+//! | swing_lookback_bars | 20      | 5–100    | SL swing-low/high window length (Diff D-07)  |
 
 use std::collections::HashMap;
 
@@ -132,6 +133,32 @@ pub fn calc_bollinger_bands_ema(
     })
 }
 
+/// Compute the swing low: the minimum value across the given `lows`.
+///
+/// Convention (locked for Dart↔Rust parity, see `swingLow` in
+/// `lib/services/indicators.dart`): the caller selects which bars to feed,
+/// the helper does no slicing. Per `01_Projectplan/specs/bb_rsi_spec.md`
+/// §4, the swing-low SL for a long entry at bar `i` uses
+/// `min(low[i - N .. i - 1])` — i.e. the N bars BEFORE the signal bar,
+/// EXCLUSIVE of the signal bar itself. Returns `None` if `lows` is empty.
+pub fn swing_low(lows: &[f64]) -> Option<f64> {
+    if lows.is_empty() {
+        return None;
+    }
+    Some(lows.iter().copied().fold(f64::INFINITY, f64::min))
+}
+
+/// Compute the swing high: the maximum value across the given `highs`.
+///
+/// Mirror of [`swing_low`] for the short side. Spec §4: short-entry SL is
+/// `max(high[i - N .. i - 1])` — N highs before the signal bar, exclusive.
+pub fn swing_high(highs: &[f64]) -> Option<f64> {
+    if highs.is_empty() {
+        return None;
+    }
+    Some(highs.iter().copied().fold(f64::NEG_INFINITY, f64::max))
+}
+
 /// Calculate RSI using Wilder's smoothing method.
 ///
 /// Returns `None` if there are fewer than `period + 1` data points.
@@ -240,12 +267,16 @@ impl StrategyAddin for BbRsiStrategy {
         let rsi_period = ctx.param_or("rsi_period", 3.0) as usize;
         let rsi_oversold = ctx.param_or("rsi_oversold", 20.0);
         let rsi_overbought = ctx.param_or("rsi_overbought", 80.0);
+        let swing_lookback = ctx.param_or("swing_lookback_bars", 20.0) as usize;
 
         // F-09 parity gate: match Dart `startIdx = max(bbPeriod, rsiPeriod + 1)`.
         // Without this, Rust emits signals one bar earlier than Dart at the
         // BB-warmup boundary on real markets (cf. phase1_reference_backtest).
         // Plan rev3 §3.4 establishes Dart's convention as canonical.
-        let start_idx = bb_period.max(rsi_period + 1);
+        // Diff D-07 also requires `swing_lookback` bars BEFORE the signal
+        // bar for the swing-low/high SL; fold it into the warm-up gate so
+        // signals never emit without a usable SL.
+        let start_idx = bb_period.max(rsi_period + 1).max(swing_lookback);
         if ctx.index() < start_idx {
             return None;
         }
@@ -287,30 +318,56 @@ impl StrategyAddin for BbRsiStrategy {
 
         let price = ctx.current_price();
 
+        // ── Swing-based SL window (Diff D-07) ───────────────────────────
+        // Per spec §4, the SL for a long uses the lowest `low` of the N
+        // bars BEFORE the signal bar (exclusive of the signal bar itself);
+        // mirror for shorts. The warm-up gate above already guarantees
+        // `ctx.index() >= swing_lookback`, so the slice is in-bounds.
+        let pre_signal = &ctx.all_candles()[ctx.index() - swing_lookback..ctx.index()];
+        let pre_lows: Vec<f64> = pre_signal.iter().map(|c| c.low).collect();
+        let pre_highs: Vec<f64> = pre_signal.iter().map(|c| c.high).collect();
+        let swing_low_price = swing_low(&pre_lows)?;
+        let swing_high_price = swing_high(&pre_highs)?;
+
         // ── Entry logic ─────────────────────────────────────────────────
-        // Diff D-03/D-04 + Diff D-05: trend-follow + RSI cross-back
-        // through the oversold/overbought level per video-spec §2/§3.
+        // Diff D-03/D-04 + Diff D-05 + Diff D-07: trend-follow + RSI
+        // cross-back through the oversold/overbought level + swing-based
+        // SL per video-spec §2/§3/§4.
         //   Long  ⇔ price > BB.upper AND RSI(prev) < oversold AND RSI(cur) ≥ oversold
         //   Short ⇔ price < BB.lower AND RSI(prev) > overbought AND RSI(cur) ≤ overbought
         // Strict comparison on the prev side prevents re-triggering after
         // RSI flatlines on a threshold. `None` for prev_rsi (first valid
         // bar after warm-up) suppresses the cross — no signal possible.
-        // SL/TP placeholders are still the BB-geometry mirror from
-        // Diff D-04; video-spec R:R 1:3 + swing-low SL land in Welle 2.
+        // SL is now anchored on the swing-low/high of the prior N bars
+        // (spec §4 algorithmic definition, Welle-1 D-07 QA sign-off).
+        // TP is still the BB-geometry mirror from Diff D-04 placeholder;
+        // the R:R 1:3 conversion lands in the next Welle-2 commit (D-06).
+        // Degenerate swings (swing_low ≥ signal-bar price for a long, or
+        // swing_high ≤ signal-bar price for a short) are suppressed — those
+        // SLs would be on the wrong side of entry and trip the position
+        // immediately at fill.
         if !ctx.in_position {
             if let Some(prev) = prev_rsi {
-                if price > bb.upper && prev < rsi_oversold && rsi >= rsi_oversold {
+                if price > bb.upper
+                    && prev < rsi_oversold
+                    && rsi >= rsi_oversold
+                    && swing_low_price < price
+                {
                     ctx.in_position = true;
                     return Some(Signal::long(
-                        Some(bb.middle),
+                        Some(swing_low_price),
                         Some(bb.upper + (bb.upper - bb.middle)),
                     ));
                 }
 
-                if price < bb.lower && prev > rsi_overbought && rsi <= rsi_overbought {
+                if price < bb.lower
+                    && prev > rsi_overbought
+                    && rsi <= rsi_overbought
+                    && swing_high_price > price
+                {
                     ctx.in_position = true;
                     return Some(Signal::short(
-                        Some(bb.middle),
+                        Some(swing_high_price),
                         Some(bb.lower - (bb.middle - bb.lower)),
                     ));
                 }
@@ -360,6 +417,17 @@ pub fn bb_rsi_manifest() -> AddinManifest {
             ParameterSchema::new("rsi_period", "RSI Period", 3.0, 2.0, 50.0, 1.0),
             ParameterSchema::new("rsi_oversold", "RSI Oversold", 20.0, 5.0, 45.0, 1.0),
             ParameterSchema::new("rsi_overbought", "RSI Overbought", 80.0, 55.0, 95.0, 1.0),
+            // Diff D-07: swing-low/high window for the SL placement
+            // (01_Projectplan/specs/bb_rsi_spec.md §4 algorithmic
+            // definition). N=20 on 1h-bars ≈ one-day lookback.
+            ParameterSchema::new(
+                "swing_lookback_bars",
+                "Swing Lookback Bars",
+                20.0,
+                5.0,
+                100.0,
+                1.0,
+            ),
         ],
     }
 }
@@ -547,6 +615,47 @@ mod tests {
         assert!(calc_bollinger_bands_ema(&[1.0, 2.0], 5, 2.0).is_none());
     }
 
+    // ── Swing-low / swing-high tests (Diff D-07) ─────────────────────────
+
+    #[test]
+    fn test_swing_low_basic() {
+        // Minimum across the slice — exact, no float fuzz.
+        let lows = vec![10.0, 7.5, 8.0, 9.0, 6.5, 11.0];
+        assert!((swing_low(&lows).unwrap() - 6.5).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_swing_high_basic() {
+        let highs = vec![10.0, 12.5, 8.0, 14.0, 13.5, 11.0];
+        assert!((swing_high(&highs).unwrap() - 14.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_swing_helpers_empty() {
+        // Empty slice → no swing defined → None (mirrors `swingLow`/
+        // `swingHigh` in `lib/services/indicators.dart`).
+        assert!(swing_low(&[]).is_none());
+        assert!(swing_high(&[]).is_none());
+    }
+
+    #[test]
+    fn test_swing_helpers_single() {
+        // Single-value slice trivially returns that value.
+        assert!((swing_low(&[42.5]).unwrap() - 42.5).abs() < 1e-12);
+        assert!((swing_high(&[42.5]).unwrap() - 42.5).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_swing_helpers_negative_values() {
+        // Pin the comparison semantics against signed values — `f64::min`
+        // and `f64::max` handle these correctly; a naive accumulator
+        // initialised to 0.0 would break for all-negative inputs.
+        let lows = vec![-1.0, -5.0, -3.0, -2.0];
+        let highs = vec![-1.0, -5.0, -3.0, -2.0];
+        assert!((swing_low(&lows).unwrap() - -5.0).abs() < 1e-12);
+        assert!((swing_high(&highs).unwrap() - -1.0).abs() < 1e-12);
+    }
+
     #[test]
     fn test_ema_path_dependent_on_history_length() {
         // Same final 5 closes but different prior history → different EMA.
@@ -634,13 +743,18 @@ mod tests {
         let strategy = BbRsiStrategy::new();
         let manifest = strategy.manifest();
         assert_eq!(manifest.id, "bb_rsi_v1");
-        // bb_period, bb_stddev, bb_ma_type, rsi_period, rsi_oversold, rsi_overbought
-        assert_eq!(manifest.parameters.len(), 6);
+        // bb_period, bb_stddev, bb_ma_type, rsi_period, rsi_oversold,
+        // rsi_overbought, swing_lookback_bars (Diff D-07)
+        assert_eq!(manifest.parameters.len(), 7);
         assert_eq!(manifest.category, StrategyCategory::MeanReversion);
         assert!(manifest
             .parameters
             .iter()
             .any(|p| p.name == "bb_ma_type"));
+        assert!(manifest
+            .parameters
+            .iter()
+            .any(|p| p.name == "swing_lookback_bars"));
     }
 
     #[test]
@@ -729,6 +843,7 @@ mod tests {
         params.insert("rsi_period".to_string(), 14.0);
         params.insert("rsi_oversold".to_string(), 30.0);
         params.insert("rsi_overbought".to_string(), 70.0);
+        params.insert("swing_lookback_bars".to_string(), 20.0);
         params
     }
 
@@ -772,6 +887,85 @@ mod tests {
             })
             .collect();
         assert_entry_direction(&candles, false, phase1_pinned_params());
+    }
+
+    #[test]
+    fn test_strategy_long_sl_equals_swing_low_of_pre_signal_window() {
+        // Diff D-07: the long-entry SL must equal the minimum `low` of
+        // the N bars immediately BEFORE the signal bar (spec §4 algorithm,
+        // exclusive of the signal bar itself). We rebuild the same
+        // 20-flat + 14-decline + surge fixture used by the entry-direction
+        // test, but capture the emitted Signal::EnterLong and assert its
+        // sl equals the hand-computed swing low.
+        let mut closes = vec![100.0; 20];
+        for i in 0..14 {
+            closes.push(100.0 - (i as f64 + 1.0) * 2.0);
+        }
+        closes.push(120.0);
+        // low = close - 0.5 → swing_low(lows[14..34]) =
+        //   min(99.5 ×6 at bars 14..19, 97.5,95.5,…,71.5 at bars 20..33)
+        //   = 71.5 (bar 33).
+        let candles: Vec<Candle> = closes
+            .iter()
+            .enumerate()
+            .map(|(i, &c)| {
+                Candle::new(i as i64 * 60000, c, c + 0.5, c - 0.5, c, 100.0)
+            })
+            .collect();
+
+        let mut strategy = BbRsiStrategy::new();
+        let mut ctx =
+            Context::new(candles.clone(), Timeframe::M1, phase1_pinned_params());
+        let mut captured_sl: Option<f64> = None;
+        for (i, candle) in candles.iter().enumerate() {
+            ctx.set_index(i);
+            if let Some(Signal::EnterLong { sl, .. }) = strategy.on_candle(&mut ctx, candle) {
+                captured_sl = sl;
+                break;
+            }
+        }
+        let got = captured_sl.expect("expected EnterLong with SL");
+        assert!(
+            (got - 71.5).abs() < 1e-12,
+            "swing-low SL expected 71.5 (bar 33 low), got {}",
+            got
+        );
+    }
+
+    #[test]
+    fn test_strategy_short_sl_equals_swing_high_of_pre_signal_window() {
+        // Mirror of the long-SL test: 20-flat + 14-ascent + crash bar.
+        // swing_high(highs[14..34]) = max(100.5 ×6, 102.5,…,128.5) = 128.5.
+        let mut closes = vec![100.0; 20];
+        for i in 0..14 {
+            closes.push(100.0 + (i as f64 + 1.0) * 2.0);
+        }
+        closes.push(80.0);
+        let candles: Vec<Candle> = closes
+            .iter()
+            .enumerate()
+            .map(|(i, &c)| {
+                Candle::new(i as i64 * 60000, c, c + 0.5, c - 0.5, c, 100.0)
+            })
+            .collect();
+
+        let mut strategy = BbRsiStrategy::new();
+        let mut ctx =
+            Context::new(candles.clone(), Timeframe::M1, phase1_pinned_params());
+        let mut captured_sl: Option<f64> = None;
+        for (i, candle) in candles.iter().enumerate() {
+            ctx.set_index(i);
+            if let Some(Signal::EnterShort { sl, .. }) = strategy.on_candle(&mut ctx, candle) {
+                captured_sl = sl;
+                break;
+            }
+        }
+        let got = captured_sl.expect("expected EnterShort with SL");
+        assert!(
+            (got - 128.5).abs() < 1e-12,
+            "swing-high SL expected 128.5 (bar 33 high), got {}",
+            got
+        );
     }
 
     #[test]
