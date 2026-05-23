@@ -99,6 +99,17 @@ class BbRsiParams {
   /// parameter for Dart↔Rust parity.
   final double tpRrRatio;
 
+  /// Equity fraction risked per trade (Diff D-09).
+  ///
+  /// Spec §8: `qty = (equity × risk_per_trade) / |entry − sl|`. The
+  /// strategy converts this into a per-signal `size_fraction` at signal
+  /// time using the signal-bar close as entry proxy. Default 0.02 = 2 %
+  /// per spec; range bounded by the manifest 0.001–1.0. If the formula
+  /// produces a notional > balance (very tight SL), the engine clamps
+  /// to full-balance allocation (spec §8 "naive Clamp"). Must equal
+  /// the Rust `risk_per_trade` parameter for Dart↔Rust parity.
+  final double riskPerTrade;
+
   /// One-side slippage in basis points applied at each execution
   /// (entry and exit) against the trader. Plan rev2 §3.4 F-04 sets the
   /// default to 0 bps for Binance / Bitunix BTC + ETH at retail size;
@@ -108,9 +119,9 @@ class BbRsiParams {
 
   /// Defaults match the video-spec "verbesserte Variante" — see
   /// `01_Projectplan/specs/bb_rsi_spec.md` §1, Diff D-01 + D-02
-  /// (BB(200, EMA, 0.2σ) + RSI(3, 20/80)) plus Diff D-06 R:R 1:3 TP
-  /// and Diff D-07 swing-SL N=20. Mirrors the bb_rsi_manifest() defaults
-  /// in `rust/trading_engine/src/addins/bb_rsi.rs`.
+  /// (BB(200, EMA, 0.2σ) + RSI(3, 20/80)) plus Diff D-06 R:R 1:3 TP,
+  /// Diff D-07 swing-SL N=20, and Diff D-09 risk-2 % sizing. Mirrors
+  /// the bb_rsi_manifest() defaults in `rust/trading_engine/src/addins/bb_rsi.rs`.
   const BbRsiParams({
     this.bbPeriod = 200,
     this.bbStdDev = 0.2,
@@ -120,6 +131,7 @@ class BbRsiParams {
     this.rsiOverbought = 80.0,
     this.swingLookbackBars = 20,
     this.tpRrRatio = 3.0,
+    this.riskPerTrade = 0.02,
     this.slippageBps = 0.0,
   });
 }
@@ -177,13 +189,22 @@ sealed class _PendingOrder {}
 class _PendingEnterLong extends _PendingOrder {
   final double stopLoss;
   final double takeProfit;
-  _PendingEnterLong(this.stopLoss, this.takeProfit);
+
+  /// Fraction of available balance to allocate to this entry (Diff D-09).
+  /// `1.0` falls back to the legacy full-balance allocation; risk-sized
+  /// strategy paths derive this from `riskPerTrade × entry / sl_distance`,
+  /// clamped to `[0, 1]`.
+  final double sizeFraction;
+  _PendingEnterLong(this.stopLoss, this.takeProfit, this.sizeFraction);
 }
 
 class _PendingEnterShort extends _PendingOrder {
   final double stopLoss;
   final double takeProfit;
-  _PendingEnterShort(this.stopLoss, this.takeProfit);
+
+  /// See [_PendingEnterLong.sizeFraction]; mirror for the short side.
+  final double sizeFraction;
+  _PendingEnterShort(this.stopLoss, this.takeProfit, this.sizeFraction);
 }
 
 // Diff D-11 removed the BB-middle / RSI-extreme indicator exits, so
@@ -323,7 +344,11 @@ class BacktestService {
       final entryNotional = pos.entryPrice * pos.quantity;
       final pnlPct = entryNotional > 0 ? (netPnl / entryNotional) * 100 : 0.0;
       final alloc = entryNotional + pos.entryFee;
-      balance = alloc + netPnl;
+      // D-09 partial alloc: return reserved margin + realised PnL to the
+      // current balance (no longer assumed zero pre-close). Legacy
+      // full-balance path: balance==0 pre-close, so `+= alloc + netPnl`
+      // collapses to the pre-D-09 `= alloc + netPnl` semantics.
+      balance += alloc + netPnl;
 
       trades.add(ClosedTrade(
         entryTimestamp: pos.entryTimestamp,
@@ -354,8 +379,14 @@ class BacktestService {
         switch (pending) {
           case _PendingEnterLong p:
             final entryPrice = candle.open * (1 + slipFactor);
-            final fee = balance * feeRate;
-            final qty = (balance - fee) / entryPrice;
+            // D-09 partial alloc: alloc = balance × sizeFraction (legacy
+            // sizeFraction=1.0 collapses to the pre-D-09 full-balance
+            // allocation). Fee scales with alloc, not balance, so the
+            // close_position math still resolves to
+            // `balance += alloc + net_pnl` post-D-09.
+            final alloc = balance * p.sizeFraction;
+            final fee = alloc * feeRate;
+            final qty = (alloc - fee) / entryPrice;
             position = _OpenPosition(
               isLong: true,
               entryPrice: entryPrice,
@@ -366,12 +397,13 @@ class BacktestService {
               takeProfit: p.takeProfit,
               initialSlDistance: (entryPrice - p.stopLoss).abs(),
             );
-            balance = 0;
+            balance -= alloc;
             totalFees += fee;
           case _PendingEnterShort p:
             final entryPrice = candle.open * (1 - slipFactor);
-            final fee = balance * feeRate;
-            final qty = (balance - fee) / entryPrice;
+            final alloc = balance * p.sizeFraction;
+            final fee = alloc * feeRate;
+            final qty = (alloc - fee) / entryPrice;
             position = _OpenPosition(
               isLong: false,
               entryPrice: entryPrice,
@@ -382,7 +414,7 @@ class BacktestService {
               takeProfit: p.takeProfit,
               initialSlDistance: (p.stopLoss - entryPrice).abs(),
             );
-            balance = 0;
+            balance -= alloc;
             totalFees += fee;
         }
         pending = null;
@@ -485,17 +517,28 @@ class BacktestService {
                 // actual fill at the next bar's open may differ slightly
                 // under non-zero slippage (the asymmetric impact on R:R
                 // is documented in the Welle-2 QA brief).
-                final tpLong = close + params.tpRrRatio * (close - slLong);
-                pending = _PendingEnterLong(slLong, tpLong);
+                final slDistanceLong = close - slLong;
+                final tpLong = close + params.tpRrRatio * slDistanceLong;
+                // Diff D-09: size = risk_per_trade × entry / sl_distance,
+                // clamped to full balance. Algebraically identical to the
+                // Rust `position_size_pct` helper / 100.
+                final sizeLong =
+                    (params.riskPerTrade * close / slDistanceLong)
+                        .clamp(0.0, 1.0);
+                pending = _PendingEnterLong(slLong, tpLong, sizeLong);
               } else if (slLong != null &&
                   slShort != null &&
                   close < lower &&
                   prev > params.rsiOverbought &&
                   rsi <= params.rsiOverbought &&
                   slShort > close) {
+                final slDistanceShort = slShort - close;
                 final tpShort =
-                    close - params.tpRrRatio * (slShort - close);
-                pending = _PendingEnterShort(slShort, tpShort);
+                    close - params.tpRrRatio * slDistanceShort;
+                final sizeShort =
+                    (params.riskPerTrade * close / slDistanceShort)
+                        .clamp(0.0, 1.0);
+                pending = _PendingEnterShort(slShort, tpShort, sizeShort);
               }
             }
           }

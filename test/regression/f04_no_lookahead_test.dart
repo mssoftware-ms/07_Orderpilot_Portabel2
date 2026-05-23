@@ -112,6 +112,7 @@ void main() {
             rsiOverbought: 70.0,
             swingLookbackBars: 20,
             tpRrRatio: 3.0,
+            riskPerTrade: 0.02,
           ),
         );
 

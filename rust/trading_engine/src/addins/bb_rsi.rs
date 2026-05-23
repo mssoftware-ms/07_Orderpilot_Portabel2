@@ -1,13 +1,12 @@
 //! Bollinger Bands + RSI Strategy Add-in.
 //!
 //! Defaults, entry direction, RSI cross-back trigger, exit semantics,
-//! swing-low / swing-high SL placement, and R:R 1:3 take-profit all match
-//! the video-spec "verbesserte Variante" (see
-//! `01_Projectplan/specs/bb_rsi_spec.md` §1–§6, Diff D-01..D-05, D-06,
-//! D-07, and D-11). Positions are closed exclusively by the SL/TP
-//! placeholders attached at entry — no BB-middle or RSI-extreme indicator
-//! exits. Break-even-trail at 1R and risk-2 % sizing (D-08/D-09) land in
-//! subsequent Welle-2 commits.
+//! swing-low / swing-high SL placement, R:R 1:3 take-profit, break-even
+//! trail at +1R, and per-trade risk sizing all match the video-spec
+//! "verbesserte Variante" (see `01_Projectplan/specs/bb_rsi_spec.md`
+//! §1–§8, Diff D-01..D-09 and D-11). Positions are closed exclusively
+//! by SL/TP placeholders attached at entry — no BB-middle or
+//! RSI-extreme indicator exits.
 //!
 //! # Parameters
 //! | Name                | Default | Range    | Description                                  |
@@ -20,6 +19,7 @@
 //! | rsi_overbought      | 80      | 55–95    | RSI overbought threshold / level for short  |
 //! | swing_lookback_bars | 20      | 5–100    | SL swing-low/high window length (Diff D-07)  |
 //! | tp_rr_ratio         | 3.0     | 0.5–10.0 | TP distance as multiple of SL distance (D-06)|
+//! | risk_per_trade      | 0.02    | 0.001–1.0| Equity fraction risked per trade (Diff D-09) |
 
 use std::collections::HashMap;
 
@@ -161,6 +161,32 @@ pub fn swing_high(highs: &[f64]) -> Option<f64> {
     Some(highs.iter().copied().fold(f64::NEG_INFINITY, f64::max))
 }
 
+/// Convert the spec §8 risk-2 % sizing rule into a percentage of equity
+/// that the engine's `open_position` can consume directly (Diff D-09).
+///
+/// Derivation: the spec defines
+///   `qty = (equity * risk_per_trade) / sl_distance`
+/// and the engine builds the position via
+///   `alloc = balance * size_pct / 100`,
+///   `qty = (alloc - alloc * fee_rate) / entry_price`.
+/// Solving for `size_pct` (ignoring the second-order `(1 - fee_rate)`
+/// term — fee_rate is bounded by 0.001 in the BB+RSI configs the
+/// strategy ships with, so the residual is < 0.1 % of the target risk):
+///   `size_pct = 100 * risk_per_trade * entry_price / sl_distance`.
+/// Clamped to `[0, 100]` because the engine treats `size_pct > 100` the
+/// same as 100 — spec §8 calls this the "naive full-balance clamp".
+///
+/// `sl_distance` must be strictly positive; the caller is expected to
+/// have already enforced this via the degenerate-swing check.
+/// `entry_price` is the signal-bar close (entry-price proxy) to keep
+/// the calculation parity-locked across Dart and Rust at signal time.
+pub fn position_size_pct(entry_price: f64, sl_distance: f64, risk_per_trade: f64) -> f64 {
+    if sl_distance <= 0.0 || entry_price <= 0.0 || risk_per_trade <= 0.0 {
+        return 0.0;
+    }
+    (100.0 * risk_per_trade * entry_price / sl_distance).clamp(0.0, 100.0)
+}
+
 /// Calculate RSI using Wilder's smoothing method.
 ///
 /// Returns `None` if there are fewer than `period + 1` data points.
@@ -271,6 +297,7 @@ impl StrategyAddin for BbRsiStrategy {
         let rsi_overbought = ctx.param_or("rsi_overbought", 80.0);
         let swing_lookback = ctx.param_or("swing_lookback_bars", 20.0) as usize;
         let tp_rr_ratio = ctx.param_or("tp_rr_ratio", 3.0);
+        let risk_per_trade = ctx.param_or("risk_per_trade", 0.02);
 
         // F-09 parity gate: match Dart `startIdx = max(bbPeriod, rsiPeriod + 1)`.
         // Without this, Rust emits signals one bar earlier than Dart at the
@@ -360,8 +387,13 @@ impl StrategyAddin for BbRsiStrategy {
                 {
                     let sl_distance = price - swing_low_price;
                     let tp_price = price + tp_rr_ratio * sl_distance;
+                    let size_pct = position_size_pct(price, sl_distance, risk_per_trade);
                     ctx.in_position = true;
-                    return Some(Signal::long(Some(swing_low_price), Some(tp_price)));
+                    return Some(Signal::EnterLong {
+                        sl: Some(swing_low_price),
+                        tp: vec![tp_price],
+                        size_pct,
+                    });
                 }
 
                 if price < bb.lower
@@ -371,8 +403,13 @@ impl StrategyAddin for BbRsiStrategy {
                 {
                     let sl_distance = swing_high_price - price;
                     let tp_price = price - tp_rr_ratio * sl_distance;
+                    let size_pct = position_size_pct(price, sl_distance, risk_per_trade);
                     ctx.in_position = true;
-                    return Some(Signal::short(Some(swing_high_price), Some(tp_price)));
+                    return Some(Signal::EnterShort {
+                        sl: Some(swing_high_price),
+                        tp: vec![tp_price],
+                        size_pct,
+                    });
                 }
             }
         }
@@ -441,6 +478,18 @@ pub fn bb_rsi_manifest() -> AddinManifest {
                 0.5,
                 10.0,
                 0.1,
+            ),
+            // Diff D-09: fraction of equity risked per trade (spec §8 =
+            // 2 %). The strategy converts this into a per-signal
+            // `size_pct` via `position_size_pct` so the engine's
+            // `open_position` can consume it directly.
+            ParameterSchema::new(
+                "risk_per_trade",
+                "Risk Per Trade",
+                0.02,
+                0.001,
+                1.0,
+                0.001,
             ),
         ],
     }
@@ -660,6 +709,38 @@ mod tests {
     }
 
     #[test]
+    fn test_position_size_pct_typical_case() {
+        // entry=100, sl=98 → sl_distance=2; risk=0.02
+        // size_pct = 100 * 0.02 * 100 / 2 = 100 → exactly capped.
+        let got = position_size_pct(100.0, 2.0, 0.02);
+        assert!((got - 100.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_position_size_pct_tight_sl_clamps_to_full_balance() {
+        // entry=100, sl_distance=0.5 → unclamped would be 100*0.02*100/0.5
+        // = 400 (= 4x leverage), the engine spec says clamp to 100.
+        let got = position_size_pct(100.0, 0.5, 0.02);
+        assert!((got - 100.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_position_size_pct_wide_sl_reduces_size() {
+        // entry=100, sl_distance=20 → 100*0.02*100/20 = 10. The signal is
+        // small enough that the trade only puts 10 % of equity at notional.
+        let got = position_size_pct(100.0, 20.0, 0.02);
+        assert!((got - 10.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_position_size_pct_zero_or_negative_inputs_yield_zero() {
+        assert_eq!(position_size_pct(100.0, 0.0, 0.02), 0.0);
+        assert_eq!(position_size_pct(100.0, -1.0, 0.02), 0.0);
+        assert_eq!(position_size_pct(0.0, 1.0, 0.02), 0.0);
+        assert_eq!(position_size_pct(100.0, 1.0, 0.0), 0.0);
+    }
+
+    #[test]
     fn test_swing_helpers_negative_values() {
         // Pin the comparison semantics against signed values — `f64::min`
         // and `f64::max` handle these correctly; a naive accumulator
@@ -758,8 +839,9 @@ mod tests {
         let manifest = strategy.manifest();
         assert_eq!(manifest.id, "bb_rsi_v1");
         // bb_period, bb_stddev, bb_ma_type, rsi_period, rsi_oversold,
-        // rsi_overbought, swing_lookback_bars (D-07), tp_rr_ratio (D-06)
-        assert_eq!(manifest.parameters.len(), 8);
+        // rsi_overbought, swing_lookback_bars (D-07), tp_rr_ratio (D-06),
+        // risk_per_trade (D-09)
+        assert_eq!(manifest.parameters.len(), 9);
         assert_eq!(manifest.category, StrategyCategory::MeanReversion);
         assert!(manifest
             .parameters
@@ -773,6 +855,10 @@ mod tests {
             .parameters
             .iter()
             .any(|p| p.name == "tp_rr_ratio"));
+        assert!(manifest
+            .parameters
+            .iter()
+            .any(|p| p.name == "risk_per_trade"));
     }
 
     #[test]
@@ -863,6 +949,7 @@ mod tests {
         params.insert("rsi_overbought".to_string(), 70.0);
         params.insert("swing_lookback_bars".to_string(), 20.0);
         params.insert("tp_rr_ratio".to_string(), 3.0);
+        params.insert("risk_per_trade".to_string(), 0.02);
         params
     }
 
@@ -1068,6 +1155,53 @@ mod tests {
             "R:R 1:3 TP from signal-bar close: expected -65.5, got {}",
             got
         );
+    }
+
+    #[test]
+    fn test_strategy_long_size_pct_matches_risk_2_percent_formula() {
+        // Diff D-09: long entry on the 20-flat + 14-decline + surge
+        // fixture. signal-bar close=120, swing_low=71.5, sl_distance=48.5.
+        // With risk_per_trade=0.02:
+        //   size_pct = 100 * 0.02 * 120 / 48.5 ≈ 4.9484536...
+        // The emitted signal must carry this value (NOT 100.0 — that was
+        // the legacy full-balance default).
+        let mut closes = vec![100.0; 20];
+        for i in 0..14 {
+            closes.push(100.0 - (i as f64 + 1.0) * 2.0);
+        }
+        closes.push(120.0);
+        let candles: Vec<Candle> = closes
+            .iter()
+            .enumerate()
+            .map(|(i, &c)| {
+                Candle::new(i as i64 * 60000, c, c + 0.5, c - 0.5, c, 100.0)
+            })
+            .collect();
+
+        let mut strategy = BbRsiStrategy::new();
+        let mut ctx =
+            Context::new(candles.clone(), Timeframe::M1, phase1_pinned_params());
+        let mut captured_pct: Option<f64> = None;
+        for (i, candle) in candles.iter().enumerate() {
+            ctx.set_index(i);
+            if let Some(Signal::EnterLong { size_pct, .. }) =
+                strategy.on_candle(&mut ctx, candle)
+            {
+                captured_pct = Some(size_pct);
+                break;
+            }
+        }
+        let got = captured_pct.expect("expected EnterLong with size_pct");
+        let expected = 100.0 * 0.02 * 120.0 / 48.5;
+        assert!(
+            (got - expected).abs() < 1e-12,
+            "risk-sized size_pct: expected {} got {}",
+            expected,
+            got
+        );
+        // Sanity: well below 100, so the signal does NOT get clamped to
+        // full balance on this fixture.
+        assert!(got < 100.0);
     }
 
     #[test]

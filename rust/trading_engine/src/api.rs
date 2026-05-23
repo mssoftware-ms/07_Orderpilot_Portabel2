@@ -284,7 +284,7 @@ mod tests {
         // smoke test stays decoupled from the Phase-2 default shift
         // (Diff D-01/D-02). The 60-candle dip fixture was built for that
         // configuration.
-        let params_json = r#"{"bb_period": 20, "bb_stddev": 2.0, "bb_ma_type": 0, "rsi_period": 14, "rsi_oversold": 30, "rsi_overbought": 70, "swing_lookback_bars": 20, "tp_rr_ratio": 3.0}"#.to_string();
+        let params_json = r#"{"bb_period": 20, "bb_stddev": 2.0, "bb_ma_type": 0, "rsi_period": 14, "rsi_oversold": 30, "rsi_overbought": 70, "swing_lookback_bars": 20, "tp_rr_ratio": 3.0, "risk_per_trade": 0.02}"#.to_string();
 
         let result = run_bb_rsi_strategy(candles_json, params_json);
         let signals: Vec<serde_json::Value> = serde_json::from_str(&result).unwrap();
