@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import '../../ui/themes/app_theme.dart';
+import '../widgets/coming_soon_banner.dart';
 
 class PaperTradingScreen extends StatelessWidget {
   const PaperTradingScreen({super.key});
@@ -13,6 +14,13 @@ class PaperTradingScreen extends StatelessWidget {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
+              const ComingSoonBanner(
+                title: 'Paper Trading — In Development',
+                body: 'This feature will arrive after Phase 3. For now, '
+                    'use the Backtest screen to validate strategies on '
+                    'historical data.',
+              ),
+              const SizedBox(height: 16),
               Text('Paper Trading', style: Theme.of(context).textTheme.headlineMedium),
               const SizedBox(height: 4),
               Text(
@@ -38,14 +46,13 @@ class PaperTradingScreen extends StatelessWidget {
                       const SizedBox(width: 12),
                       const Text('Disconnected', style: TextStyle(color: AppColors.textSecondary)),
                       const Spacer(),
-                      OutlinedButton.icon(
-                        onPressed: () {
-                          ScaffoldMessenger.of(context).showSnackBar(
-                            const SnackBar(content: Text('WebSocket connection pending Rust bridge setup')),
-                          );
-                        },
-                        icon: const Icon(Icons.play_arrow, size: 18),
-                        label: const Text('Start'),
+                      Tooltip(
+                        message: 'Awaiting Phase 3',
+                        child: OutlinedButton.icon(
+                          onPressed: null,
+                          icon: const Icon(Icons.play_arrow, size: 18),
+                          label: const Text('Start'),
+                        ),
                       ),
                     ],
                   ),
