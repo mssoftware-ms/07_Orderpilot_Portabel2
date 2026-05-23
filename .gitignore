@@ -62,6 +62,10 @@ rust/.logs/
 ruvector.db
 **/ruvector.db
 
+# ─── Python virtual envs (in case of helper scripts/tooling) ──────────────────
+.venv/
+venv/
+
 # ─── Build artifacts / binaries ───────────────────────────────────────────────
 *.class
 *.log
