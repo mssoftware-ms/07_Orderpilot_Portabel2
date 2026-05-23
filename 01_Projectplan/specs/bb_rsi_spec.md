@@ -48,7 +48,28 @@
 - **Platzierung Short:** über dem letzten Swing High / „sin von Hochpunkt" (T300–T301)
 - **Logik:** initial **fix**, anschließend **Break-Even-Trail** (siehe §5 Partial-Logik)
 - **Update-Regel:** Sobald **1R Profit** (entspricht risk-reward 1:1) erreicht ist → SL auf Entry-Preis ziehen (Break-Even) (T287–T293 „sobald der Preis ein einfaches risk reward von ein Z ein erreicht hat werden wir den StopLoss auf dem Break Even ziehen")
-- **Im Video nicht eindeutig definiert → default:** „Swing Low/High" = letztes pivotal Low/High vor Entry, manuell gezeichnet im Video. Für die Implementierung muss eine algorithmische Definition (z. B. niedrigstes Low der letzten N Kerzen oder ATR-basiert) festgelegt werden. **Offener Punkt für Phase-2-Code-Fix.**
+
+### Algorithmische Swing-Definition (Phase-2-Entscheidung, 2026-05-23)
+
+Der Video-Autor zeichnet Swing-Low/Swing-High manuell. Für die Backtest-Implementierung legen wir folgende deterministische Definition fest (QA-Sign-off Phase-2 Welle-1):
+
+- **Parameter:** `swing_lookback_bars` (Default: **20**, Range 5–100, Step 1)
+- **Long-Entry SL:**
+  ```
+  sl_price = min(low[entry_idx - N .. entry_idx - 1])
+  ```
+  d. h. das niedrigste `low` der letzten `N` Kerzen **vor** dem Signal-Bar.
+- **Short-Entry SL:**
+  ```
+  sl_price = max(high[entry_idx - N .. entry_idx - 1])
+  ```
+  d. h. das höchste `high` der letzten `N` Kerzen vor dem Signal-Bar.
+
+**Begründung der Default-Wahl N=20:** Auf 1h-Kerzen entspricht das einem ~Tages-Lookback (24 Stunden ≈ 24 Kerzen, abgerundet 20 für Round-Number-Robustheit). Long genug um plausible Swings zu erfassen, kurz genug für reaktive SL-Platzierung. Bei Bedarf optimierbar in Phase 3.
+
+**Phase-3 Alternative (nicht in Welle 2):** ATR-basierter SL über die UT-Bot-Strategy, sobald deren ATR-Indikator integriert ist. Beide Varianten bleiben dann als optimierbarer Schalter im Strategie-Manifest.
+
+**Implementierungs-Status (Stand Welle-1):** noch nicht implementiert; SL-Placeholder im Code ist aktuell `bb.middle` (geometrisch aus den BB). Welle 2 ersetzt das durch obige Swing-Definition (Diff D-07).
 
 ---
 
@@ -136,11 +157,17 @@ Diese Unterscheidung ist für die Code-Diff entscheidend: die existierende Imple
 
 ## 12. Abweichungen von der Vorlage (bewusst)
 
-Diese Section ist absichtlich kurz gehalten: alle Abweichungen, die die Implementierung von der Video-Vorlage zeigt, werden im **Diff-MD** (`bb_rsi_diff.md`) systematisch erfasst und bewertet. Hier nur das eine Strukturthema:
+Diese Section dokumentiert Abweichungen, bei denen die Implementierung *bewusst* von der Video-Vorlage abweicht. Übrige Code-vs-Spec-Diffs stehen im **Diff-MD** (`bb_rsi_diff.md`).
 
-- **Abweichung:** Die existierende Implementierung wurde nicht aus *dieser* Video-Spec abgeleitet, sondern als generisches BB+RSI-Mean-Reversion-Pattern in Phase 1 implementiert (siehe Phase-1-Plan §3.5, Reference-Backtest BTCUSDT 1h 2024-H1).
-- **Begründung:** Phase 1 hatte das Ziel „Engine-Korrektheit beweisen", nicht „Video-Strategy exakt reproduzieren". Die BB+RSI-Logik in Phase 1 ist daher eher ein **Testvehikel** als die finale Strategie. Diese Spec definiert nun erstmals das Ziel-Verhalten.
-- **Konsequenz für Phase 2:** Code muss substanziell angepasst werden (Indikator-Defaults, Entry-Logik, Exit-Logik, Sizing). Der Phase-1-Reference-Backtest-Output (3-Run-Reproduzierbarkeit, Dart↔Rust-Parität, totalTrades > 0) bleibt das Korrektheits-Gate, aber die *Zahlen* werden sich verschieben.
+**12.1 Phase-1-Erbe (Mean-Reversion-Testvehikel)**
+- **Abweichung:** Die Phase-1-Implementierung wurde nicht aus dieser Video-Spec abgeleitet, sondern als generisches BB+RSI-Mean-Reversion-Pattern aufgesetzt (siehe Phase-1-Plan §3.5, Reference-Backtest BTCUSDT 1h 2024-H1).
+- **Begründung:** Phase 1 hatte das Ziel „Engine-Korrektheit beweisen", nicht „Video-Strategy exakt reproduzieren". Die BB+RSI-Logik in Phase 1 ist daher eher ein **Testvehikel** als die finale Strategie.
+- **Konsequenz für Phase 2:** Code wird in Welle 1 (Diff D-01..D-05, D-11) auf die Spec-Trendfolge umgestellt und in Welle 2 (D-06..D-09) auf Risk-2 %/R:R-1:3-Sizing.
+
+**12.2 Algorithmische Swing-Definition für SL (D-07-Entscheidung)**
+- **Abweichung:** Der Video-Autor zeichnet Swing-Low/Swing-High manuell. Wir verwenden stattdessen eine deterministische `swing_lookback_bars`-Definition (siehe §4: rolling `min(low)` / `max(high)` über die letzten N Kerzen vor Signal-Bar; Default N=20).
+- **Begründung:** (a) Reproduzierbarkeit — manuelle Swing-Auswahl ist nicht backtestbar. (b) Walk-Forward — der Optimizer in Phase 3 kann N tunen. (c) ATR-basierte Variante wird über die UT-Bot-Strategy nachgereicht.
+- **Konsequenz:** Backtest-Trades können sich von „handgepickten" Swings des Autors leicht unterscheiden; die R:R-1:3-Akzeptanz aus §13 bleibt aber direktes Soll-Maß.
 
 ---
 
