@@ -3,7 +3,6 @@ class AppConstants {
   // API endpoints
   static const String binanceBaseUrl = 'https://api.binance.com';
   static const String binanceKlinesEndpoint = '/api/v3/klines';
-  static const String bitunixWsUrl = 'wss://ws.bitunix.com/stream';
 
   // Default trading parameters
   static const double defaultInitialCapital = 10000.0;

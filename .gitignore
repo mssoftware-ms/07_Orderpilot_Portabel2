@@ -58,6 +58,10 @@ rust/.logs/
 **/*.dll
 **/*.dylib
 
+# ─── Runtime databases ────────────────────────────────────────────────────────
+ruvector.db
+**/ruvector.db
+
 # ─── Build artifacts / binaries ───────────────────────────────────────────────
 *.class
 *.log
@@ -75,3 +79,13 @@ rust/.logs/
 migrate_working_dir/
 app.*.symbols
 app.*.map.json
+
+# Excel lock files
+**/~$*.xlsx
+**/~$*.xls
+
+# Aider AI runtime database
+agentdb.rvf
+agentdb.rvf.lock
+**/agentdb.rvf
+**/agentdb.rvf.lock

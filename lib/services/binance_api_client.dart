@@ -120,8 +120,15 @@ class _CandleCache {
   }
 
   /// Build a cache key.
+  ///
+  /// F-05: round `startMs` and `endMs` down to the last full hour so that
+  /// ms-precise drift between calls (e.g. `endTime = DateTime.now()` in
+  /// successive `downloadHistory` invocations) collides on the same key.
   static String key(String symbol, String interval, int? startMs, int? endMs, int limit) {
-    return '${symbol}_${interval}_${startMs ?? 0}_${endMs ?? 0}_$limit';
+    const hourMs = 3600000;
+    final sRounded = startMs != null ? (startMs ~/ hourMs) * hourMs : 0;
+    final eRounded = endMs != null ? (endMs ~/ hourMs) * hourMs : 0;
+    return '${symbol}_${interval}_${sRounded}_${eRounded}_$limit';
   }
 
   /// Look up candles in memory, then disk.

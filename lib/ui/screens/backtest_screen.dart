@@ -488,30 +488,27 @@ class _ConfigPanelState extends State<_ConfigPanel> {
             ),
             const SizedBox(height: 10),
 
-            // Optimize Parameters button
+            // Optimize Parameters button — FROZEN (Plan §3.3)
             SizedBox(
               width: double.infinity,
               height: 36,
-              child: OutlinedButton.icon(
-                onPressed: _p.isBusy
-                    ? null
-                    : () => _onOptimize(context),
-                icon: _p.isOptimizing
-                    ? const SizedBox(
-                        width: 14,
-                        height: 14,
-                        child: CircularProgressIndicator(
-                            strokeWidth: 2, color: AppColors.accentPurple))
-                    : const Icon(Icons.auto_awesome, size: 16),
-                label: Text(
-                  _p.isOptimizing ? 'Optimizing...' : 'Optimize Parameters',
-                  style: const TextStyle(fontSize: 12),
-                ),
-                style: OutlinedButton.styleFrom(
-                  foregroundColor: AppColors.accentPurple,
-                  side: const BorderSide(color: AppColors.accentPurple),
-                  shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(8)),
+              child: Tooltip(
+                message:
+                    'Optimizer wartet auf Phase 2-Abschluss '
+                    '(siehe 260522_Gesamtplan_Phase1-3.md §3.3)',
+                child: OutlinedButton.icon(
+                  onPressed: null,
+                  icon: const Icon(Icons.lock_outline, size: 16),
+                  label: const Text(
+                    'Optimize Parameters (frozen)',
+                    style: TextStyle(fontSize: 12),
+                  ),
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: AppColors.accentPurple,
+                    side: const BorderSide(color: AppColors.accentPurple),
+                    shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(8)),
+                  ),
                 ),
               ),
             ),
@@ -615,6 +612,8 @@ class _ConfigPanelState extends State<_ConfigPanel> {
     );
   }
 
+  // FROZEN per Gesamtplan §3.3 — keep code path, unwired from UI until Phase 2.
+  // ignore: unused_element
   Future<void> _onOptimize(BuildContext context) async {
     // Show confirmation with estimated time
     final totalCombs = DefaultRanges.totalCombinations;

@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import '../../ui/themes/app_theme.dart';
 import '../../core/constants/app_constants.dart';
+import '../widgets/coming_soon_banner.dart';
 
 class ChartScreen extends StatefulWidget {
   const ChartScreen({super.key});
@@ -19,6 +20,16 @@ class _ChartScreenState extends State<ChartScreen> {
       body: SafeArea(
         child: Column(
           children: [
+            const Padding(
+              padding: EdgeInsets.fromLTRB(16, 16, 16, 8),
+              child: ComingSoonBanner(
+                title: 'Live Chart — In Development',
+                body: 'This screen is a layout preview. Real-time '
+                    'candlesticks with BB & RSI overlays will arrive after '
+                    'Phase 3. For historical analysis use the Backtest '
+                    'screen.',
+              ),
+            ),
             // Symbol & timeframe selector
             Container(
               padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),

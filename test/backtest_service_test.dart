@@ -1,5 +1,6 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:trading_app/core/models/candle.dart';
+import 'package:trading_app/core/models/trade.dart';
 import 'package:trading_app/services/backtest_service.dart';
 
 void main() {
@@ -155,15 +156,15 @@ void main() {
     });
   });
 
-  group('TradeRecord', () {
+  group('ClosedTrade', () {
     test('isWin returns correctly', () {
-      const winner = TradeRecord(
+      const winner = ClosedTrade(
         entryTimestamp: 0, exitTimestamp: 1,
         direction: 'LONG', entryPrice: 100, exitPrice: 110,
         quantity: 1, pnl: 10, pnlPercent: 10, fees: 0.1,
         exitReason: 'TP',
       );
-      const loser = TradeRecord(
+      const loser = ClosedTrade(
         entryTimestamp: 0, exitTimestamp: 1,
         direction: 'SHORT', entryPrice: 100, exitPrice: 110,
         quantity: 1, pnl: -10, pnlPercent: -10, fees: 0.1,

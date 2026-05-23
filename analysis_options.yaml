@@ -9,6 +9,14 @@
 # packages, and plugins designed to encourage good coding practices.
 include: package:flutter_lints/flutter.yaml
 
+analyzer:
+  # rust_builder/ is a vendored flutter_rust_bridge helper plugin with its
+  # own pubspec and its own analyzer scope. Excluding it from this project's
+  # analyzer avoids spurious 'package X not found' errors against deps that
+  # live inside that sub-project.
+  exclude:
+    - rust_builder/**
+
 linter:
   # The lint rules applied to this project can be customized in the
   # section below to disable rules from the `package:flutter_lints/flutter.yaml`

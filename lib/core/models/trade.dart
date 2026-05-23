@@ -1,29 +1,57 @@
-/// Represents a closed trade for backtest results
+/// Canonical trade and backtest-metrics models.
+///
+/// These are the single source of truth for trade results across the app.
+/// Both the Dart backtest engine (lib/services/backtest_service.dart) and
+/// the Rust FFI bridge (lib/services/rust_bridge.dart) must produce
+/// instances of [BacktestMetrics] and [ClosedTrade] from this file —
+/// see test/regression/f06_model_unification_test.dart.
+library;
+
+/// A single completed trade.
 class ClosedTrade {
-  final int entryTime;
-  final int exitTime;
+  /// Unix timestamp (ms, UTC) when the position was opened.
+  final int entryTimestamp;
+
+  /// Unix timestamp (ms, UTC) when the position was closed.
+  final int exitTimestamp;
+
+  /// Trade direction: `'LONG'` or `'SHORT'`.
+  final String direction;
+
   final double entryPrice;
   final double exitPrice;
   final double quantity;
+
+  /// Net P&L in quote currency (after fees).
   final double pnl;
+
+  /// Net P&L as a percentage of entry notional.
   final double pnlPercent;
+
+  /// Total fees paid (entry + exit), quote currency.
+  final double fees;
+
+  /// Human-readable reason for the exit (e.g. `'BB Middle'`, `'RSI Overbought'`).
   final String exitReason;
-  final bool isLong;
 
   const ClosedTrade({
-    required this.entryTime,
-    required this.exitTime,
+    required this.entryTimestamp,
+    required this.exitTimestamp,
+    required this.direction,
     required this.entryPrice,
     required this.exitPrice,
     required this.quantity,
     required this.pnl,
     required this.pnlPercent,
+    required this.fees,
     required this.exitReason,
-    required this.isLong,
   });
+
+  bool get isWin => pnl > 0;
+  bool get isLong => direction == 'LONG';
 }
 
-/// Backtest performance metrics
+/// Aggregate backtest performance metrics.
 class BacktestMetrics {
   final int totalTrades;
   final int winningTrades;
@@ -35,10 +63,8 @@ class BacktestMetrics {
   final double maxDrawdown;
   final double maxDrawdownPercent;
   final double sharpeRatio;
-  final double avgTradeDuration;
-  final double largestWin;
-  final double largestLoss;
-  final List<ClosedTrade> trades;
+  final double totalFees;
+  final int candlesProcessed;
 
   const BacktestMetrics({
     required this.totalTrades,
@@ -51,28 +77,22 @@ class BacktestMetrics {
     required this.maxDrawdown,
     required this.maxDrawdownPercent,
     required this.sharpeRatio,
-    required this.avgTradeDuration,
-    required this.largestWin,
-    required this.largestLoss,
-    required this.trades,
+    required this.totalFees,
+    required this.candlesProcessed,
   });
 
-  factory BacktestMetrics.empty() {
-    return const BacktestMetrics(
-      totalTrades: 0,
-      winningTrades: 0,
-      losingTrades: 0,
-      winRate: 0,
-      profitFactor: 0,
-      totalPnl: 0,
-      totalPnlPercent: 0,
-      maxDrawdown: 0,
-      maxDrawdownPercent: 0,
-      sharpeRatio: 0,
-      avgTradeDuration: 0,
-      largestWin: 0,
-      largestLoss: 0,
-      trades: [],
-    );
-  }
+  factory BacktestMetrics.empty() => const BacktestMetrics(
+        totalTrades: 0,
+        winningTrades: 0,
+        losingTrades: 0,
+        winRate: 0,
+        profitFactor: 0,
+        totalPnl: 0,
+        totalPnlPercent: 0,
+        maxDrawdown: 0,
+        maxDrawdownPercent: 0,
+        sharpeRatio: 0,
+        totalFees: 0,
+        candlesProcessed: 0,
+      );
 }

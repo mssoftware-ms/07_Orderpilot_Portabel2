@@ -587,7 +587,44 @@ rust/trading_engine/tests/
 |---|---|---|
 | 2026-05-22 initial | Erstfassung | siehe Chat-Verlauf |
 | 2026-05-22 rev2 | Slippage-Defaults korrigiert: 0 statt 5 bps für BTC/ETH; Fee-Defaults explizit dokumentiert; Sensitivity-Sweep in Phase 3.5.2 ergänzt | Binance BTC/ETH hat de-facto null Slippage bei Retail-Größe; Fees sind die dominante Cost-Komponente und müssen separat modelliert werden |
+| 2026-05-22 rev3 | Phase-1-Klarstellungen aus 18 Finding-Briefen konsolidiert (siehe §12.1) | Im Lauf der Phase-1-Implementation entstandene Präzisierungen und Bug-Maskierung-Erkenntnisse, die den Plan für Phase 2 + 3 stabilisieren |
+
+### 12.1 Phase-1 Plan-Klarstellungen (rev3)
+
+**Engine-Korrektheit & Setup**
+
+- **§3.4 F-05**: Cache-Key-Rundung trifft `startMs` **und** `endMs` (nicht nur `endMs`). `startMs` wird aus `now - days * 86400000` ms-präzise abgeleitet und würde sonst synchron mit-driften. Bug-Reproduktion erfordert Rundung beider.
+- **§3.4 F-06**: `BacktestMetrics`-Feldset finalisiert: `avgTradeDuration`, `largestWin`, `largestLoss`, `trades`-Liste entfernt (waren ungenutzt). `totalFees` + `candlesProcessed` aufgenommen. `TradeRecord` ersetzt durch kanonischen `ClosedTrade`-Shape mit `entryTimestamp`/`exitTimestamp`/`direction:String`/`fees`.
+- **§3.4 F-01**: FRB-Output unter `lib/src/bridge/` (nicht `lib/src/rust/` — Kollision mit stale FRB-Outputs aus früherem Codegen-Lauf). Stale Files entfernt (0 Konsumenten verifiziert). JSON-RoundTrip-Variante implementiert (typed Bridge optional als F-01b). `rust_builder`-Plugin-Pattern statt manueller CMake-Edits. `totalFees`+`candlesProcessed` via FFI-Aufrufer-Site, nicht Rust-Side. Windows-Build + Paper-Trading explizit out-of-scope.
+- **§3.4 F-01**: Numerical-Equivalence-Parity-Test wird in F-01 etabliert, darf bei F-01-Abschluss rot sein. F-01-Scope = Bridge wired + JSON-RoundTrip läuft + Smoke grün. Parity grün ist F-02+-Scope.
+
+**Bug-Maskierung-Kaskade (F-02 Familie)**
+
+- **§3.4 F-02**: SL/TP-Logik scope-konform implementiert. Konkrete Engine-Asymmetrie: Rust BB+RSI emittiert Signal mit `SL = bb_lower - (bb_middle - bb_lower)`, `TP = bb_middle`. Rust BacktestEngine prüft intra-candle `high >= tp` / `low <= sl`. Dart wurde analog ausgestattet. Engine-Parity blieb anfänglich blockiert durch RSI-Windowing-Unterschied → F-02b.
+- **§3.4 F-02 Coverage-Notiz**: 200-Candle-Parity-Fixture aktiviert SL/TP-Pfad nicht (alle Exits via BB Middle). Realistische F-02-Verifikation erfolgt in Phase-1 Reference-Backtest (BTCUSDT 1h 2024) oder Phase 2 BB+RSI-Spec.
+- **§3.4 F-02b (NEU)**: RSI-Bug saß im Aufrufer (`bb_rsi.rs:on_candle`), nicht in `calc_rsi` selbst. Fix: zwei separate close-Vektoren (BB rolling, RSI full history). `calc_rsi` unverändert. Rust matched damit Dart's cumulative Wilder-Implementierung (TradingView-Standard, korrekt für Phase-2-YouTube-Strategie-Referenz).
+- **§3.4 F-02c (NEU)**: SHORT-Balance-Accounting in beiden Engines fehlerhaft. Direction-agnostic Formel: `balance_after = balance_before + alloc + net_pnl` mit `alloc = entry_price * quantity + entry_fee`. Für LONG kollabiert algebraisch zur alten Formel; existierende Long-Tests blieben grün. Zusätzlicher Fund: Rust `current_equity` hatte denselben Bug für offene Shorts, mit-gefixt.
+
+**Bug-Maskierung-Kaskade (F-03 Familie)**
+
+- **§3.4 F-03**: Sharpe-Annualisierung timeframe-aware in beiden Engines. Formel bit-identisch verifiziert (cross-check: Rust-Equity-Series durch Dart-Formel = exakter Match). Period_returns aus Equity-Curve, nicht Trade-PnL. Zero-Variance-Edge-Case via `min == max`-Check.
+- **§3.4 F-03b (NEU)**: Dart mid-trade equity reconciled via `midTradeEquity`-Helper (bit-mirror von Rust `current_equity`). Loop restrukturiert: SL/TP → Strategy → record equity (Rust-Order). F-02c orthogonal Issue #1 (Recording-Order) mit-gefixt. Parity Sharpe-Assert 1e-9 grün.
+- **§3.4 F-03c (NEU)**: Rust `maxDrawdown` auf equity-curve-Basis umgestellt (industry-standard). Helper `max_drawdown_from_equity_curve` in `models/metrics.rs`. Dart unverändert (war schon korrekt). Parity 1e-9 grün. Keine 6. Schicht entdeckt — Engine-Reconciliation-Kaskade vollständig.
+
+**Look-Ahead & UI**
+
+- **§3.4 F-04**: Signal-Bar `i` führt zu Execution bei `candle[i+1].open`. Slippage-Parameter mit Default 0 bps (Plan rev2). Last-Bar-Handling: Pending Order verfällt, offene Position force-close zu `last_candle.close` mit `ExitReason::EndOfData`. Bit-exakte Parity zwischen Engines erhalten.
+- **§3.4 F-04**: PnL-Sinkt-Assertion auf 200-Candle-Parity-Fixture entfernt. Fixture-Konvention (`open = price - 20`) produziert systematische Intra-Bar-Drift, die die Plan-Annahme „Look-Ahead favourisiert die Strategie“ auf dieser Fixture umkehrt. Strukturelle Verifikation via Lag-Assertion (Test 1) + Parity-Test. PnL-Direction wird im Phase-1-Gate Reference-Backtest auf BTCUSDT 1h 2024 verifiziert.
+- **§3.4 F-07/F-08**: WebSocket-Client gelöscht (0 Konsumenten). `web_socket_channel` zu transitive demoted, AppConstants.bitunixWsUrl entfernt. Paper-Trading + Chart-Screen mit `ComingSoonBanner`-Widget versehen, interaktive Controls disabled. Phase-1-Scope = Backtest-only.
+
+**Lessons-Learned**
+
+- **Bug-Maskierung-Kaskade-Pattern**: 5 Schichten in Phase 1 entdeckt: F-02 (SL/TP) → F-02b (RSI) → F-02c (Balance) → F-03b (Mid-Trade Equity) → F-03c (Drawdown-Definition). Erste 4 waren echte Bugs, 5. war Definitions-Frage. Tests als ehrlicher Drift-Detektor (1e-9-Toleranz nie aufgeweicht). Jede Schicht aktivierte einen anderen Code-Pfad (End-State → Indikator → Buchhaltung → Equity-Sampling → Drawdown-Definition). Vier Schichten reichten für Bug-Findings; die fünfte war konventionell.
+- **„Kosmetisch“ gilt nur für aktuelle Verwendung**: F-02c's als kosmetisch klassifizierte orthogonale Issues wurden in F-03b PnL-relevant, sobald Equity-Curve Input einer Metrik wurde (Sharpe, Drawdown). Generalisiert: jeder „kosmetische“ Bug ist potenziell ein zukünftiger Engine-Bug.
+- **Phase-1 Test-Environment = WSL2**: Linux WSL2 ist die kanonische Test-Environment für FFI-Tests. Windows-Native cdylib-Build deferred zu Phase 3 oder später.
+- **Workflow-Lerning**: Git-Operations vom QA-Koordinator gemacht (statt User) reduziert Copy-Paste-Fehler bei Branch-Namen-Verwechslungen. Etabliert ab F-02b.
+- **Plan-Skizzen sind Skizzen**: Test-Code-Snippets im Plan dokumentieren Intent, nicht API. CC adaptiert an reale Code-Signaturen, dokumentiert Drift im Brief.
 
 ---
 
-*Plan-Stand: 22. Mai 2026 (rev2). Änderungen nur per Git-Commit auf diese Datei, mit Rationale im Commit-Message und Eintrag in Section 12.*
+*Plan-Stand: 22. Mai 2026 (rev3). Änderungen nur per Git-Commit auf diese Datei, mit Rationale im Commit-Message und Eintrag in Section 12.*

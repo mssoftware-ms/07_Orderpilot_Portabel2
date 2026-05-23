@@ -1,5 +1,9 @@
 use serde::{Deserialize, Serialize};
 
+use crate::models::{
+    annualized_sharpe, equity_curve_returns, max_drawdown_from_equity_curve, Timeframe,
+};
+
 /// Side of a trading position.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PositionSide {
@@ -149,10 +153,28 @@ impl BacktestMetrics {
         }
     }
 
-    /// Compute metrics from a list of closed trades.
-    pub fn from_trades(trades: Vec<ClosedTrade>, initial_capital: f64) -> Self {
+    /// Compute metrics from a list of closed trades and the per-candle equity
+    /// curve.
+    ///
+    /// `equity_curve` and `timeframe` are required for the annualized Sharpe
+    /// (Plan §3.4 F-03): Sharpe is computed over **equity-curve returns**, not
+    /// trade-PnL percentages, and is annualized by
+    /// `sqrt(periods_per_year(timeframe))` on the Crypto 24/7 calendar.
+    pub fn from_trades(
+        trades: Vec<ClosedTrade>,
+        initial_capital: f64,
+        equity_curve: &[f64],
+        timeframe: Timeframe,
+    ) -> Self {
         if trades.is_empty() {
-            return Self::empty();
+            // Still compute Sharpe — a flat equity curve yields 0, but a
+            // strategy that takes no trades but holds inventory (not in this
+            // engine yet) could in principle have a non-zero one. Cheap.
+            let returns = equity_curve_returns(equity_curve);
+            return Self {
+                sharpe_ratio: annualized_sharpe(&returns, timeframe),
+                ..Self::empty()
+            };
         }
 
         let total_trades = trades.len();
@@ -177,40 +199,19 @@ impl BacktestMetrics {
         let total_pnl: f64 = trades.iter().map(|t| t.pnl).sum();
         let total_pnl_percent = total_pnl / initial_capital * 100.0;
 
-        // Max drawdown calculation
-        let mut equity = initial_capital;
-        let mut peak = equity;
-        let mut max_dd = 0.0_f64;
-        for trade in &trades {
-            equity += trade.pnl;
-            if equity > peak {
-                peak = equity;
-            }
-            let dd = peak - equity;
-            if dd > max_dd {
-                max_dd = dd;
-            }
-        }
-        let max_drawdown_percent = if peak > 0.0 {
-            max_dd / peak * 100.0
-        } else {
-            0.0
-        };
+        // Max drawdown (F-03c): industry-standard running-peak formula over
+        // the per-candle equity curve, matching the Dart engine bit-exact
+        // (lib/services/backtest_service.dart:322-326). The pre-F-03c code
+        // walked settled trade PnL only, which silently ignored open-position
+        // intra-trade equity excursions and diverged from Dart by ~30x on
+        // the parity fixture (28.75 vs 951.47). See Plan-rev3 §3.4 F-03c.
+        let (max_dd, max_drawdown_percent) =
+            max_drawdown_from_equity_curve(equity_curve);
 
-        // Sharpe ratio
-        let returns: Vec<f64> = trades.iter().map(|t| t.pnl_percent).collect();
-        let mean_return = returns.iter().sum::<f64>() / returns.len() as f64;
-        let variance = returns
-            .iter()
-            .map(|r| (r - mean_return).powi(2))
-            .sum::<f64>()
-            / returns.len() as f64;
-        let std_dev = variance.sqrt();
-        let sharpe_ratio = if std_dev > 0.0 {
-            mean_return / std_dev
-        } else {
-            0.0
-        };
+        // Sharpe ratio (F-03): annualized over equity-curve returns,
+        // NOT trade-PnL percentages. Identical formula to the Dart engine.
+        let returns = equity_curve_returns(equity_curve);
+        let sharpe_ratio = annualized_sharpe(&returns, timeframe);
 
         // Trade duration
         let total_duration: f64 = trades

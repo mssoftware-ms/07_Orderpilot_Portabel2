@@ -7,6 +7,8 @@
 //! - Context struct for providing market data to strategies
 //! - Flutter Rust Bridge API functions for cross-platform integration
 
+mod frb_generated;
+
 pub mod addins;
 pub mod api;
 pub mod backtest;

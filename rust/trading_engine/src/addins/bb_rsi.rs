@@ -168,16 +168,29 @@ impl StrategyAddin for BbRsiStrategy {
         let rsi_oversold = ctx.param_or("rsi_oversold", 30.0);
         let rsi_overbought = ctx.param_or("rsi_overbought", 70.0);
 
-        // We need enough closes for both indicators.
-        let required = bb_period.max(rsi_period + 1);
-        let closes = ctx.closes(required);
-        if closes.len() < required {
+        // F-09 parity gate: match Dart `startIdx = max(bbPeriod, rsiPeriod + 1)`.
+        // Without this, Rust emits signals one bar earlier than Dart at the
+        // BB-warmup boundary on real markets (cf. phase1_reference_backtest).
+        // Plan rev3 §3.4 establishes Dart's convention as canonical.
+        let start_idx = bb_period.max(rsi_period + 1);
+        if ctx.index() < start_idx {
+            return None;
+        }
+
+        // BB uses a fixed `bb_period` rolling window. RSI must run cumulative
+        // Wilder smoothing across the FULL prior-close history (F-02b) to
+        // match the Dart engine — feeding only the last 20 closes restarts
+        // the smoothing every bar and drifts noticeably on non-stationary
+        // series (cf. tests/regression_f02b_rsi_wilder.rs).
+        let bb_closes = ctx.closes(bb_period);
+        let rsi_closes = ctx.closes(ctx.index() + 1);
+        if bb_closes.len() < bb_period || rsi_closes.len() < rsi_period + 1 {
             return None;
         }
 
         // Compute indicators
-        let bb = calc_bollinger_bands(&closes, bb_period, bb_stddev_mult)?;
-        let rsi = calc_rsi(&closes, rsi_period)?;
+        let bb = calc_bollinger_bands(&bb_closes, bb_period, bb_stddev_mult)?;
+        let rsi = calc_rsi(&rsi_closes, rsi_period)?;
 
         // Persist indicator values in context state for external access
         ctx.set_state("bb_upper", bb.upper);
@@ -193,8 +206,10 @@ impl StrategyAddin for BbRsiStrategy {
 
         // ── Exit logic (checked first) ──────────────────────────────────
         if self.state.in_long {
-            // Exit long: price crosses above middle band or overbought RSI
-            if price >= bb.middle || rsi >= rsi_overbought {
+            // Exit long: price crosses above middle band or overbought RSI.
+            // F-09: strict `>` matches Dart's operator (rsi > overbought) — avoids
+            // floating-point equality edge at rsi == 70.0.
+            if price >= bb.middle || rsi > rsi_overbought {
                 self.state.in_long = false;
                 ctx.in_position = false;
                 return Some(Signal::Exit {
@@ -204,8 +219,10 @@ impl StrategyAddin for BbRsiStrategy {
         }
 
         if self.state.in_short {
-            // Exit short: price crosses below middle band or oversold RSI
-            if price <= bb.middle || rsi <= rsi_oversold {
+            // Exit short: price crosses below middle band or oversold RSI.
+            // F-09: strict `<` matches Dart's operator (rsi < oversold) — avoids
+            // floating-point equality edge at rsi == 30.0.
+            if price <= bb.middle || rsi < rsi_oversold {
                 self.state.in_short = false;
                 ctx.in_position = false;
                 return Some(Signal::Exit {
@@ -486,9 +503,9 @@ mod tests {
 
         // Walk through all candles
         let mut last_signal = Signal::NoAction;
-        for i in 0..candles.len() {
+        for (i, candle) in candles.iter().enumerate() {
             ctx.set_index(i);
-            if let Some(sig) = strategy.on_candle(&mut ctx, &candles[i]) {
+            if let Some(sig) = strategy.on_candle(&mut ctx, candle) {
                 if sig.is_actionable() {
                     last_signal = sig;
                 }
@@ -524,9 +541,9 @@ mod tests {
         let mut ctx = Context::new(candles.clone(), Timeframe::M1, params);
 
         let mut last_signal = Signal::NoAction;
-        for i in 0..candles.len() {
+        for (i, candle) in candles.iter().enumerate() {
             ctx.set_index(i);
-            if let Some(sig) = strategy.on_candle(&mut ctx, &candles[i]) {
+            if let Some(sig) = strategy.on_candle(&mut ctx, candle) {
                 if sig.is_actionable() {
                     last_signal = sig;
                 }
@@ -571,9 +588,9 @@ mod tests {
         let mut exits = 0u32;
         let mut no_actions = 0u32;
 
-        for i in 0..candles.len() {
+        for (i, candle) in candles.iter().enumerate() {
             ctx.set_index(i);
-            if let Some(signal) = strategy.on_candle(&mut ctx, &candles[i]) {
+            if let Some(signal) = strategy.on_candle(&mut ctx, candle) {
                 match &signal {
                     Signal::EnterLong { .. } | Signal::EnterShort { .. } => entries += 1,
                     Signal::Exit { .. } => exits += 1,
