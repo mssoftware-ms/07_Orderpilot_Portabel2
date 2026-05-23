@@ -168,6 +168,15 @@ impl StrategyAddin for BbRsiStrategy {
         let rsi_oversold = ctx.param_or("rsi_oversold", 30.0);
         let rsi_overbought = ctx.param_or("rsi_overbought", 70.0);
 
+        // F-09 parity gate: match Dart `startIdx = max(bbPeriod, rsiPeriod + 1)`.
+        // Without this, Rust emits signals one bar earlier than Dart at the
+        // BB-warmup boundary on real markets (cf. phase1_reference_backtest).
+        // Plan rev3 §3.4 establishes Dart's convention as canonical.
+        let start_idx = bb_period.max(rsi_period + 1);
+        if ctx.index() < start_idx {
+            return None;
+        }
+
         // BB uses a fixed `bb_period` rolling window. RSI must run cumulative
         // Wilder smoothing across the FULL prior-close history (F-02b) to
         // match the Dart engine — feeding only the last 20 closes restarts
@@ -197,8 +206,10 @@ impl StrategyAddin for BbRsiStrategy {
 
         // ── Exit logic (checked first) ──────────────────────────────────
         if self.state.in_long {
-            // Exit long: price crosses above middle band or overbought RSI
-            if price >= bb.middle || rsi >= rsi_overbought {
+            // Exit long: price crosses above middle band or overbought RSI.
+            // F-09: strict `>` matches Dart's operator (rsi > overbought) — avoids
+            // floating-point equality edge at rsi == 70.0.
+            if price >= bb.middle || rsi > rsi_overbought {
                 self.state.in_long = false;
                 ctx.in_position = false;
                 return Some(Signal::Exit {
@@ -208,8 +219,10 @@ impl StrategyAddin for BbRsiStrategy {
         }
 
         if self.state.in_short {
-            // Exit short: price crosses below middle band or oversold RSI
-            if price <= bb.middle || rsi <= rsi_oversold {
+            // Exit short: price crosses below middle band or oversold RSI.
+            // F-09: strict `<` matches Dart's operator (rsi < oversold) — avoids
+            // floating-point equality edge at rsi == 30.0.
+            if price <= bb.middle || rsi < rsi_oversold {
                 self.state.in_short = false;
                 ctx.in_position = false;
                 return Some(Signal::Exit {
