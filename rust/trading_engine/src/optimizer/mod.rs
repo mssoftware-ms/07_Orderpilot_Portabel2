@@ -27,11 +27,13 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
+pub mod random_search;
 pub mod runner;
 pub mod scoring;
 pub mod storage;
 pub mod yaml;
 
+pub use random_search::RandomSearchEngine;
 pub use runner::run_optimization_trial;
 pub use scoring::{score_constraints_for_strategy, score_trial, StrategyKind};
 pub use storage::{StudyMeta, StudyStorage};
