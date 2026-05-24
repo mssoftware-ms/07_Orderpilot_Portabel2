@@ -465,18 +465,31 @@ Sub-Aufgabe #3 aus der Empfehlungs-Liste (ADX-basierter Markt-Regime-Filter) wur
 - UT Bot:  C2 PF=2.34 ∈ XLSX-Band, **Vorzeichen-Flip von −15.3 % → +2.8 %** (2/5 Bänder)
 - Ichimoku: C2 DD=12.7 ∈ XLSX-Band, profit % 12.5 → 16.8 % (2/5 Bänder)
 
-**Phase-2-Gate-Outcome nach Welle R3: B mit BLOCKER** („Pfad C mit Phase-3-Optimizer-Insight" — legitimes Outcome aus erweiterter §4.4-rev5-Pfad-Logik). BLOCKER = Rust-Engine-Wiring-Bug auf realen Daten:
+**Phase-2-Gate-Outcome nach Welle R3 (initial-Befund): B mit BLOCKER** — Rust-Engine schien ADX-Filter auf realen Daten zu ignorieren. **Welle R4 hat den Blocker als STALE-BINARY-Artefakt aufgelöst** (siehe Welle-R4-Resolution unten); der finale Phase-2-Gate-Outcome ist **B (Pfad C mit Phase-3-Optimizer-Insight)** ohne Blocker, und der Phase-2-Tag ist freigegeben.
 
-> Der Welle-R3-Sweep hat dokumentiert, dass die Rust-Engine den ADX-Filter auf realen BTC-Daten **vollständig ignoriert** und für jede ADX-Config (C1/C2/C3) die identischen Werte wie C0 baseline produziert (alle drei Strategien, bit-exakt). Die JSON-API-Wiring funktioniert dabei auf synthetischen Fixtures korrekt (gepinnt durch `regression_adx_api_wiring.rs`), also ist es ein data-shape-abhängiger Bug, nicht ein Param-Mapping-Issue. Hypothesen-Liste mit Priorisierung im Diagnose-Doc §4.
+**Welle R4 — Rust-ADX-Wiring Real-Data Re-Verifikation (2026-05-24, abgeschlossen):**
 
-**Phase-2-Tag-Status:** `v0.3.0-strategies-verified` kann NICHT gesetzt werden, solange die Rust-Engine nicht 1e-9-parity zu Dart auch unter ADX-Filter-on liefert. Begründung: Phase 3 wird den Optimizer auf der Rust-Engine fahren (Speed-Vorteil für Multi-1k-Backtest-Sweeps); eine ADX-blind operierende Rust-Engine entwertet die C2-Phase-3-Insights aus Welle R3 vollständig.
+R4-Diagnose ergab: Welle R3 hat den Sweep gegen ein **stales `libtrading_engine.so`** vom 2026-05-24 04:14 ausgeführt — kompiliert vor der Welle-R2-Wiring-Implementation. Flutter `flutter test` invokiert nicht `cargo build` auf .rs-Änderungen; die FFI-binary muss explizit per `cargo build --release --lib` (bzw. `bash tool/build_rust.sh`) aktualisiert werden. Nach explizitem Rebuild ist die Welle-R2-Wiring im Binary präsent und der Sweep produziert auf allen 12 Configs (3 Strategien × 4 ADX-Configs) bit-exakte Dart↔Rust 1e-9 Parität für PnL+Sharpe+MaxDD (Beleg: `01_Projectplan/specs/regime_filter_resweep_2026-05-24.md`). Der Rust-Strategy-Code (`bb_rsi.rs`, `ut_bot.rs`, `ichimoku.rs` ADX-Filter-Pfade) sowie die Welle-R1-Helper (`calc_adx`, `regime_passes_filter`) sind ALLE korrekt — kein Code-Fix nötig.
 
-**Empfehlung an QA: Welle R4 öffnen — „Rust-Engine ADX-Wiring auf realen Daten reparieren".** Sobald R4 grün ist:
-1. Re-run der 12-Backtest-Sweep auf Rust mit Dart↔Rust 1e-9-Parität-Enforcement aktiv (statt nur Determinism-Check)
-2. Phase-2-Gate-Tag `v0.3.0-strategies-verified` mit Outcome B (Pfad-C + Phase-3-Augmented-Optimizer-Ranges)
-3. Phase 3 startet mit ADX-augmentierten Optimizer-Default-Ranges pro Strategie (`adx_threshold` ∈ [30, 40] als zusätzliche Dimension; `adx_use_di_confluence` ∈ {true, false} als Toggle; Default-`adx_filter_enabled` bleibt auf strategy-Manifest-Ebene `off` für Phase-2-Spec-Treue)
+R4-Schutzmaßnahmen gegen Wiederholung:
+- `tool/build_rust.sh` — convenience wrapper für cargo build, sodass QA das Rebuild nicht vergisst (`bash tool/build_rust.sh` vor `flutter test`)
+- `regime_filter_sweep_test.dart` setUpAll **staleness-guard** — invoked `threshold=100 → 0 trades` invariant über JSON-API VOR dem Sweep; pre-Welle-R2 binary fails-fast mit klarer „run `cargo build --release --lib`" message statt 30s in einen rauschigen 12-Test parity-Fail zu landen
+- `rust/trading_engine/tests/regression_adx_real_data.rs` — long-sequence (1100-bar LCG) Rust-side wiring-pin via `cargo test` (auto-rebuild garantiert frische binary)
 
-Die übrigen Sub-Aufgaben aus der ursprünglichen QA-Empfehlung (Optimizer-Lab vorziehen / alternative Strategie-Kandidaten) sind durch Welle R3 NICHT obsolet, aber stehen jetzt nach R4 in der Reihenfolge — der ADX-augmented Optimizer-Sweep wird Sub-Aufgabe #1 (Phase-3-Optimizer-Lab vorziehen) deutlich aufladen.
+**Phase-2-Gate-Outcome final (nach R4-Resolution): B (Pfad C mit Phase-3-Optimizer-Insight)**
+
+- BB+RSI: Pfad C, Best-Config C3 thr=25 +DI (3/5 Bänder), Phase-3-Insight = `adx_threshold` ∈ [30, 45] + DI-confluence toggle
+- UT Bot: Pfad C, Best-Config C2 thr=35 (2/5 Bänder, PF=2.34 ∈ XLSX-Band, Vorzeichen-Flip), Phase-3-Insight = `adx_threshold` ∈ [30, 40] **default-aktiv**
+- Ichimoku: Pfad C, Best-Config C2 thr=35 (2/5 Bänder, DD=12.7 ∈ XLSX-Band), Phase-3-Insight = `adx_threshold` ∈ [30, 40], DI-confluence redundant
+
+**Phase-2-Tag `v0.3.0-strategies-verified` freigegeben** — QA setzt den Tag manuell nach finalem Sign-off der Welle-R4-Re-Sweep-Resultate (Beleg-Doc `regime_filter_resweep_2026-05-24.md` §2).
+
+**Phase-3-Startparameter (aus C2-Insights):**
+1. ADX-augmented Optimizer-Ranges pro Strategie: `adx_threshold` ∈ [30, 40] als zusätzliche Sweep-Dimension; `adx_use_di_confluence` ∈ {true, false} als Toggle
+2. Default-`adx_filter_enabled` bleibt auf strategy-Manifest-Ebene `off` für Phase-2-Spec-Treue
+3. Optimizer-Default-`adx_filter_enabled` = true (Phase-3-spezifisch), insbesondere für UT-Bot (stärkster ADX-Augmentation-Kandidat per Vorzeichen-Flip-Befund)
+
+Die übrigen Sub-Aufgaben aus der ursprünglichen QA-Empfehlung (Optimizer-Lab vorziehen / alternative Strategie-Kandidaten) sind durch Welle R3+R4 NICHT obsolet; der ADX-augmented Optimizer-Sweep wird Sub-Aufgabe #1 (Phase-3-Optimizer-Lab vorziehen) deutlich aufladen.
 
 ---
 

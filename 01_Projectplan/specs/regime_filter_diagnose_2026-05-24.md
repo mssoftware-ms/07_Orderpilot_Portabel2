@@ -121,7 +121,11 @@ C1 und C3 produzieren IDENTISCHE trades-Count (119) und sehr ähnliche PnL — B
 
 ---
 
-## 4. KRITISCHER BEFUND — Rust-Engine ADX-Wiring auf realen Daten defekt
+## 4. KRITISCHER BEFUND — Rust-Engine ADX-Wiring auf realen Daten defekt — **RESOLVED in Welle R4 (2026-05-24)**
+
+> **R4-Update:** Befund war ein STALE-BINARY-Artefakt, kein Code-Bug. Die in §4 unten dokumentierten Hypothesen H1/H3/H5 sind alle verifizierbar abgelehnt. Tatsächliche Root-Cause: das in R3 geladene `libtrading_engine.so` stammte aus einem Build vor der Welle-R2-Strategy-Wiring (Linux dev-FFI-Pfad: `rust/trading_engine/target/release/`). Flutter `flutter test` invokiert NICHT `cargo build` auf .rs-Änderungen — die binary muss explizit per `bash tool/build_rust.sh` bzw. `cargo build --release --lib` aktualisiert werden. Nach Rebuild produziert die Rust-Engine auf allen 12 Sweep-Configs bit-exakte 1e-9-Parität zu Dart für PnL+Sharpe+MaxDD (Beleg: `regime_filter_resweep_2026-05-24.md` §2). Welle-R4-Schutzmaßnahmen siehe §5.3 unten.
+
+---
 
 **Symptom:** Die Rust-Mirror-Werte aller 12 Sweep-Tests zeigen für **C1, C2, C3 jeweils identische Werte zu C0 baseline** (gleicher Trade-Count, gleiches totalPnl, gleicher Sharpe, gleicher MaxDD), obwohl `adx_filter_enabled=true` an der JSON-API übergeben wird:
 
@@ -160,26 +164,31 @@ Alle drei Strategien bleiben **Pfad C** — keine ADX-Config rettet die XLSX-Acc
 
 Per Plan §4.4 Pfad-B-Logik: keine Strategie erreicht alle 5 Bänder → kein Pfad B. Aber alle drei zeigen **merkliche Verbesserung** in mindestens einer Acceptance-Achse durch C2 (thr=35): UT-Bot-PF kommt ins Band, Ichimoku-DD kommt ins Band, BB+RSI-PF überschreitet sogar den Band-Upper-Wert. Das ist genau das „**Pfad C mit Phase-3-Optimizer-Insight**" Outcome, das Plan §4.4 rev5 §B als legitimes Phase-2-Resultat definiert (oder definieren sollte, falls rev5 noch nicht geschrieben ist).
 
-### 5.2 Empfehlung: Phase-2-Gate-Status
+### 5.2 Empfehlung: Phase-2-Gate-Status — **RESOLVED in Welle R4**
 
-**Phase-2-Gate-Outcome: B mit BLOCKER** (Plan §4.4 rev5 §B + neuer Sub-Status "BLOCKED ON RUST PARITY"):
+**Phase-2-Gate-Outcome (FINAL, nach R4-Resolution): B (Pfad C mit Phase-3-Optimizer-Insight)** (Plan §4.4 rev5 §B, ohne Blocker):
 - ✓ Engineering-vollständig: ADX-Indikator + helper + 3× Strategy-Wiring + 12-Backtest-Sweep
 - ✓ Dart-only-Verifikation: alle drei Strategien Pfad C mit klarem Phase-3-Insight aus C2
-- ✗ **Dart↔Rust 1e-9-Parität für ADX-on bricht** — Rust ignoriert den Filter auf realen Daten (Wiring-Bug, nicht Numerical-Drift)
+- ✓ **Dart↔Rust 1e-9-Parität auf allen 12 Configs für PnL+Sharpe+MaxDD** — Welle R4 hat den initialen Befund als STALE-BINARY-Artefakt aufgelöst (Beleg: `regime_filter_resweep_2026-05-24.md` §2)
 
-**KEIN Phase-2-Tag `v0.3.0-strategies-verified` zu setzen bis Rust-Wiring repariert ist.** Begründung: Phase 3 wird den Optimizer auf der Rust-Engine fahren (Speed-Vorteil für Multi-1k-Backtest-Sweeps). Wenn die Rust-Engine ADX-Configs nicht differenziert, kann der Optimizer keinen ADX-augmented Range ausnutzen und der Phase-3-Insight aus C2 wird wertlos.
+**Phase-2-Tag `v0.3.0-strategies-verified` ist freigegeben.** QA setzt den Tag manuell nach finalem Sign-off der R4-Re-Sweep-Resultate.
 
-### 5.3 Vorgeschlagener nächster Schritt — Welle R4
+### 5.3 Welle R4 — Resolution (2026-05-24)
 
-**R4: Rust ADX-Wiring auf realen Daten reparieren (Blocker für Phase-2-Tag).**
+R4 hat den initial-Befund „Rust ignoriert ADX-Filter" als STALE-BINARY-Artefakt aufgelöst — der Rust-Strategy-Code (Welle-R2-Wiring) sowie die Welle-R1-Helper sind ALLE korrekt. Welle R3 hat den Sweep gegen ein `libtrading_engine.so` vom 2026-05-24 04:14 ausgeführt, das vor der Welle-R2-Implementation kompiliert wurde. Flutter `flutter test` invokiert NICHT `cargo build` auf Rust-Source-Änderungen.
 
-Vorgehen:
-1. Erstes Diagnose-Step: Wiring-Test ausbauen — `bb_rsi_adx_filter_threshold_25_blocks_some_entries_on_real_btc_4h` schreiben, die mit einem 1086-Bar-Fixture (synthetisch oder echte BTC-Daten als embedded CSV) gegen die JSON-API testet. Dieser Test sollte FAILEN, dann den Bug lokal isolieren.
-2. Gemäß Hypothesen-Liste in §4: zuerst `ctx.in_position = true` MANUELL-SET im Strategy-Code untersuchen — könnte den nachfolgenden Filter-Pfad umgehen. Falls ja: removal sollte Wiring reparieren ohne andere Side-Effects.
-3. Zweite Hypothese: `engine.run` Context-Build-Pfad — verifizieren, dass die per-bar-Recompute-`calc_adx`-Aufrufe identische Werte zur Dart-once-Compute liefern. Schneller Pin: separater Rust-Test, der `calc_adx(highs[0..n], lows[0..n], closes[0..n], 14)` einmal vs in einer Schleife mit wachsendem n bis n=1093 vergleicht und prüft, ob die letzten Werte bit-exakt sind.
-4. Nach Fix: kompletter Sweep neu, Dart↔Rust 1e-9-Parität auf allen 12 Configs validieren, dann Phase-2-Tag.
+**Verifikation:** Nach explizitem `cargo build --release --lib` produziert die Rust-Engine bit-exakte 1e-9-Parität zu Dart auf allen 12 Sweep-Configs (BB+RSI 4× / UT-Bot 4× / Ichimoku 4× mit C0/C1/C2/C3). Volle Re-Sweep-Tabelle in `regime_filter_resweep_2026-05-24.md`.
 
-Aufwand-Schätzung: 2–4h für Reparatur, +1h Re-Sweep.
+**R4-Schutzmaßnahmen gegen Wiederholung:**
+1. **R4-1 — `tool/build_rust.sh`** convenience wrapper, plus Dart-side staleness-guard in `regime_filter_sweep_test.dart` setUpAll (invoked `threshold=100 → 0 trades` invariant via JSON-API VOR dem Sweep; pre-Welle-R2 binary fails-fast mit „run cargo build" message)
+2. **R4-1 — `rust/trading_engine/tests/regression_adx_real_data.rs`** Rust-side long-sequence (1100-bar LCG) wiring-pin via `cargo test` (cargo rebuilt automatisch, so kein Staleness-Risiko)
+3. **R4-3 — Erweiterter Parity-Contract** in `regime_filter_sweep_test.dart::_assertDartRustParity` validiert nicht nur totalPnl sondern auch Sharpe und MaxDD (PnL+Sharpe+MaxDD alle ±1e-9; trades exact)
+
+**Phase-3-Empfehlung (übernommen aus R3 §3):**
+- ADX-augmented Optimizer-Ranges pro Strategie (`adx_threshold` ∈ [30, 40] / [30, 45] je nach Strategie)
+- `adx_use_di_confluence` ∈ {true, false} als zusätzliche Optimizer-Dimension
+- UT-Bot: stärkster ADX-Augmentation-Kandidat (Vorzeichen-Flip −15.3 % → +2.8 % bei C2 thr=35) → Phase-3-default-aktiv
+- Default-`adx_filter_enabled` bleibt auf strategy-Manifest-Ebene `off` für Phase-2-Spec-Treue
 
 ---
 
@@ -194,5 +203,5 @@ Komplett umgesetzt:
 - **R3-2-Companion:** `rust/trading_engine/tests/regression_adx_api_wiring.rs` — JSON-API-ADX-Wiring-Contract pin (BB+RSI + Ichimoku PASS auf synthetic; UT-Bot `#[ignore]` fixture-build pending)
 
 Offen:
-- **R4:** Rust-Wiring-Real-Data-Bug reparieren (Blocker für Phase-2-Tag)
+- ~~**R4:** Rust-Wiring-Real-Data-Bug reparieren~~ — **RESOLVED** in Welle R4 (2026-05-24). Root-Cause: stales `libtrading_engine.so` vor Welle-R2-Implementation. Kein Code-Fix; Schutzmaßnahmen in R4-1/R4-2/R4-3 (`tool/build_rust.sh`, Dart-side staleness-guard, Rust-side long-sequence wiring-pin, erweiterter PnL+Sharpe+MaxDD 1e-9 Parity-Contract). Re-Sweep-Beleg: `regime_filter_resweep_2026-05-24.md`.
 - **R5 (optional, post-Phase-2-Tag):** Phase-3-Optimizer-Range-Definitionen pro Strategie schreiben, basierend auf C2 (thr=35) Insights aus diesem Doc
