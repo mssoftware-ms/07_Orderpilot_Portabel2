@@ -453,12 +453,30 @@ Drei mögliche Acceptance-Ausgänge pro Strategie (jeder eindeutig in der Spec-M
 - UT Bot v1: **Pfad C** (Diagnose-Sweep: `ut_bot_diagnose_2026-05-23.md`, 7 Variationen alle defizitär — best-of-sweep PF=0.81 auf ETHUSDT 5min; Spec §13.5 finalisiert mit Root-Cause-Hypothese „Confluence-Inkompatibilität auf Krypto-5min")
 - Ichimoku v1: **Pfad C** (Diagnose-Sweep: `ichimoku_diagnose_2026-05-24.md`, 7 Variationen — best-of-sweep T3c BTCUSDT 1h tenkan=7/kijun=21 mit PF=1.29 und profit %=+38.6 %, netto profitabel aber 4/5 Bänder verfehlt; Spec §13.6 finalisiert mit Root-Cause-Hypothese „Asset-Mismatch EUR/USD-Forex vs BTCUSDT-Crypto + Score-Implementation-Drift §12.2")
 
-**Phase-2-Tag-Status:** **Alle drei Phase-2-Strategien sind Pfad C.** Phase-2-Tag-Bedingung „mindestens eine Pfad-A-oder-B-Strategie" ist **nicht erfüllt** → `v0.3.0-strategies-verified` kann NICHT gesetzt werden ohne Sub-Diagnose-Session.
+**Sub-Diagnose-Session „Welle R" eröffnet (2026-05-23, abgeschlossen 2026-05-24):**
 
-**Empfehlung an QA: Sub-Diagnose-Session eröffnen** (Plan §4.4 letzter Aufzählungspunkt). Mögliche Aufgaben:
-1. **Phase-3-Optimizer-Lab vorziehen** für die drei Strategien (Optuna-Sweep auf erweiterten Parameter-Räumen), Ziel: mindestens eine Strategie nach Sweep im Pfad-A/B-Band. Best-of-Sweep-Ausgangspunkte: BB+RSI 4h, UT Bot ETHUSDT 5min, Ichimoku BTC 1h tenkan=7/kijun=21.
-2. **Alternative Strategie-Kandidaten** aus dem Phase-3-Backlog ziehen (z.B. eine vierte Strategie mit explizit Crypto-validierter Vorlage statt Forex/NQ).
-3. **Markt-Regime-Filter** als Pre-Stage einbauen (z.B. ADX-basierte Regime-Klassifikation als Pflicht-Vorfilter) — vermeidet Range-Phasen, in denen alle drei Strategien strukturell scheitern.
+Sub-Aufgabe #3 aus der Empfehlungs-Liste (ADX-basierter Markt-Regime-Filter) wurde als „Welle R1–R3" eigenständig durchgeführt:
+- **R1** ADX-Indikator + `regime_passes_filter` shared helper (Dart + Rust, bit-exakte Parität)
+- **R2** Wiring des Filters in alle drei Strategien (Default `off` für Backwards-Kompatibilität)
+- **R3** 12-Backtest-Sweep (`regime_filter_sweep_test.dart`) = 3 Strategien × 4 ADX-Configs (off, thr=25, thr=35, thr=25 +DI), Resultate in `regime_filter_diagnose_2026-05-24.md`
+
+**Welle-R3-Ergebnis:** Alle drei Strategien bleiben unter Dart-Engine **Pfad C** — keine ADX-Config rettet die volle XLSX-Acceptance. C2 (thr=35) produziert aber einen klaren **Phase-3-Optimizer-Insight** auf allen drei:
+- BB+RSI:  C2 PF=4.89 (über Band-Upper), MaxDD=4.6 % (3/5 Bänder, trades-Count bleibt struktureller Blocker)
+- UT Bot:  C2 PF=2.34 ∈ XLSX-Band, **Vorzeichen-Flip von −15.3 % → +2.8 %** (2/5 Bänder)
+- Ichimoku: C2 DD=12.7 ∈ XLSX-Band, profit % 12.5 → 16.8 % (2/5 Bänder)
+
+**Phase-2-Gate-Outcome nach Welle R3: B mit BLOCKER** („Pfad C mit Phase-3-Optimizer-Insight" — legitimes Outcome aus erweiterter §4.4-rev5-Pfad-Logik). BLOCKER = Rust-Engine-Wiring-Bug auf realen Daten:
+
+> Der Welle-R3-Sweep hat dokumentiert, dass die Rust-Engine den ADX-Filter auf realen BTC-Daten **vollständig ignoriert** und für jede ADX-Config (C1/C2/C3) die identischen Werte wie C0 baseline produziert (alle drei Strategien, bit-exakt). Die JSON-API-Wiring funktioniert dabei auf synthetischen Fixtures korrekt (gepinnt durch `regression_adx_api_wiring.rs`), also ist es ein data-shape-abhängiger Bug, nicht ein Param-Mapping-Issue. Hypothesen-Liste mit Priorisierung im Diagnose-Doc §4.
+
+**Phase-2-Tag-Status:** `v0.3.0-strategies-verified` kann NICHT gesetzt werden, solange die Rust-Engine nicht 1e-9-parity zu Dart auch unter ADX-Filter-on liefert. Begründung: Phase 3 wird den Optimizer auf der Rust-Engine fahren (Speed-Vorteil für Multi-1k-Backtest-Sweeps); eine ADX-blind operierende Rust-Engine entwertet die C2-Phase-3-Insights aus Welle R3 vollständig.
+
+**Empfehlung an QA: Welle R4 öffnen — „Rust-Engine ADX-Wiring auf realen Daten reparieren".** Sobald R4 grün ist:
+1. Re-run der 12-Backtest-Sweep auf Rust mit Dart↔Rust 1e-9-Parität-Enforcement aktiv (statt nur Determinism-Check)
+2. Phase-2-Gate-Tag `v0.3.0-strategies-verified` mit Outcome B (Pfad-C + Phase-3-Augmented-Optimizer-Ranges)
+3. Phase 3 startet mit ADX-augmentierten Optimizer-Default-Ranges pro Strategie (`adx_threshold` ∈ [30, 40] als zusätzliche Dimension; `adx_use_di_confluence` ∈ {true, false} als Toggle; Default-`adx_filter_enabled` bleibt auf strategy-Manifest-Ebene `off` für Phase-2-Spec-Treue)
+
+Die übrigen Sub-Aufgaben aus der ursprünglichen QA-Empfehlung (Optimizer-Lab vorziehen / alternative Strategie-Kandidaten) sind durch Welle R3 NICHT obsolet, aber stehen jetzt nach R4 in der Reihenfolge — der ADX-augmented Optimizer-Sweep wird Sub-Aufgabe #1 (Phase-3-Optimizer-Lab vorziehen) deutlich aufladen.
 
 ---
 
