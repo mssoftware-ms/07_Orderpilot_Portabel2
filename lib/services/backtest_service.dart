@@ -187,6 +187,50 @@ class UtBotParams {
   });
 }
 
+// ─── Ichimoku Strategy Parameters ───────────────────────────────────────────
+
+/// Parameters for [BacktestService.runIchimoku] — pure-Dart mirror of
+/// `ichimoku_manifest()` in `rust/trading_engine/src/addins/ichimoku.rs`.
+///
+/// Defaults match the Rust manifest bit-for-bit per Spec §1 / §12.2 so
+/// the engines stay in lock-step without a parameter-map dance.
+/// `shift` and `swingLookbackBars` are documentation-only knobs on the
+/// Ichimoku side (the past-cloud read-anchor helper hardcodes a 26-bar
+/// visual shift; the SL anchors are kijun + cloud, not swing-points) —
+/// they are kept in the param list so a Phase-3 hybrid variant can
+/// surface them without breaking the parameter map.
+class IchimokuParams {
+  final int tenkanPeriod;
+  final int kijunPeriod;
+  final int senkouBPeriod;
+  final int shift;
+  final int scoreThreshold;
+  final double tpRrRatio;
+  final double riskPerTrade;
+  final int swingLookbackBars;
+  final bool sessionFilterEnabled;
+  final int sessionStartHour;
+  final int sessionEndHour;
+  final int tzOffsetHours;
+  final double slippageBps;
+
+  const IchimokuParams({
+    this.tenkanPeriod = 9,
+    this.kijunPeriod = 26,
+    this.senkouBPeriod = 52,
+    this.shift = 26,
+    this.scoreThreshold = 60,
+    this.tpRrRatio = 2.0,
+    this.riskPerTrade = 0.02,
+    this.swingLookbackBars = 20,
+    this.sessionFilterEnabled = false,
+    this.sessionStartHour = 9,
+    this.sessionEndHour = 23,
+    this.tzOffsetHours = 1,
+    this.slippageBps = 0.0,
+  });
+}
+
 // ─── Internal position tracking ─────────────────────────────────────────────
 
 class _OpenPosition {
@@ -1063,6 +1107,372 @@ class BacktestService {
       ),
       equityCurve: equityCurve,
       trades: trades,
+    );
+  }
+
+  /// Run an Ichimoku Cloud Retest backtest on the given candle data —
+  /// pure-Dart mirror of the Rust [`IchimokuStrategy`] in
+  /// `rust/trading_engine/src/addins/ichimoku.rs`.
+  ///
+  /// 5-confluence triggered trend follower per Spec §2 / §3:
+  ///   Long  ⇔ close > current_cloud_upper
+  ///        AND span_a_future > span_b_future
+  ///        AND tenkan > kijun
+  ///        AND close > chikou_cloud_upper
+  ///        AND score >= +scoreThreshold
+  ///   Short = mirrored
+  ///   SL_long  = min(kijun, current_cloud_lower)  (Spec §4)
+  ///   SL_short = max(kijun, current_cloud_upper)
+  ///   TP       = entry ± tpRrRatio × |entry − SL|  (Spec §5)
+  ///   Size     = riskPerTrade × close / sl_distance, clamped to [0, 1]
+  ///   BE-trail at +1R = engine-side D-08 mechanic (reused unchanged).
+  ///
+  /// Bar loop reuses the F-04 order from [runBbRsi] / [runUtBot] — Step A
+  /// pending → Step B intra-bar SL/TP/BE → Step C strategy decisions →
+  /// Step D equity — so the three strategies share execution-order and
+  /// equity-curve semantics.
+  ///
+  /// `timeframe` defaults to [Timeframe.h1] per Spec §1.
+  static BacktestResult runIchimoku({
+    required List<CandleData> candles,
+    required double initialBalance,
+    required double feeRate,
+    IchimokuParams params = const IchimokuParams(),
+    Timeframe timeframe = Timeframe.h1,
+  }) {
+    final n = candles.length;
+
+    // Strict warm-up — Spec §1.1 / Rust strategy: c4 ("Chikou vs cloud
+    // bei i-26") reads past-cloud anchors at index `i - 2*shift`,
+    // requiring senkou_b at that index to be valid. Dominant constraint
+    // for the default 52/26 setup: 51 + 52 = 103.
+    final startIdx = (params.senkouBPeriod - 1) + 2 * params.shift;
+    if (n <= startIdx) {
+      return _emptyIchimokuResult(n);
+    }
+
+    final highs = [for (final c in candles) c.high];
+    final lows = [for (final c in candles) c.low];
+    final closes = [for (final c in candles) c.close];
+
+    // Pre-compute indicator series ONCE (mirror of the Rust per-bar
+    // recompute — numerically identical, just O(N) instead of O(N²)).
+    final tenkanSeries = calcTenkanSen(highs, lows, params.tenkanPeriod);
+    if (tenkanSeries == null) return _emptyIchimokuResult(n);
+    final kijunSeries = calcKijunSen(highs, lows, params.kijunPeriod);
+    if (kijunSeries == null) return _emptyIchimokuResult(n);
+    final spanA = calcSenkouSpanA(tenkanSeries, kijunSeries);
+    if (spanA == null) return _emptyIchimokuResult(n);
+    final spanB = calcSenkouSpanB(highs, lows, params.senkouBPeriod);
+    if (spanB == null) return _emptyIchimokuResult(n);
+
+    double balance = initialBalance;
+    double peakEquity = initialBalance;
+    double maxDrawdown = 0;
+    double maxDrawdownPct = 0;
+    double totalFees = 0;
+    _OpenPosition? position;
+    _PendingOrder? pending;
+
+    final trades = <ClosedTrade>[];
+    final equityCurve = <EquityPoint>[];
+    final returns = <double>[];
+    double prevEquity = initialBalance;
+    final slipFactor = params.slippageBps / 10000.0;
+
+    void closePosition(double exitPrice, int exitTs, String reason) {
+      final pos = position!;
+      final exitNotional = pos.quantity * exitPrice;
+      final exitFee = exitNotional * feeRate;
+      totalFees += exitFee;
+
+      final grossPnl = pos.isLong
+          ? (exitPrice - pos.entryPrice) * pos.quantity
+          : (pos.entryPrice - exitPrice) * pos.quantity;
+      final netPnl = grossPnl - pos.entryFee - exitFee;
+      final entryNotional = pos.entryPrice * pos.quantity;
+      final pnlPct =
+          entryNotional > 0 ? (netPnl / entryNotional) * 100 : 0.0;
+      final alloc = entryNotional + pos.entryFee;
+      balance += alloc + netPnl;
+
+      trades.add(ClosedTrade(
+        entryTimestamp: pos.entryTimestamp,
+        exitTimestamp: exitTs,
+        direction: pos.isLong ? 'LONG' : 'SHORT',
+        entryPrice: pos.entryPrice,
+        exitPrice: exitPrice,
+        quantity: pos.quantity,
+        pnl: netPnl,
+        pnlPercent: pnlPct,
+        fees: pos.entryFee + exitFee,
+        exitReason: reason,
+      ));
+      position = null;
+    }
+
+    for (int i = 0; i < n; i++) {
+      final candle = candles[i];
+
+      // Step A — fill pending at this bar's open with slippage.
+      if (pending != null) {
+        switch (pending) {
+          case _PendingEnterLong p:
+            final entryPrice = candle.open * (1 + slipFactor);
+            final alloc = balance * p.sizeFraction;
+            final fee = alloc * feeRate;
+            final qty = (alloc - fee) / entryPrice;
+            position = _OpenPosition(
+              isLong: true,
+              entryPrice: entryPrice,
+              quantity: qty,
+              entryTimestamp: candle.timestamp,
+              entryFee: fee,
+              stopLoss: p.stopLoss,
+              takeProfit: p.takeProfit,
+              initialSlDistance: (entryPrice - p.stopLoss).abs(),
+            );
+            balance -= alloc;
+            totalFees += fee;
+          case _PendingEnterShort p:
+            final entryPrice = candle.open * (1 - slipFactor);
+            final alloc = balance * p.sizeFraction;
+            final fee = alloc * feeRate;
+            final qty = (alloc - fee) / entryPrice;
+            position = _OpenPosition(
+              isLong: false,
+              entryPrice: entryPrice,
+              quantity: qty,
+              entryTimestamp: candle.timestamp,
+              entryFee: fee,
+              stopLoss: p.stopLoss,
+              takeProfit: p.takeProfit,
+              initialSlDistance: (p.stopLoss - entryPrice).abs(),
+            );
+            balance -= alloc;
+            totalFees += fee;
+        }
+        pending = null;
+      }
+
+      // Step B — intra-bar TP-first, BE-trail, then SL (D-08 ordering).
+      final posPre = position;
+      if (posPre != null) {
+        final tpHitFirst = posPre.takeProfit != null &&
+            (posPre.isLong
+                ? candle.high >= posPre.takeProfit!
+                : candle.low <= posPre.takeProfit!);
+        if (tpHitFirst) {
+          closePosition(
+              posPre.takeProfit!, candle.timestamp, 'TakeProfit');
+        } else {
+          if (!posPre.breakevenApplied &&
+              posPre.initialSlDistance != null) {
+            final dist = posPre.initialSlDistance!;
+            final reached = posPre.isLong
+                ? candle.high >= posPre.entryPrice + dist
+                : candle.low <= posPre.entryPrice - dist;
+            if (reached) {
+              posPre.stopLoss = posPre.entryPrice;
+              posPre.breakevenApplied = true;
+            }
+          }
+          final slHit = posPre.stopLoss != null &&
+              (posPre.isLong
+                  ? candle.low <= posPre.stopLoss!
+                  : candle.high >= posPre.stopLoss!);
+          if (slHit) {
+            closePosition(
+                posPre.stopLoss!, candle.timestamp, 'StopLoss');
+          }
+        }
+      }
+
+      // Step C — Ichimoku confluence decision queues pending for next bar.
+      if (i >= startIdx && pending == null && position == null) {
+        bool sessionOk = true;
+        if (params.sessionFilterEnabled) {
+          sessionOk = withinSession(
+            candle.timestamp,
+            params.sessionStartHour,
+            params.sessionEndHour,
+            params.tzOffsetHours,
+          );
+        }
+        if (sessionOk) {
+          final tenkanI = tenkanSeries[i];
+          final kijunI = kijunSeries[i];
+          final spanAFutureI = futureSenkouAtI(spanA, i);
+          final spanBFutureI = futureSenkouAtI(spanB, i);
+
+          // Past-cloud anchors. `pastSenkouAtIMinus26` uses the
+          // hardcoded cloudShiftBars = 26 — same convention as Rust,
+          // pinned bit-for-bit by indicators.dart.
+          final pastAi = pastSenkouAtIMinus26(spanA, i);
+          final pastBi = pastSenkouAtIMinus26(spanB, i);
+          final pastAprev =
+              pastSenkouAtIMinus26(spanA, i - cloudShiftBars);
+          final pastBprev =
+              pastSenkouAtIMinus26(spanB, i - cloudShiftBars);
+
+          if (pastAi != null &&
+              pastBi != null &&
+              pastAprev != null &&
+              pastBprev != null &&
+              !tenkanI.isNaN &&
+              !kijunI.isNaN &&
+              !spanAFutureI.isNaN &&
+              !spanBFutureI.isNaN &&
+              !pastAi.isNaN &&
+              !pastBi.isNaN &&
+              !pastAprev.isNaN &&
+              !pastBprev.isNaN) {
+            final currentCloudUpper =
+                pastAi > pastBi ? pastAi : pastBi;
+            final currentCloudLower =
+                pastAi < pastBi ? pastAi : pastBi;
+            final chikouCloudUpper =
+                pastAprev > pastBprev ? pastAprev : pastBprev;
+            final chikouCloudLower =
+                pastAprev < pastBprev ? pastAprev : pastBprev;
+
+            final score = calcIchimokuScore(
+                tenkanSeries, kijunSeries, spanA, spanB, closes, i);
+
+            final close = candle.close;
+            // Long confluence (Spec §2, all 5 strict `>`).
+            final longC1 = close > currentCloudUpper;
+            final longC2 = spanAFutureI > spanBFutureI;
+            final longC3 = tenkanI > kijunI;
+            final longC4 = close > chikouCloudUpper;
+            final longC5 = score >= params.scoreThreshold;
+
+            if (longC1 && longC2 && longC3 && longC4 && longC5) {
+              // Spec §4: SL = min(kijun, cloud_lower) "großzügig".
+              final sl = kijunI < currentCloudLower
+                  ? kijunI
+                  : currentCloudLower;
+              final slDist = close - sl;
+              if (slDist > 0) {
+                final tp = close + params.tpRrRatio * slDist;
+                final size = (params.riskPerTrade * close / slDist)
+                    .clamp(0.0, 1.0);
+                pending = _PendingEnterLong(sl, tp, size);
+              }
+            } else {
+              // Short confluence (Spec §3, mirrored).
+              final shortC1 = close < currentCloudLower;
+              final shortC2 = spanAFutureI < spanBFutureI;
+              final shortC3 = kijunI > tenkanI;
+              final shortC4 = close < chikouCloudLower;
+              final shortC5 = score <= -params.scoreThreshold;
+
+              if (shortC1 && shortC2 && shortC3 && shortC4 && shortC5) {
+                final sl = kijunI > currentCloudUpper
+                    ? kijunI
+                    : currentCloudUpper;
+                final slDist = sl - close;
+                if (slDist > 0) {
+                  final tp = close - params.tpRrRatio * slDist;
+                  final size = (params.riskPerTrade * close / slDist)
+                      .clamp(0.0, 1.0);
+                  pending = _PendingEnterShort(sl, tp, size);
+                }
+              }
+            }
+          }
+        }
+      }
+
+      // Step D — equity + drawdown + per-bar return.
+      final double equity;
+      final posForEquity = position;
+      if (posForEquity == null) {
+        equity = balance;
+      } else {
+        equity = midTradeEquity(
+          balance: balance,
+          entryPrice: posForEquity.entryPrice,
+          quantity: posForEquity.quantity,
+          entryFee: posForEquity.entryFee,
+          markPrice: candle.close,
+          feeRate: feeRate,
+          isLong: posForEquity.isLong,
+        );
+      }
+      if (equity > peakEquity) peakEquity = equity;
+      final dd = peakEquity - equity;
+      final ddPct = peakEquity > 0 ? (dd / peakEquity) * 100 : 0.0;
+      if (dd > maxDrawdown) maxDrawdown = dd;
+      if (ddPct > maxDrawdownPct) maxDrawdownPct = ddPct;
+      equityCurve.add(EquityPoint(
+        timestamp: candle.timestamp,
+        equity: equity,
+        drawdown: dd,
+        drawdownPct: ddPct,
+      ));
+      if (i > 0) {
+        final ret =
+            prevEquity > 0 ? (equity - prevEquity) / prevEquity : 0.0;
+        returns.add(ret);
+      }
+      prevEquity = equity;
+    }
+
+    // End-of-data: discard pending, force-close any open position.
+    pending = null;
+    if (position != null && candles.isNotEmpty) {
+      final lastCandle = candles.last;
+      closePosition(
+          lastCandle.close, lastCandle.timestamp, 'End of Data');
+    }
+
+    final winningTrades = trades.where((t) => t.pnl > 0).toList();
+    final losingTrades = trades.where((t) => t.pnl <= 0).toList();
+    final totalPnl = trades.fold<double>(0, (s, t) => s + t.pnl);
+    final totalPnlPct =
+        initialBalance > 0 ? (totalPnl / initialBalance) * 100 : 0.0;
+    final winRate = trades.isNotEmpty
+        ? (winningTrades.length / trades.length) * 100
+        : 0.0;
+    final grossProfit = winningTrades.fold<double>(0, (s, t) => s + t.pnl);
+    final grossLoss =
+        losingTrades.fold<double>(0, (s, t) => s + t.pnl.abs());
+    double profitFactor = grossLoss > 0 ? grossProfit / grossLoss : 0;
+    if (profitFactor > 999.99) profitFactor = 999.99;
+    if (grossLoss == 0 && grossProfit > 0) profitFactor = 999.99;
+    final sharpe = annualizedSharpe(returns, timeframe);
+
+    return BacktestResult(
+      metrics: BacktestMetrics(
+        totalTrades: trades.length,
+        winningTrades: winningTrades.length,
+        losingTrades: losingTrades.length,
+        winRate: winRate,
+        profitFactor: profitFactor,
+        totalPnl: totalPnl,
+        totalPnlPercent: totalPnlPct,
+        maxDrawdown: maxDrawdown,
+        maxDrawdownPercent: maxDrawdownPct,
+        sharpeRatio: sharpe,
+        totalFees: totalFees,
+        candlesProcessed: n,
+      ),
+      equityCurve: equityCurve,
+      trades: trades,
+    );
+  }
+
+  static BacktestResult _emptyIchimokuResult(int candlesProcessed) {
+    return BacktestResult(
+      metrics: BacktestMetrics(
+        totalTrades: 0, winningTrades: 0, losingTrades: 0,
+        winRate: 0, profitFactor: 0, totalPnl: 0, totalPnlPercent: 0,
+        maxDrawdown: 0, maxDrawdownPercent: 0, sharpeRatio: 0,
+        totalFees: 0, candlesProcessed: candlesProcessed,
+      ),
+      equityCurve: const [],
+      trades: const [],
     );
   }
 
