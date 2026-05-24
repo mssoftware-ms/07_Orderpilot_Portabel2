@@ -400,6 +400,80 @@ pub fn calc_ichimoku_score(
     score
 }
 
+// ─── Entry-confluence detection (pure, unit-testable) ─────────────────────
+
+/// Result of the per-bar Ichimoku 5-confluence check (Spec §2 / §3).
+///
+/// Both fields are mutually exclusive at most one is `true`; both can be
+/// `false` (no entry this bar). Returning a tiny struct rather than two
+/// separate booleans keeps strategy call sites readable and matches the
+/// UT-Bot convention (`addins/ut_bot.rs::UtBotEntrySignal`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct IchimokuEntrySignal {
+    pub long: bool,
+    pub short: bool,
+}
+
+/// Evaluate the 5-confluence Ichimoku entry at the current bar.
+///
+/// **Strict spec** per `01_Projectplan/specs/ichimoku_spec.md` §2 / §3:
+/// every comparison is a strict inequality (`>` / `<`) so degenerate
+/// flat-cloud or `Tenkan == Kijun` cases never trigger (Spec §12.5).
+///
+/// `cloud_current_*` are the cloud edges visible AT bar `i` — computed
+/// from data at bar `i - 26`. `cloud_chikou_*` are the cloud edges
+/// visible at bar `i - 26` itself — computed from data at bar `i - 52`.
+/// `span_a_future` / `span_b_future` are the "still-projected" cloud
+/// values (visible at `i + 26`).
+///
+/// Any input being `NaN` (warm-up, NaN-poisoned candle) suppresses both
+/// signals — IEEE-754 makes every NaN comparison false, so the boolean
+/// reductions fall through naturally.
+#[allow(clippy::too_many_arguments)] // 10 per-bar samples + threshold; flattening into a struct hurts test ergonomics.
+pub fn detect_entry(
+    close: f64,
+    tenkan: f64,
+    kijun: f64,
+    span_a_future: f64,
+    span_b_future: f64,
+    cloud_current_upper: f64,
+    cloud_current_lower: f64,
+    cloud_chikou_upper: f64,
+    cloud_chikou_lower: f64,
+    score: i32,
+    score_threshold: i32,
+) -> IchimokuEntrySignal {
+    // ── Long confluence (Spec §2) ───────────────────────────────────
+    let long_c1 = close > cloud_current_upper; // price above current cloud
+    let long_c2 = span_a_future > span_b_future; // future cloud green (Spec §12.5)
+    let long_c3 = tenkan > kijun; // Tenkan above Kijun
+    let long_c4 = close > cloud_chikou_upper; // Chikou above cloud (bei i-26)
+    let long_c5 = score >= score_threshold; // Score green
+    let long = long_c1 && long_c2 && long_c3 && long_c4 && long_c5;
+
+    // ── Short confluence (Spec §3, mirrored) ────────────────────────
+    let short_c1 = close < cloud_current_lower;
+    let short_c2 = span_a_future < span_b_future;
+    let short_c3 = kijun > tenkan;
+    let short_c4 = close < cloud_chikou_lower;
+    let short_c5 = score <= -score_threshold;
+    let short = short_c1 && short_c2 && short_c3 && short_c4 && short_c5;
+
+    IchimokuEntrySignal { long, short }
+}
+
+/// SL for a long entry — Spec §4 "großzügig at Kijun or cloud bottom":
+/// the *lower* (further-from-entry) of the two candidates wins.
+pub fn ichimoku_sl_long(kijun_i: f64, cloud_lower_at_i: f64) -> f64 {
+    kijun_i.min(cloud_lower_at_i)
+}
+
+/// SL for a short entry — mirror of [`ichimoku_sl_long`]; the *higher*
+/// (further-from-entry) of `Kijun` or `cloud_upper_at_i` wins.
+pub fn ichimoku_sl_short(kijun_i: f64, cloud_upper_at_i: f64) -> f64 {
+    kijun_i.max(cloud_upper_at_i)
+}
+
 // ─── IchimokuStrategy ──────────────────────────────────────────────────────
 
 use std::collections::HashMap;
@@ -409,6 +483,9 @@ use crate::strategy::{
     AddinManifest, Context, InputSpec, ParameterSchema, Signal, StrategyAddin,
     StrategyCategory,
 };
+
+use super::bb_rsi::position_size_pct;
+use super::common::within_session;
 
 /// Ichimoku Cloud Retest (Endstand-Variante) strategy add-in.
 ///
@@ -446,18 +523,185 @@ impl StrategyAddin for IchimokuStrategy {
     }
 
     fn on_candle(&mut self, ctx: &mut Context, _candle: &Candle) -> Option<Signal> {
-        // Welle I2-1 skeleton: hold the warm-up gate so the engine can
-        // step the strategy without triggering an out-of-bounds read in
-        // the indicator helpers, but DO NOT emit entries yet — that is
-        // I2-2's scope. Returning `NoAction` (vs `None`) lets the
-        // BacktestEngine still record per-bar state without treating
-        // the bar as a missing call.
+        // Defaults from `ichimoku_manifest()` per Spec §1 + §12.2. All
+        // five Ichimoku linesare recomputed per-bar from scratch — same
+        // shape as the UT-Bot StrategyAddin path, which keeps the
+        // strategy stateless and Dart↔Rust parity-friendly.
+        let tenkan_period = ctx.param_or("tenkan_period", 9.0) as usize;
+        let kijun_period = ctx.param_or("kijun_period", 26.0) as usize;
         let senkou_b_period = ctx.param_or("senkou_b_period", 52.0) as usize;
         let shift = ctx.param_or("shift", 26.0) as usize;
-        let start_idx = senkou_b_period + shift;
-        if ctx.index() < start_idx {
+        let score_threshold = ctx.param_or("score_threshold", 60.0) as i32;
+        let tp_rr_ratio = ctx.param_or("tp_rr_ratio", 2.0);
+        let risk_per_trade = ctx.param_or("risk_per_trade", 0.02);
+        let session_enabled = ctx.param_or("session_filter_enabled", 0.0) >= 0.5;
+        let session_start = ctx.param_or("session_start_hour", 9.0) as u32;
+        let session_end = ctx.param_or("session_end_hour", 23.0) as u32;
+        let tz_offset = ctx.param_or("tz_offset_hours", 1.0) as i32;
+
+        // Warm-up — Spec §1.1: c4 ("Chikou über Cloud bei i-26") reads
+        // span values at index i - 2*shift, which requires senkou_b at
+        // that index to be valid (period - 1). Dominant constraint:
+        //   start_idx = (senkou_b_period - 1) + 2 * shift
+        // With defaults that's 51 + 52 = 103 — stricter than the
+        // Spec §1.1 "78 bars" figure (the spec text computes the
+        // senkou-b lookback for c1 only and misses c4's deeper anchor).
+        // Going strict here is the only way to keep c4 from comparing
+        // against `NaN` past-cloud reads.
+        let i = ctx.index();
+        let start_idx = senkou_b_period.saturating_sub(1).saturating_add(2 * shift);
+        if i < start_idx {
             return None;
         }
+
+        // Snapshot inputs as owned vecs so the `ctx.all_candles()` borrow
+        // ends before any `set_state` mutation.
+        let (highs, lows, closes, current_ts, current_close) = {
+            let candles = ctx.all_candles();
+            let hs: Vec<f64> = candles[..=i].iter().map(|c| c.high).collect();
+            let ls: Vec<f64> = candles[..=i].iter().map(|c| c.low).collect();
+            let cs: Vec<f64> = candles[..=i].iter().map(|c| c.close).collect();
+            (hs, ls, cs, candles[i].timestamp, candles[i].close)
+        };
+
+        // Indicator stack (Spec §1). `calc_senkou_span_a` stores
+        // values at the bar where Tenkan + Kijun were computed — that
+        // is the FUTURE anchor (visible at i + 26). Read-time helpers
+        // disambiguate.
+        let tenkan_series = calc_tenkan_sen(&highs, &lows, tenkan_period)?;
+        let kijun_series = calc_kijun_sen(&highs, &lows, kijun_period)?;
+        let span_a = calc_senkou_span_a(&tenkan_series, &kijun_series)?;
+        let span_b = calc_senkou_span_b(&highs, &lows, senkou_b_period)?;
+
+        let tenkan_i = tenkan_series[i];
+        let kijun_i = kijun_series[i];
+        let span_a_future_i = future_senkou_at_i(&span_a, i);
+        let span_b_future_i = future_senkou_at_i(&span_b, i);
+
+        // Visible cloud anchors used by c1 (close vs current cloud) and
+        // c4 (close vs cloud at i-26). c4's "cloud bei i-26" needs the
+        // value rendered 26 bars earlier — that is the past-shifted
+        // read at index `i - CLOUD_SHIFT_BARS`. We hardcode
+        // `CLOUD_SHIFT_BARS` (= 26) here because the read-anchor helper
+        // hardcodes it too; the manifest's `shift` parameter exists for
+        // documentation and Phase-3 experimentation, not to override
+        // the canonical Ichimoku 26-bar visual shift.
+        let past_a_i = past_senkou_at_i_minus_26(&span_a, i);
+        let past_b_i = past_senkou_at_i_minus_26(&span_b, i);
+        let past_a_i_minus_shift =
+            past_senkou_at_i_minus_26(&span_a, i.saturating_sub(CLOUD_SHIFT_BARS));
+        let past_b_i_minus_shift =
+            past_senkou_at_i_minus_26(&span_b, i.saturating_sub(CLOUD_SHIFT_BARS));
+
+        let score = calc_ichimoku_score(
+            &tenkan_series,
+            &kijun_series,
+            &span_a,
+            &span_b,
+            &closes,
+            i,
+        );
+
+        // Snapshot state for UI / debugging (mirrors UT-Bot convention).
+        ctx.set_state("ichi_tenkan", tenkan_i);
+        ctx.set_state("ichi_kijun", kijun_i);
+        ctx.set_state("ichi_senkou_a_future", span_a_future_i);
+        ctx.set_state("ichi_senkou_b_future", span_b_future_i);
+        ctx.set_state("ichi_score", score as f64);
+
+        // Session filter — default OFF (BTC is 24/7). When enabled and
+        // the bar lands outside `[start, end)` local time, no new
+        // entries fire. Open positions are unaffected (engine-side
+        // SL/TP/BE-trail still applies).
+        if session_enabled
+            && !within_session(current_ts, session_start, session_end, tz_offset)
+        {
+            return Some(Signal::NoAction);
+        }
+
+        if ctx.in_position {
+            return Some(Signal::NoAction);
+        }
+
+        // All four cloud-anchor reads must be available — past_senkou
+        // returns `None` during the deeper c4-anchor warm-up, in which
+        // case no entry is possible this bar.
+        let (Some(past_a_i), Some(past_b_i), Some(past_a_prev), Some(past_b_prev)) = (
+            past_a_i,
+            past_b_i,
+            past_a_i_minus_shift,
+            past_b_i_minus_shift,
+        ) else {
+            return Some(Signal::NoAction);
+        };
+
+        // Reject NaN reads anywhere in the confluence inputs — Tenkan /
+        // Kijun warm-up, NaN-poisoned cloud bars, etc.
+        if tenkan_i.is_nan()
+            || kijun_i.is_nan()
+            || span_a_future_i.is_nan()
+            || span_b_future_i.is_nan()
+            || past_a_i.is_nan()
+            || past_b_i.is_nan()
+            || past_a_prev.is_nan()
+            || past_b_prev.is_nan()
+        {
+            return Some(Signal::NoAction);
+        }
+
+        let current_cloud_upper = past_a_i.max(past_b_i);
+        let current_cloud_lower = past_a_i.min(past_b_i);
+        let chikou_cloud_upper = past_a_prev.max(past_b_prev);
+        let chikou_cloud_lower = past_a_prev.min(past_b_prev);
+
+        let entry = detect_entry(
+            current_close,
+            tenkan_i,
+            kijun_i,
+            span_a_future_i,
+            span_b_future_i,
+            current_cloud_upper,
+            current_cloud_lower,
+            chikou_cloud_upper,
+            chikou_cloud_lower,
+            score,
+            score_threshold,
+        );
+
+        if entry.long {
+            // Spec §4: long SL = min(Kijun, cloud_lower) — the
+            // "großzügig" (further-from-entry) anchor wins.
+            let sl = ichimoku_sl_long(kijun_i, current_cloud_lower);
+            let sl_dist = current_close - sl;
+            if sl_dist > 0.0 {
+                let tp = current_close + tp_rr_ratio * sl_dist;
+                let size_pct = position_size_pct(current_close, sl_dist, risk_per_trade);
+                ctx.in_position = true;
+                return Some(Signal::EnterLong {
+                    sl: Some(sl),
+                    tp: vec![tp],
+                    size_pct,
+                });
+            }
+        }
+
+        if entry.short {
+            // Spec §4 short SL = max(Kijun, cloud_upper) — mirror of
+            // long; `max` selects the higher anchor.
+            let sl = ichimoku_sl_short(kijun_i, current_cloud_upper);
+            let sl_dist = sl - current_close;
+            if sl_dist > 0.0 {
+                let tp = current_close - tp_rr_ratio * sl_dist;
+                let size_pct = position_size_pct(current_close, sl_dist, risk_per_trade);
+                ctx.in_position = true;
+                return Some(Signal::EnterShort {
+                    sl: Some(sl),
+                    tp: vec![tp],
+                    size_pct,
+                });
+            }
+        }
+
         Some(Signal::NoAction)
     }
 
@@ -1397,8 +1641,10 @@ mod tests {
 
     #[test]
     fn test_ichimoku_skeleton_no_signal_during_warmup() {
-        // 10 candles is far below the 78-bar warm-up gate — every
-        // on_candle call must return `None` (warm-up region).
+        // 10 candles is far below the 103-bar warm-up gate (Spec §1.1
+        // tightened to `senkou_b - 1 + 2*shift` to cover the c4
+        // chikou-cloud anchor) — every on_candle call must return
+        // `None`.
         let mut s = IchimokuStrategy::new();
         let candles: Vec<Candle> = (0..10)
             .map(|i| Candle::new(i * 3_600_000, 100.0, 101.0, 99.0, 100.0, 1.0))
@@ -1411,18 +1657,18 @@ mod tests {
     }
 
     #[test]
-    fn test_ichimoku_skeleton_emits_no_action_after_warmup() {
-        // Welle I2-1 guarantees only the warm-up gate + a `NoAction`
-        // pass-through past it. Confluence-based entries land in I2-2;
-        // this test will be widened then.
+    fn test_ichimoku_warmup_boundary_matches_strict_anchor() {
+        // Strict-spec warm-up `start_idx = senkou_b_period - 1 + 2*shift`
+        // — defaults give 51 + 52 = 103. Flat highs/lows mean none of
+        // the 5 confluence checks fire (strict `>` boundary on every
+        // component), so post-warm-up bars must emit `NoAction`.
         let mut s = IchimokuStrategy::new();
-        let n = 100; // > 78-bar warm-up
+        let n = 130;
         let candles: Vec<Candle> = (0..n)
             .map(|i| Candle::new(i * 3_600_000, 100.0, 101.0, 99.0, 100.0, 1.0))
             .collect();
         let mut ctx = Context::new(candles.clone(), Timeframe::H1, HashMap::new());
-        // Spec §1.1 minimum warm-up: senkou_b(52) + shift(26) = 78.
-        let start_idx = 78usize;
+        let start_idx = 103usize;
         for (i, candle) in candles.iter().enumerate() {
             ctx.set_index(i);
             let sig = s.on_candle(&mut ctx, candle);
@@ -1432,7 +1678,7 @@ mod tests {
                 assert_eq!(
                     sig,
                     Some(Signal::NoAction),
-                    "bar {} should emit NoAction skeleton",
+                    "flat fixture must never trigger an entry at bar {}",
                     i
                 );
             }
@@ -1440,27 +1686,37 @@ mod tests {
     }
 
     #[test]
-    fn test_ichimoku_skeleton_warmup_respects_override_periods() {
-        // Smaller senkou_b/shift override → smaller warm-up gate. Proves
-        // the start_idx math is parameterised, not hard-coded to 78.
+    fn test_ichimoku_warmup_respects_override_periods() {
+        // Smaller senkou_b/shift → smaller start_idx. Proves the
+        // warm-up math is `(senkou_b - 1) + 2 * shift`, not hard-coded.
+        //
+        // NOTE: `past_senkou_at_i_minus_26` uses the hardcoded
+        // `CLOUD_SHIFT_BARS = 26` const, so even with smaller `shift`
+        // params the past-cloud reads still need 26+ bars below to
+        // yield `Some`. The early-return on missing past-anchors then
+        // turns the post-warm-up bars into `NoAction`. That's exactly
+        // what this test pins: bars below start_idx → `None` (no
+        // indicator work at all); bars at/above → `Some(NoAction)`.
         let mut s = IchimokuStrategy::new();
-        let n = 50;
+        let n = 60;
         let candles: Vec<Candle> = (0..n)
             .map(|i| Candle::new(i * 3_600_000, 100.0, 101.0, 99.0, 100.0, 1.0))
             .collect();
         let params = HashMap::from([
+            ("tenkan_period".to_string(), 3.0),
+            ("kijun_period".to_string(), 5.0),
             ("senkou_b_period".to_string(), 10.0),
             ("shift".to_string(), 5.0),
         ]);
         let mut ctx = Context::new(candles.clone(), Timeframe::H1, params);
-        let start_idx = 15usize; // 10 + 5
+        let start_idx = 19usize; // (10 - 1) + 2*5 = 19
         for (i, candle) in candles.iter().enumerate() {
             ctx.set_index(i);
             let sig = s.on_candle(&mut ctx, candle);
             if i < start_idx {
                 assert!(sig.is_none(), "bar {} warm-up violated", i);
             } else {
-                assert_eq!(sig, Some(Signal::NoAction), "bar {} skeleton", i);
+                assert_eq!(sig, Some(Signal::NoAction), "bar {} flat fixture", i);
             }
         }
     }
@@ -1480,5 +1736,296 @@ mod tests {
         let mut s = IchimokuStrategy::new();
         s.on_reset();
         let _ = s.manifest();
+    }
+
+    // ── Welle I2-2: detect_entry confluence tests ───────────────────────
+    //
+    // Inputs chosen so that exactly one confluence component is the
+    // "swing": flipping that one component flips the resulting signal.
+    // Strict `>` semantics per Spec §12.5 — every comparison uses a
+    // delta of 0.5 so float-noise can't accidentally flip it.
+
+    /// Bullish baseline: all five long components fire. Used as the
+    /// reference fixture for the per-condition failure-mode tests below.
+    fn long_pass_fixture() -> (f64, f64, f64, f64, f64, f64, f64, f64, f64, i32, i32) {
+        (
+            /* close                */ 120.0,
+            /* tenkan               */ 108.0,
+            /* kijun                */ 100.0,
+            /* span_a_future        */ 115.0,
+            /* span_b_future        */ 105.0, // a > b → future green
+            /* cloud_current_upper  */ 110.0, // close > upper → c1
+            /* cloud_current_lower  */ 100.0,
+            /* cloud_chikou_upper   */ 108.0, // close > upper → c4
+            /* cloud_chikou_lower   */ 95.0,
+            /* score                */ 60,    // exactly at threshold
+            /* score_threshold      */ 60,
+        )
+    }
+
+    /// Bearish baseline mirror.
+    fn short_pass_fixture() -> (f64, f64, f64, f64, f64, f64, f64, f64, f64, i32, i32) {
+        (
+            /* close                */ 80.0,
+            /* tenkan               */ 92.0,
+            /* kijun                */ 100.0, // kijun > tenkan → c3
+            /* span_a_future        */ 85.0,
+            /* span_b_future        */ 95.0,  // a < b → future red
+            /* cloud_current_upper  */ 105.0,
+            /* cloud_current_lower  */ 90.0,  // close < lower → c1
+            /* cloud_chikou_upper   */ 100.0,
+            /* cloud_chikou_lower   */ 88.0,  // close < lower → c4
+            /* score                */ -60,
+            /* score_threshold      */ 60,
+        )
+    }
+
+    #[test]
+    fn test_detect_entry_long_when_all_5_conditions_met() {
+        let (c, t, k, saf, sbf, ccu, ccl, chu, chl, sc, th) = long_pass_fixture();
+        let r = detect_entry(c, t, k, saf, sbf, ccu, ccl, chu, chl, sc, th);
+        assert!(r.long, "long must fire with all 5 long components");
+        assert!(!r.short);
+    }
+
+    #[test]
+    fn test_detect_entry_long_fails_when_close_below_cloud_c1() {
+        let (_c, t, k, saf, sbf, ccu, ccl, chu, chl, sc, th) = long_pass_fixture();
+        let c = ccu - 0.5; // below upper → c1 fails
+        let r = detect_entry(c, t, k, saf, sbf, ccu, ccl, chu, chl, sc, th);
+        assert!(!r.long);
+    }
+
+    #[test]
+    fn test_detect_entry_long_fails_when_future_cloud_not_green_c2() {
+        let (c, t, k, _saf, sbf, ccu, ccl, chu, chl, sc, th) = long_pass_fixture();
+        let saf = sbf; // equal → strict `>` fails (Spec §12.5)
+        let r = detect_entry(c, t, k, saf, sbf, ccu, ccl, chu, chl, sc, th);
+        assert!(!r.long, "long must NOT fire when future cloud is flat (a == b)");
+    }
+
+    #[test]
+    fn test_detect_entry_long_fails_when_tenkan_below_kijun_c3() {
+        let (c, _t, k, saf, sbf, ccu, ccl, chu, chl, sc, th) = long_pass_fixture();
+        let t = k - 1.0;
+        let r = detect_entry(c, t, k, saf, sbf, ccu, ccl, chu, chl, sc, th);
+        assert!(!r.long);
+    }
+
+    #[test]
+    fn test_detect_entry_long_fails_when_chikou_below_cloud_c4() {
+        let (c, t, k, saf, sbf, ccu, ccl, _chu, chl, sc, th) = long_pass_fixture();
+        let chu = c + 0.5; // chikou anchor above close → c4 fails
+        let r = detect_entry(c, t, k, saf, sbf, ccu, ccl, chu, chl, sc, th);
+        assert!(!r.long);
+    }
+
+    #[test]
+    fn test_detect_entry_long_fails_when_score_below_threshold_c5() {
+        let (c, t, k, saf, sbf, ccu, ccl, chu, chl, _sc, th) = long_pass_fixture();
+        let sc = th - 1; // just under threshold → c5 fails
+        let r = detect_entry(c, t, k, saf, sbf, ccu, ccl, chu, chl, sc, th);
+        assert!(!r.long);
+    }
+
+    #[test]
+    fn test_detect_entry_long_fails_when_only_4_of_5_pass() {
+        // Specific 4-of-5 case from the Welle-I2-2 plan: c1+c2+c3+c5
+        // pass, c4 fails. Single-component flip exercises the AND chain
+        // — confirms the strategy doesn't slip an entry through on a
+        // permissive subset.
+        let (c, t, k, saf, sbf, ccu, ccl, _chu, chl, sc, th) = long_pass_fixture();
+        let chu = c + 1.0;
+        let r = detect_entry(c, t, k, saf, sbf, ccu, ccl, chu, chl, sc, th);
+        assert!(!r.long);
+        assert!(!r.short);
+    }
+
+    #[test]
+    fn test_detect_entry_short_when_all_5_conditions_met_mirror() {
+        let (c, t, k, saf, sbf, ccu, ccl, chu, chl, sc, th) = short_pass_fixture();
+        let r = detect_entry(c, t, k, saf, sbf, ccu, ccl, chu, chl, sc, th);
+        assert!(!r.long);
+        assert!(r.short, "short must fire with all 5 short components");
+    }
+
+    #[test]
+    fn test_detect_entry_short_fails_when_only_4_of_5_pass() {
+        // Mirror of the long 4-of-5 negative test — c4 short fails.
+        let (c, t, k, saf, sbf, ccu, ccl, chu, _chl, sc, th) = short_pass_fixture();
+        let chl = c - 1.0;
+        let r = detect_entry(c, t, k, saf, sbf, ccu, ccl, chu, chl, sc, th);
+        assert!(!r.short);
+        assert!(!r.long);
+    }
+
+    #[test]
+    fn test_detect_entry_nan_inputs_suppress_both_signals() {
+        // NaN poisoning: any single NaN must collapse the AND chain to
+        // false on both sides. IEEE comparison with NaN is always
+        // false, so this is by-construction — but pin the contract.
+        let (c, t, k, saf, sbf, ccu, ccl, chu, chl, sc, th) = long_pass_fixture();
+        let r = detect_entry(f64::NAN, t, k, saf, sbf, ccu, ccl, chu, chl, sc, th);
+        assert!(!r.long && !r.short);
+        let r = detect_entry(c, f64::NAN, k, saf, sbf, ccu, ccl, chu, chl, sc, th);
+        assert!(!r.long && !r.short);
+        let r = detect_entry(c, t, k, saf, f64::NAN, ccu, ccl, chu, chl, sc, th);
+        assert!(!r.long && !r.short);
+        let r = detect_entry(c, t, k, saf, sbf, f64::NAN, ccl, chu, chl, sc, th);
+        assert!(!r.long && !r.short);
+    }
+
+    #[test]
+    fn test_detect_entry_score_exactly_at_threshold_is_inclusive() {
+        // `score >= threshold` per Spec §12.2 — score == threshold
+        // qualifies as confluence. Long uses `>=`, short uses `<=`.
+        let (c, t, k, saf, sbf, ccu, ccl, chu, chl, _sc, th) = long_pass_fixture();
+        let r = detect_entry(c, t, k, saf, sbf, ccu, ccl, chu, chl, th, th);
+        assert!(r.long);
+
+        let (c, t, k, saf, sbf, ccu, ccl, chu, chl, _sc, th) = short_pass_fixture();
+        let r = detect_entry(c, t, k, saf, sbf, ccu, ccl, chu, chl, -th, th);
+        assert!(r.short);
+    }
+
+    // ── SL helper tests ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_ichimoku_sl_long_picks_kijun_when_kijun_below_cloud() {
+        // Kijun = 99.0, cloud_lower = 99.5 → SL = 99.0 (Kijun further
+        // from entry @ 100, hence "großzügig").
+        let sl = ichimoku_sl_long(99.0, 99.5);
+        assert!((sl - 99.0).abs() < 1e-12, "sl = {}", sl);
+    }
+
+    #[test]
+    fn test_ichimoku_sl_long_picks_cloud_when_cloud_below_kijun() {
+        // Kijun = 99.5, cloud_lower = 99.0 → SL = 99.0 (cloud-bottom
+        // is the lower anchor, "großzügig").
+        let sl = ichimoku_sl_long(99.5, 99.0);
+        assert!((sl - 99.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_ichimoku_sl_short_picks_kijun_when_kijun_above_cloud() {
+        // Mirror — short SL = max(kijun, cloud_upper). Kijun further
+        // above entry → kijun wins.
+        let sl = ichimoku_sl_short(101.0, 100.5);
+        assert!((sl - 101.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_ichimoku_sl_short_picks_cloud_when_cloud_above_kijun() {
+        let sl = ichimoku_sl_short(100.5, 101.0);
+        assert!((sl - 101.0).abs() < 1e-12);
+    }
+
+    // ── Strategy-level on_candle integration ───────────────────────────
+
+    /// Synthetic 130-candle uptrend pre-engineered so the bar at index
+    /// `signal_idx` clears every confluence: linear ramp + small noise
+    /// at the very end so Tenkan trails Kijun until the breakout.
+    /// Yields a constructed trigger; not for backtest performance — the
+    /// real-data acceptance backtest lives in Welle I3.
+    fn uptrend_fixture(n: usize) -> Vec<Candle> {
+        (0..n)
+            .map(|i| {
+                let close = 100.0 + (i as f64) * 0.5; // strong steady ramp
+                Candle::new(
+                    1_700_000_000_000 + i as i64 * 3_600_000,
+                    close - 0.2,
+                    close + 0.3,
+                    close - 0.3,
+                    close,
+                    100.0,
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn test_strategy_uptrend_eventually_emits_long_entry() {
+        // Pure uptrend → past clouds rise with price → close > both
+        // cloud anchors and Tenkan > Kijun, Senkou-A > Senkou-B
+        // (since both share the same steady drift). Score lands at +60
+        // once all three components confluent. Past index 103 the
+        // strategy MUST emit at least one EnterLong.
+        let mut s = IchimokuStrategy::new();
+        let candles = uptrend_fixture(130);
+        let mut ctx = Context::new(candles.clone(), Timeframe::H1, HashMap::new());
+        let mut got_long = false;
+        for (i, candle) in candles.iter().enumerate() {
+            ctx.set_index(i);
+            if let Some(Signal::EnterLong { sl, tp, size_pct }) = s.on_candle(&mut ctx, candle) {
+                // Spec §4 sanity: SL below entry, R:R = 2 (default).
+                assert!(sl.unwrap() < candle.close);
+                let r = candle.close - sl.unwrap();
+                let tp0 = tp.first().copied().unwrap();
+                assert!((tp0 - (candle.close + 2.0 * r)).abs() < 1e-9);
+                assert!(size_pct > 0.0 && size_pct <= 100.0);
+                got_long = true;
+                break; // strategy now in_position; further bars NoAction
+            }
+        }
+        assert!(got_long, "uptrend fixture must trigger ≥ 1 EnterLong past warm-up");
+        // State snapshot populated by the last call.
+        assert!(ctx.get_state("ichi_tenkan").is_some());
+        assert!(ctx.get_state("ichi_kijun").is_some());
+        assert!(ctx.get_state("ichi_score").is_some());
+    }
+
+    #[test]
+    fn test_strategy_in_position_blocks_re_entry() {
+        // After an EnterLong, `ctx.in_position = true`. The strategy
+        // must emit NoAction (never another entry) on every subsequent
+        // post-warm-up bar even if the confluence still passes. This
+        // matches the BB+RSI / UT-Bot convention: a re-entry is the
+        // engine's job after the engine resets in_position on exit.
+        let mut s = IchimokuStrategy::new();
+        let candles = uptrend_fixture(130);
+        let mut ctx = Context::new(candles.clone(), Timeframe::H1, HashMap::new());
+        let mut entries = 0;
+        for (i, candle) in candles.iter().enumerate() {
+            ctx.set_index(i);
+            if let Some(Signal::EnterLong { .. }) = s.on_candle(&mut ctx, candle) {
+                entries += 1;
+            }
+        }
+        assert_eq!(entries, 1, "in_position guard must allow exactly 1 entry");
+    }
+
+    /// Bar timestamp helper — local Berlin (UTC+1, no DST) hour `hour`.
+    fn ts_at_local_berlin_hour(hour: i64, day_offset: i64) -> i64 {
+        // 2024-01-15 00:00:00 Berlin = 1705273200000 (= 2024-01-14 23:00 UTC).
+        const BASE: i64 = 1_705_273_200_000;
+        BASE + day_offset * 86_400_000 + hour * 3_600_000
+    }
+
+    #[test]
+    fn test_strategy_session_filter_blocks_entries_at_off_hours() {
+        // Reuse uptrend fixture but shift timestamps deep into the
+        // night (local 03:00) so the 09:00–23:00 window rejects every
+        // bar. With `session_filter_enabled = 1`, no EnterLong / Short
+        // ever fires.
+        let mut s = IchimokuStrategy::new();
+        let n = 130;
+        let mut candles = uptrend_fixture(n);
+        for (i, c) in candles.iter_mut().enumerate() {
+            c.timestamp = ts_at_local_berlin_hour(3, i as i64 / 24);
+        }
+        let params = HashMap::from([
+            ("session_filter_enabled".to_string(), 1.0),
+        ]);
+        let mut ctx = Context::new(candles.clone(), Timeframe::H1, params);
+        for (i, candle) in candles.iter().enumerate() {
+            ctx.set_index(i);
+            if let Some(sig) = s.on_candle(&mut ctx, candle) {
+                assert!(
+                    !matches!(sig, Signal::EnterLong { .. } | Signal::EnterShort { .. }),
+                    "off-hours session filter must block entries at bar {}",
+                    i
+                );
+            }
+        }
     }
 }
