@@ -191,6 +191,15 @@ class UtBotParams {
   /// for the Welle-U3 Path-B experiment.
   final bool smiCrossAboveZero;
 
+  /// Welle R2-3 ADX regime filter quartet — see [BbRsiParams] for the
+  /// shared rationale. Defaults disabled so the pre-R2 UT-Bot path is
+  /// byte-identical (dart_rust_ut_bot_parity_test stays green without
+  /// touching the fixture).
+  final bool adxFilterEnabled;
+  final double adxThreshold;
+  final int adxPeriod;
+  final bool adxUseDiConfluence;
+
   const UtBotParams({
     this.emaPeriod = 200,
     this.keyValue = 2.0,
@@ -206,6 +215,10 @@ class UtBotParams {
     this.sessionEndHourLocal = 23,
     this.slippageBps = 0.0,
     this.smiCrossAboveZero = false,
+    this.adxFilterEnabled = false,
+    this.adxThreshold = 25.0,
+    this.adxPeriod = 14,
+    this.adxUseDiConfluence = false,
   });
 }
 
@@ -899,6 +912,23 @@ class BacktestService {
       params.swingLookbackBars,
     ].reduce((a, b) => a > b ? a : b);
 
+    // ── Welle R2-3 ADX regime filter pre-compute ───────────────────────
+    // Pre-compute ADX/+DI/-DI series ONCE when the filter is enabled.
+    // Mirrors the Rust on_candle full-recompute algorithm bit-for-bit
+    // via the shared `calcAdx` helper in strategy_common.dart. When
+    // disabled, no ADX work happens — pre-R2 UT-Bot path bit-exact.
+    List<double>? adxSeries;
+    List<double>? plusDiSeries;
+    List<double>? minusDiSeries;
+    if (params.adxFilterEnabled) {
+      final adxOut = calcAdx(highs, lows, closes, params.adxPeriod);
+      if (adxOut != null) {
+        adxSeries = adxOut.adx;
+        plusDiSeries = adxOut.plusDi;
+        minusDiSeries = adxOut.minusDi;
+      }
+    }
+
     // Strategy execution — shape mirrors runBbRsi's Step A/B/C/D pattern.
     double balance = initialBalance;
     double peakEquity = initialBalance;
@@ -1060,9 +1090,32 @@ class BacktestService {
               !sigPrev.isNaN &&
               !smiNow.isNaN &&
               !sigNow.isNaN;
+          // Welle R2-3 ADX regime gate (closure mirrors BB+RSI shape).
+          // Returns `true` when disabled — pre-R2 hot path bit-exact.
+          bool regimeOk(bool isLong) {
+            if (!params.adxFilterEnabled) return true;
+            if (adxSeries == null ||
+                plusDiSeries == null ||
+                minusDiSeries == null) {
+              return false;
+            }
+            return regimePassesFilter(
+              adxSeries[i],
+              plusDiSeries[i],
+              minusDiSeries[i],
+              params.adxThreshold,
+              isLong,
+              params.adxUseDiConfluence,
+            );
+          }
+
           if (allValid) {
             final price = candle.close;
-            if (price > ema && flipUp && smiCrossUp && smiLongOk) {
+            if (price > ema &&
+                flipUp &&
+                smiCrossUp &&
+                smiLongOk &&
+                regimeOk(true)) {
               final preLows = [
                 for (int j = i - params.swingLookbackBars; j < i;
                     j++)
@@ -1079,7 +1132,8 @@ class BacktestService {
             } else if (price < ema &&
                 flipDown &&
                 smiCrossDown &&
-                smiShortOk) {
+                smiShortOk &&
+                regimeOk(false)) {
               final preHighs = [
                 for (int j = i - params.swingLookbackBars; j < i;
                     j++)

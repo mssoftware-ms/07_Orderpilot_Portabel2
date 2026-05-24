@@ -314,5 +314,100 @@ void main() {
         lessThanOrEqualTo(unfiltered.metrics.totalTrades),
       );
     });
+
+    // ── Welle R2-3 ADX regime filter wiring ─────────────────────────
+    //
+    // Uses the same LCG fixture as the dart_rust_ut_bot_parity test —
+    // known to trigger ≥ 1 UT-Bot entry on the fast-warmup parameter
+    // set so the "disabled = baseline" pin is not a tautology. DI-
+    // confluence semantics are pinned bit-for-bit on the helper by
+    // `test/services/strategy_common_test.dart::regimePassesFilter`.
+
+    List<CandleData> lcgFixture400() {
+      final closes = <double>[];
+      int s = 12345;
+      double price = 100.0;
+      closes.add(price);
+      while (closes.length < 400) {
+        s = (s * 1103515245 + 12345) & 0x7fffffff;
+        final step = ((s % 200) - 100) / 30.0;
+        price = (price + step).clamp(80.0, 120.0);
+        closes.add(price);
+      }
+      const baseTs = 1700000000000;
+      return [
+        for (int i = 0; i < closes.length; i++)
+          CandleData(
+            timestamp: baseTs + i * 300000,
+            open: closes[i] - 0.3,
+            high: closes[i] + 1.2,
+            low: closes[i] - 1.2,
+            close: closes[i],
+            volume: 1000.0 + i,
+          ),
+      ];
+    }
+
+    test('ADX filter disabled = baseline on UT-Bot LCG fixture', () {
+      final candles = lcgFixture400();
+      final baseline = BacktestService.runUtBot(
+        candles: candles, initialBalance: 10000.0, feeRate: 0.0006,
+        params: fastParams,
+      );
+      final explicit = BacktestService.runUtBot(
+        candles: candles, initialBalance: 10000.0, feeRate: 0.0006,
+        params: const UtBotParams(
+          emaPeriod: 30, keyValue: 1.0, atrPeriod: 1,
+          smiLength: 5, smiKSmoothing: 3, smiDSmoothing: 3,
+          swingLookbackBars: 5, tpRrRatio: 2.0, riskPerTrade: 0.02,
+          adxFilterEnabled: false,
+        ),
+      );
+      expect(baseline.metrics.totalTrades, greaterThan(0));
+      expect(explicit.metrics.totalTrades,
+          equals(baseline.metrics.totalTrades));
+      expect(explicit.metrics.totalPnl, equals(baseline.metrics.totalPnl));
+    });
+
+    test('ADX filter high threshold blocks all UT-Bot entries', () {
+      final candles = lcgFixture400();
+      final blocked = BacktestService.runUtBot(
+        candles: candles, initialBalance: 10000.0, feeRate: 0.0006,
+        params: const UtBotParams(
+          emaPeriod: 30, keyValue: 1.0, atrPeriod: 1,
+          smiLength: 5, smiKSmoothing: 3, smiDSmoothing: 3,
+          swingLookbackBars: 5, tpRrRatio: 2.0, riskPerTrade: 0.02,
+          adxFilterEnabled: true,
+          adxThreshold: 100.0,
+          adxPeriod: 14,
+        ),
+      );
+      expect(blocked.metrics.totalTrades, equals(0));
+    });
+
+    test('ADX filter threshold 0 + no confluence = baseline UT-Bot', () {
+      // adx_period=5 → warmup 8 bars ≪ ema=30 + smi gate → pass-through.
+      final candles = lcgFixture400();
+      final baseline = BacktestService.runUtBot(
+        candles: candles, initialBalance: 10000.0, feeRate: 0.0006,
+        params: fastParams,
+      );
+      final passthrough = BacktestService.runUtBot(
+        candles: candles, initialBalance: 10000.0, feeRate: 0.0006,
+        params: const UtBotParams(
+          emaPeriod: 30, keyValue: 1.0, atrPeriod: 1,
+          smiLength: 5, smiKSmoothing: 3, smiDSmoothing: 3,
+          swingLookbackBars: 5, tpRrRatio: 2.0, riskPerTrade: 0.02,
+          adxFilterEnabled: true,
+          adxThreshold: 0.0,
+          adxPeriod: 5,
+          adxUseDiConfluence: false,
+        ),
+      );
+      expect(passthrough.metrics.totalTrades,
+          equals(baseline.metrics.totalTrades));
+      expect(passthrough.metrics.totalPnl,
+          equals(baseline.metrics.totalPnl));
+    });
   });
 }

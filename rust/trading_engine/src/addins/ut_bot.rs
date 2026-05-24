@@ -392,7 +392,7 @@ use crate::strategy::{
 };
 
 use super::bb_rsi::{calc_ema, position_size_pct, swing_high, swing_low};
-use super::common::within_session;
+use super::common::{calc_adx, regime_passes_filter, within_session};
 
 /// UT Bot Alerts (verbesserte Variante) strategy add-in.
 ///
@@ -446,6 +446,15 @@ impl StrategyAddin for UtBotStrategy {
         // (SMI cross while same-sign with zero); true flips the zero-line
         // gate per `detect_entry` doc.
         let cross_above_zero = ctx.param_or("smi_cross_above_zero", 0.0) >= 0.5;
+        // Welle R2-3 ADX regime filter. Default disabled → no ADX
+        // compute, no behaviour change vs pre-R2 UT-Bot. Identical
+        // four-knob shape to BB+RSI / Ichimoku so the Welle-R3
+        // acceptance backtest can sweep one parameter axis.
+        let adx_filter_enabled = ctx.param_or("adx_filter_enabled", 0.0) >= 0.5;
+        let adx_threshold = ctx.param_or("adx_threshold", 25.0);
+        let adx_period = ctx.param_or("adx_period", 14.0) as usize;
+        let adx_use_di_confluence =
+            ctx.param_or("adx_use_di_confluence", 0.0) >= 0.5;
 
         // Warm-up: SMI signal needs `(length - 1) + (k - 1) + (d - 1) + (d - 1)`
         // bars; we also need at least one prior bar for the SMI cross and
@@ -517,7 +526,31 @@ impl StrategyAddin for UtBotStrategy {
             cross_above_zero,
         );
 
+        // Welle R2-3 ADX regime snapshot — only computed when the filter
+        // is enabled. Uses the same highs/lows/closes captured above
+        // (already covers indices [0..=i]). When disabled the snapshot
+        // is `None` and the gate below is skipped — pre-R2 UT-Bot path
+        // bit-exact preserved.
+        let adx_snapshot = if adx_filter_enabled {
+            calc_adx(&highs, &lows, &closes, adx_period)
+                .map(|out| (out.adx[i], out.plus_di[i], out.minus_di[i]))
+        } else {
+            None
+        };
+
         if entry.long {
+            if let Some((adx_v, pdi, mdi)) = adx_snapshot {
+                if !regime_passes_filter(
+                    adx_v,
+                    pdi,
+                    mdi,
+                    adx_threshold,
+                    true,
+                    adx_use_di_confluence,
+                ) {
+                    return Some(Signal::NoAction);
+                }
+            }
             let swing = swing_low(&lows_pre)?;
             if swing < current_close {
                 let sl_dist = current_close - swing;
@@ -534,6 +567,18 @@ impl StrategyAddin for UtBotStrategy {
         }
 
         if entry.short {
+            if let Some((adx_v, pdi, mdi)) = adx_snapshot {
+                if !regime_passes_filter(
+                    adx_v,
+                    pdi,
+                    mdi,
+                    adx_threshold,
+                    false,
+                    adx_use_di_confluence,
+                ) {
+                    return Some(Signal::NoAction);
+                }
+            }
             let swing = swing_high(&highs_pre)?;
             if swing > current_close {
                 let sl_dist = swing - current_close;
@@ -640,6 +685,43 @@ pub fn ut_bot_manifest() -> AddinManifest {
             ParameterSchema::new(
                 "smi_cross_above_zero",
                 "SMI Cross Above-Zero Mode (0/1)",
+                0.0,
+                0.0,
+                1.0,
+                1.0,
+            ),
+            // ── Welle R2-3 ADX regime filter ──────────────────────────
+            // All four default to "off" — fresh UT-Bot instance behaves
+            // byte-identical to pre-R2. Shape mirrors BB+RSI / Ichimoku
+            // bit-for-bit so the Welle-R3 acceptance backtest sweeps an
+            // IDENTICAL parameter axis across strategies.
+            ParameterSchema::new(
+                "adx_filter_enabled",
+                "ADX Regime Filter Enabled (0/1)",
+                0.0,
+                0.0,
+                1.0,
+                1.0,
+            ),
+            ParameterSchema::new(
+                "adx_threshold",
+                "ADX Threshold",
+                25.0,
+                0.0,
+                100.0,
+                1.0,
+            ),
+            ParameterSchema::new(
+                "adx_period",
+                "ADX Period",
+                14.0,
+                2.0,
+                100.0,
+                1.0,
+            ),
+            ParameterSchema::new(
+                "adx_use_di_confluence",
+                "ADX +DI/-DI Confluence (0/1)",
                 0.0,
                 0.0,
                 1.0,
@@ -1312,8 +1394,10 @@ mod tests {
         // ema_period, key_value, atr_period, smi_length, smi_k_smoothing,
         // smi_d_smoothing, swing_lookback_bars, tp_rr_ratio, risk_per_trade,
         // session_filter_enabled, session_start_hour_local,
-        // session_end_hour_local, smi_cross_above_zero → 13 parameters.
-        assert_eq!(m.parameters.len(), 13);
+        // session_end_hour_local, smi_cross_above_zero
+        // + R2-3 ADX filter quartet (adx_filter_enabled, adx_threshold,
+        // adx_period, adx_use_di_confluence) = 17 parameters.
+        assert_eq!(m.parameters.len(), 17);
         for required in [
             "ema_period",
             "key_value",
@@ -1328,6 +1412,10 @@ mod tests {
             "session_start_hour_local",
             "session_end_hour_local",
             "smi_cross_above_zero",
+            "adx_filter_enabled",
+            "adx_threshold",
+            "adx_period",
+            "adx_use_di_confluence",
         ] {
             assert!(
                 m.parameters.iter().any(|p| p.name == required),
@@ -1505,6 +1593,125 @@ mod tests {
                 );
             }
         }
+    }
+
+    // ── Welle R2-3 ADX regime filter wiring ─────────────────────────────
+    //
+    // Uses the same 500-candle sinusoid fixture as the smoke-run test
+    // (small ema=50, smi=10/5/3 to clear warm-up inside the fixture).
+    // The fixture is known to produce at least one entry signal, so
+    // the "disabled = baseline" and "high threshold = 0 trades" pins
+    // are not tautologies of `0 == 0`. Confluence semantics are pinned
+    // bit-for-bit on the helper itself by
+    // `addins::common::tests::test_regime_filter_di_confluence_*`.
+
+    fn build_smoke_fixture() -> Vec<Candle> {
+        // 400 deterministic candles via the same LCG random-walk used by
+        // `test/integration/dart_rust_ut_bot_parity_test.dart` — known to
+        // trigger ≥ 1 UT-Bot entry under the fast-warmup parameter set,
+        // so the "disabled = baseline" pin is not a tautology of 0 == 0.
+        let mut closes = Vec::with_capacity(400);
+        let mut s: u64 = 12345;
+        let mut price = 100.0_f64;
+        closes.push(price);
+        while closes.len() < 400 {
+            s = (s.wrapping_mul(1_103_515_245).wrapping_add(12345)) & 0x7fff_ffff;
+            let step = ((s % 200) as f64 - 100.0) / 30.0; // ~[-3.3, +3.3]
+            price = (price + step).clamp(80.0, 120.0);
+            closes.push(price);
+        }
+        const BASE_TS: i64 = 1_700_000_000_000;
+        closes
+            .iter()
+            .enumerate()
+            .map(|(i, &c)| {
+                Candle::new(
+                    BASE_TS + (i as i64) * 300_000, // 5-minute candles
+                    c - 0.3,
+                    c + 1.2,
+                    c - 1.2,
+                    c,
+                    1000.0 + i as f64,
+                )
+            })
+            .collect()
+    }
+
+    fn count_ut_bot_entries(candles: &[Candle], params: HashMap<String, f64>) -> usize {
+        let mut strategy = UtBotStrategy::new();
+        let mut ctx = Context::new(candles.to_vec(), Timeframe::M5, params);
+        let mut entries = 0usize;
+        for (i, candle) in candles.iter().enumerate() {
+            ctx.set_index(i);
+            if let Some(sig) = strategy.on_candle(&mut ctx, candle) {
+                if matches!(sig, Signal::EnterLong { .. } | Signal::EnterShort { .. }) {
+                    entries += 1;
+                }
+            }
+        }
+        entries
+    }
+
+    fn fast_warmup_params() -> HashMap<String, f64> {
+        // Same fast-warmup parameter set as the dart_rust_ut_bot_parity
+        // test — produces ≥ 1 entry on the LCG fixture above.
+        HashMap::from([
+            ("ema_period".to_string(), 30.0),
+            ("key_value".to_string(), 1.0),
+            ("atr_period".to_string(), 1.0),
+            ("smi_length".to_string(), 5.0),
+            ("smi_k_smoothing".to_string(), 3.0),
+            ("smi_d_smoothing".to_string(), 3.0),
+            ("swing_lookback_bars".to_string(), 5.0),
+            ("tp_rr_ratio".to_string(), 2.0),
+            ("risk_per_trade".to_string(), 0.02),
+        ])
+    }
+
+    #[test]
+    fn test_adx_filter_disabled_does_not_change_signals_on_smoke_fixture() {
+        let candles = build_smoke_fixture();
+        let baseline = count_ut_bot_entries(&candles, fast_warmup_params());
+        let mut explicit = fast_warmup_params();
+        explicit.insert("adx_filter_enabled".to_string(), 0.0);
+        assert_eq!(
+            count_ut_bot_entries(&candles, explicit),
+            baseline,
+            "adx_filter_enabled=0.0 must equal default (disabled)",
+        );
+        assert!(baseline >= 1, "smoke fixture must emit ≥ 1 UT-Bot entry");
+    }
+
+    #[test]
+    fn test_adx_filter_high_threshold_blocks_all_ut_bot_entries() {
+        let candles = build_smoke_fixture();
+        let mut params = fast_warmup_params();
+        params.insert("adx_filter_enabled".to_string(), 1.0);
+        params.insert("adx_threshold".to_string(), 100.0);
+        params.insert("adx_period".to_string(), 14.0);
+        assert_eq!(
+            count_ut_bot_entries(&candles, params),
+            0,
+            "adx_threshold=100 must block every UT-Bot entry",
+        );
+    }
+
+    #[test]
+    fn test_adx_filter_zero_threshold_matches_disabled_on_smoke_fixture() {
+        // small adx_period=5 → warmup is only 8 bars, well clear of the
+        // ema=50 + smi gate, so the gate becomes pure pass-through.
+        let candles = build_smoke_fixture();
+        let baseline = count_ut_bot_entries(&candles, fast_warmup_params());
+        let mut params = fast_warmup_params();
+        params.insert("adx_filter_enabled".to_string(), 1.0);
+        params.insert("adx_threshold".to_string(), 0.0);
+        params.insert("adx_period".to_string(), 5.0);
+        params.insert("adx_use_di_confluence".to_string(), 0.0);
+        assert_eq!(
+            count_ut_bot_entries(&candles, params),
+            baseline,
+            "threshold=0 + no confluence must equal disabled baseline",
+        );
     }
 
     #[test]
