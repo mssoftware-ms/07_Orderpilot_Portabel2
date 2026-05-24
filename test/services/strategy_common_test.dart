@@ -279,4 +279,66 @@ void main() {
       expect(withinSession(tsAtUtcHour(9), 22, 6, 1), isFalse);
     });
   });
+
+  // ── regimePassesFilter ────────────────────────────────────────────────
+  //
+  // Reference rules shared bit-for-bit with the Rust mirror in
+  // `rust/trading_engine/src/addins/common.rs::tests` so the gate stays
+  // in lock-step with the Welle-R3 acceptance backtest.
+
+  group('regimePassesFilter', () {
+    test('blocks when adx < threshold (any direction or confluence)', () {
+      expect(regimePassesFilter(20.0, 30.0, 10.0, 25.0, true, false), isFalse);
+      expect(regimePassesFilter(20.0, 30.0, 10.0, 25.0, false, false), isFalse);
+      expect(regimePassesFilter(20.0, 30.0, 10.0, 25.0, true, true), isFalse);
+    });
+
+    test('passes when adx >= threshold without confluence', () {
+      expect(regimePassesFilter(30.0, 25.0, 25.0, 25.0, true, false), isTrue);
+      expect(regimePassesFilter(30.0, 25.0, 25.0, 25.0, false, false), isTrue);
+      // Boundary: adx == threshold passes (only `<` blocks).
+      expect(regimePassesFilter(25.0, 25.0, 25.0, 25.0, true, false), isTrue);
+    });
+
+    test('di confluence blocks long when -DI dominates, passes short', () {
+      expect(regimePassesFilter(40.0, 10.0, 30.0, 25.0, true, true), isFalse);
+      expect(regimePassesFilter(40.0, 10.0, 30.0, 25.0, false, true), isTrue);
+    });
+
+    test('di confluence passes long when +DI dominates, blocks short', () {
+      expect(regimePassesFilter(40.0, 30.0, 10.0, 25.0, true, true), isTrue);
+      expect(regimePassesFilter(40.0, 30.0, 10.0, 25.0, false, true), isFalse);
+    });
+
+    test('di equality blocks both sides under confluence, passes without', () {
+      // Strict dominance — equality is not "above" so both directions block.
+      expect(regimePassesFilter(40.0, 20.0, 20.0, 25.0, true, true), isFalse);
+      expect(regimePassesFilter(40.0, 20.0, 20.0, 25.0, false, true), isFalse);
+      // Without confluence the ADX-only gate accepts the same inputs.
+      expect(regimePassesFilter(40.0, 20.0, 20.0, 25.0, true, false), isTrue);
+      expect(regimePassesFilter(40.0, 20.0, 20.0, 25.0, false, false), isTrue);
+    });
+
+    test('NaN in any input blocks the trade (warm-up safety)', () {
+      expect(
+        regimePassesFilter(double.nan, 30.0, 10.0, 25.0, true, false),
+        isFalse,
+      );
+      expect(
+        regimePassesFilter(40.0, double.nan, 10.0, 25.0, true, true),
+        isFalse,
+      );
+      expect(
+        regimePassesFilter(40.0, 30.0, double.nan, 25.0, false, true),
+        isFalse,
+      );
+    });
+
+    test('threshold zero accepts any finite ADX; confluence still applies', () {
+      expect(regimePassesFilter(0.0, 5.0, 3.0, 0.0, true, false), isTrue);
+      expect(regimePassesFilter(0.0, 5.0, 3.0, 0.0, true, true), isTrue);
+      // +DI < -DI for a long → blocked under confluence.
+      expect(regimePassesFilter(0.0, 3.0, 5.0, 0.0, true, true), isFalse);
+    });
+  });
 }

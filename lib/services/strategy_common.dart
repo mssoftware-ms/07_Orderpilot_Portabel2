@@ -187,3 +187,45 @@ bool withinSession(
 
   return (adx: adx, plusDi: plusDi, minusDi: minusDi);
 }
+
+// ─── Regime filter (engine-shared, Welle R2-1) ─────────────────────────────
+
+/// Direction-agnostic regime gate that all three Phase-2 strategies
+/// (BB+RSI, UT-Bot, Ichimoku) call before emitting an entry signal.
+///
+/// Mirror of `regime_passes_filter` in
+/// `rust/trading_engine/src/addins/common.rs` — every comparison and
+/// short-circuit must match bit-for-bit so the Welle-R3 acceptance
+/// backtest applies an IDENTICAL filter across both engines.
+///
+/// Semantics (locked for parity):
+///
+/// 1. Any `NaN` input blocks the trade (warm-up safety). Catches the
+///    `[0, 2*period - 2)` ADX warm-up region from [calcAdx] where the
+///    `<` comparison would otherwise always be false and silently
+///    block forever.
+/// 2. `adx < threshold` blocks (chop regime).
+/// 3. When DI confluence is on, the directional ranking must match
+///    the trade side. `+DI == -DI` is rejected on both sides because
+///    the rule asks for strict dominance.
+/// 4. With confluence off, only step 2 gates the trade.
+///
+/// Callers MUST short-circuit on the `adxFilterEnabled` strategy
+/// parameter BEFORE invoking this helper so the disabled path stays
+/// byte-identical to the pre-Welle-R2 behaviour (no ADX compute, no
+/// NaN-block side effects).
+bool regimePassesFilter(
+  double adx,
+  double plusDi,
+  double minusDi,
+  double threshold,
+  bool isLong,
+  bool useDiConfluence,
+) {
+  if (adx.isNaN || plusDi.isNaN || minusDi.isNaN) return false;
+  if (adx < threshold) return false;
+  if (useDiConfluence) {
+    return isLong ? plusDi > minusDi : minusDi > plusDi;
+  }
+  return true;
+}

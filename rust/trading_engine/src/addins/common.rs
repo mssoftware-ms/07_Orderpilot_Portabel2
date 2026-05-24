@@ -224,6 +224,72 @@ pub fn calc_adx(
     })
 }
 
+// ─── Regime filter (engine-shared, Welle R2-1) ─────────────────────────────
+
+/// Direction-agnostic regime gate that all three Phase-2 strategies
+/// (BB+RSI, UT-Bot, Ichimoku) call before emitting an entry signal.
+///
+/// Centralised here so the three add-ins cannot drift apart on how
+/// "trending enough to trade" is defined — the Welle-R3 acceptance
+/// backtest must compare strategies under an IDENTICAL filter or the
+/// numbers are meaningless. Once a strategy needs a different ADX
+/// definition it gets a new helper, not a divergent branch inside
+/// this one.
+///
+/// Inputs are the per-bar ADX snapshot from [`calc_adx`] plus a
+/// fixed threshold and (optionally) a `+DI` / `-DI` confluence rule:
+///
+/// - `adx`            — smoothed ADX value at the signal bar.
+/// - `plus_di`        — smoothed +DI value at the signal bar.
+/// - `minus_di`       — smoothed -DI value at the signal bar.
+/// - `threshold`      — minimum ADX required to pass (Wilder default 25).
+/// - `is_long`        — direction of the entry being filtered.
+/// - `use_di_confluence` — when `true`, additionally require
+///   `+DI > -DI` for longs / `-DI > +DI` for shorts.
+///
+/// Semantics:
+///
+/// 1. Any `NaN` input blocks the trade (warm-up safety). This catches
+///    the `[0, 2*period - 2)` ADX warm-up region in [`calc_adx`] —
+///    a NaN comparison would otherwise always be `false` and the gate
+///    would silently block forever; making the NaN-block explicit pins
+///    the intent.
+/// 2. `adx < threshold` blocks (chop regime — defining behaviour).
+/// 3. When DI confluence is on, the directional ranking must match
+///    the trade side. `+DI == -DI` (exactly equal) is rejected on
+///    both sides because the rule asks for strict dominance.
+/// 4. With confluence off, only step 2 gates the trade.
+///
+/// Callers MUST short-circuit on the `adx_filter_enabled` strategy
+/// parameter BEFORE invoking this helper so that the disabled path
+/// stays byte-identical to the pre-Welle-R2 behaviour (no ADX
+/// computation, no NaN-block side effects). Returning `true` here
+/// for a disabled filter would force the caller to thread the flag
+/// through anyway; keeping it as the caller's contract avoids that.
+pub fn regime_passes_filter(
+    adx: f64,
+    plus_di: f64,
+    minus_di: f64,
+    threshold: f64,
+    is_long: bool,
+    use_di_confluence: bool,
+) -> bool {
+    if adx.is_nan() || plus_di.is_nan() || minus_di.is_nan() {
+        return false;
+    }
+    if adx < threshold {
+        return false;
+    }
+    if use_di_confluence {
+        return if is_long {
+            plus_di > minus_di
+        } else {
+            minus_di > plus_di
+        };
+    }
+    true
+}
+
 // ─── Tests ──────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -637,6 +703,78 @@ mod tests {
         for &v in out.adx.iter().skip(2 * period - 2) {
             assert!((0.0..=100.0).contains(&v), "ADX out of range: {v}");
         }
+    }
+
+    // ── regime_passes_filter tests ──────────────────────────────────────
+    //
+    // Reference rules shared bit-for-bit with the Dart mirror in
+    // `test/services/strategy_common_test.dart` so the gate stays in
+    // lock-step with the Welle-R3 acceptance backtest (where the three
+    // strategies must apply IDENTICAL filtering).
+
+    #[test]
+    fn test_regime_filter_blocks_when_adx_below_threshold() {
+        // ADX < threshold → false regardless of direction or confluence.
+        assert!(!regime_passes_filter(20.0, 30.0, 10.0, 25.0, true, false));
+        assert!(!regime_passes_filter(20.0, 30.0, 10.0, 25.0, false, false));
+        assert!(!regime_passes_filter(20.0, 30.0, 10.0, 25.0, true, true));
+    }
+
+    #[test]
+    fn test_regime_filter_passes_when_adx_above_threshold() {
+        // ADX >= threshold without confluence → true for both sides.
+        assert!(regime_passes_filter(30.0, 25.0, 25.0, 25.0, true, false));
+        assert!(regime_passes_filter(30.0, 25.0, 25.0, 25.0, false, false));
+        // Boundary: adx == threshold passes (only `<` blocks).
+        assert!(regime_passes_filter(25.0, 25.0, 25.0, 25.0, true, false));
+    }
+
+    #[test]
+    fn test_regime_filter_di_confluence_blocks_long_when_minus_dominant() {
+        // ADX is trending, but -DI dominates → long must be rejected;
+        // short would pass with the same inputs.
+        assert!(!regime_passes_filter(40.0, 10.0, 30.0, 25.0, true, true));
+        assert!(regime_passes_filter(40.0, 10.0, 30.0, 25.0, false, true));
+    }
+
+    #[test]
+    fn test_regime_filter_di_confluence_passes_long_when_plus_dominant() {
+        // Mirror: +DI dominant → long passes, short blocks.
+        assert!(regime_passes_filter(40.0, 30.0, 10.0, 25.0, true, true));
+        assert!(!regime_passes_filter(40.0, 30.0, 10.0, 25.0, false, true));
+    }
+
+    #[test]
+    fn test_regime_filter_di_equality_blocks_both_sides_when_confluence_on() {
+        // `+DI == -DI` → no strict dominance → both directions blocked
+        // under confluence. With confluence off the ADX gate alone
+        // decides, so the same inputs pass.
+        assert!(!regime_passes_filter(40.0, 20.0, 20.0, 25.0, true, true));
+        assert!(!regime_passes_filter(40.0, 20.0, 20.0, 25.0, false, true));
+        assert!(regime_passes_filter(40.0, 20.0, 20.0, 25.0, true, false));
+        assert!(regime_passes_filter(40.0, 20.0, 20.0, 25.0, false, false));
+    }
+
+    #[test]
+    fn test_regime_filter_nan_inputs_block() {
+        // Warm-up safety: any NaN input (ADX warm-up region, NaN-poisoned
+        // candle) must block the trade explicitly. NaN-aware short-circuit
+        // is intentional — a raw `<` comparison with NaN is always false
+        // and would let downstream `if use_di_confluence` logic run on
+        // garbage data.
+        assert!(!regime_passes_filter(f64::NAN, 30.0, 10.0, 25.0, true, false));
+        assert!(!regime_passes_filter(40.0, f64::NAN, 10.0, 25.0, true, true));
+        assert!(!regime_passes_filter(40.0, 30.0, f64::NAN, 25.0, false, true));
+    }
+
+    #[test]
+    fn test_regime_filter_threshold_zero_passes_when_finite() {
+        // threshold=0 makes the ADX gate a no-op for any non-negative
+        // ADX value — equivalent to "filter on, but accept any
+        // trendiness". DI-confluence still applies when requested.
+        assert!(regime_passes_filter(0.0, 5.0, 3.0, 0.0, true, false));
+        assert!(regime_passes_filter(0.0, 5.0, 3.0, 0.0, true, true));
+        assert!(!regime_passes_filter(0.0, 3.0, 5.0, 0.0, true, true));
     }
 
     #[test]
