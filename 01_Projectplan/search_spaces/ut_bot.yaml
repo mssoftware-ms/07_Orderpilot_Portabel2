@@ -1,0 +1,25 @@
+# UT Bot Alerts (verbesserte Variante) search space — Phase-3 Welle O1 MVP.
+#
+# Ranges derived from Welle-R3/R4 insights:
+# - ema_period 100..300 brackets the M5 default of 200.
+# - key_value 1..4 covers the ATR-multiplier band.
+# - smi_length 5..20 explores momentum-window sensitivity.
+# - adx_threshold 25..45 explores the Welle-R4 trend-strength filter.
+strategy_name: ut_bot
+parameters:
+  ema_period: { type: Int, min: 100, max: 300 }
+  key_value: { type: Float, min: 1.0, max: 4.0 }
+  atr_period: { type: Int, min: 1, max: 5 }
+  smi_length: { type: Int, min: 5, max: 20 }
+  smi_k_smoothing: { type: Int, min: 3, max: 7 }
+  smi_d_smoothing: { type: Int, min: 2, max: 5 }
+  swing_lookback_bars: { type: Int, min: 10, max: 30 }
+  tp_rr_ratio: { type: Float, min: 1.5, max: 4.0 }
+  risk_per_trade: { type: Float, min: 0.01, max: 0.03 }
+  adx_threshold: { type: Float, min: 25.0, max: 45.0 }
+  adx_use_di_confluence: { type: Bool }
+  smi_cross_above_zero: { type: Bool }
+fixed:
+  session_filter_enabled: 0.0   # 24/7 crypto, no session filter
+  adx_filter_enabled: 1.0       # always-on per Welle-R4
+  adx_period: 14.0

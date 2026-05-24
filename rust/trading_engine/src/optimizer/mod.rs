@@ -27,6 +27,10 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
+pub mod yaml;
+
+pub use yaml::{parse_search_space, parse_search_space_str};
+
 // ─── Parameter Spec ──────────────────────────────────────────────────────────
 
 /// Description of a single parameter's search range.

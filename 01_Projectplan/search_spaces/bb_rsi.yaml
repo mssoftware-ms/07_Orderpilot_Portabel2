@@ -1,0 +1,28 @@
+# BB+RSI search space — Phase-3 Welle O1 MVP.
+#
+# Ranges derived from Welle-R3/R4 insights:
+# - bb_period 100..300 brackets the Phase-2 default of 200 with margin.
+# - bb_stddev 0.2..1.0 covers the verbesserte-Variante spec (0.2 default).
+# - rsi_period 2..7 covers the fast-RSI band (3 default).
+# - adx_threshold 25..45 explores the Welle-R4 trend-strength filter.
+#
+# Fixed parameters: kept at their Phase-2 spec values (or Welle-R4 always-on
+# adx filter) because the sweep is about discovering new optima for the
+# swept axes — adding fixed ones to the search space would inflate trial
+# count without changing the answer.
+strategy_name: bb_rsi
+parameters:
+  bb_period: { type: Int, min: 100, max: 300 }
+  bb_stddev: { type: Float, min: 0.2, max: 1.0 }
+  rsi_period: { type: Int, min: 2, max: 7 }
+  rsi_oversold: { type: Float, min: 15.0, max: 30.0 }
+  rsi_overbought: { type: Float, min: 70.0, max: 85.0 }
+  swing_lookback_bars: { type: Int, min: 10, max: 30 }
+  tp_rr_ratio: { type: Float, min: 1.5, max: 4.0 }
+  risk_per_trade: { type: Float, min: 0.01, max: 0.03 }
+  adx_threshold: { type: Float, min: 25.0, max: 45.0 }
+  adx_use_di_confluence: { type: Bool }
+fixed:
+  bb_ma_type: 1.0           # EMA basis per Phase-2 spec (D-08)
+  adx_filter_enabled: 1.0   # always-on per Welle-R4
+  adx_period: 14.0

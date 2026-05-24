@@ -1,0 +1,21 @@
+# Ichimoku Cloud Retest search space — Phase-3 Welle O1 MVP.
+#
+# Ranges derived from Welle-R3/R4 insights:
+# - tenkan/kijun/senkou_b brackets the 9/26/52 classic spec.
+# - score_threshold 40..80 explores the confluence-score gate.
+# - adx_threshold 25..45 explores the Welle-R4 trend-strength filter.
+strategy_name: ichimoku
+parameters:
+  tenkan_period: { type: Int, min: 7, max: 13 }
+  kijun_period: { type: Int, min: 21, max: 40 }
+  senkou_b_period: { type: Int, min: 40, max: 70 }
+  shift: { type: Int, min: 20, max: 30 }
+  score_threshold: { type: Int, min: 40, max: 80 }
+  tp_rr_ratio: { type: Float, min: 1.5, max: 4.0 }
+  risk_per_trade: { type: Float, min: 0.01, max: 0.03 }
+  adx_threshold: { type: Float, min: 25.0, max: 45.0 }
+  adx_use_di_confluence: { type: Bool }
+fixed:
+  session_filter_enabled: 0.0   # 24/7 crypto, no session filter
+  adx_filter_enabled: 1.0       # always-on per Welle-R4
+  adx_period: 14.0
