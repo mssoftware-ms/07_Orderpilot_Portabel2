@@ -485,7 +485,7 @@ use crate::strategy::{
 };
 
 use super::bb_rsi::position_size_pct;
-use super::common::within_session;
+use super::common::{calc_adx, regime_passes_filter, within_session};
 
 /// Ichimoku Cloud Retest (Endstand-Variante) strategy add-in.
 ///
@@ -538,6 +538,15 @@ impl StrategyAddin for IchimokuStrategy {
         let session_start = ctx.param_or("session_start_hour", 9.0) as u32;
         let session_end = ctx.param_or("session_end_hour", 23.0) as u32;
         let tz_offset = ctx.param_or("tz_offset_hours", 1.0) as i32;
+        // Welle R2-4 ADX regime filter — defaults disabled so the
+        // pre-R2 Ichimoku path stays bit-exact (dart_rust_ichimoku_parity
+        // 4/4 green without touching the fixture). Same 4-knob shape
+        // as BB+RSI / UT-Bot.
+        let adx_filter_enabled = ctx.param_or("adx_filter_enabled", 0.0) >= 0.5;
+        let adx_threshold = ctx.param_or("adx_threshold", 25.0);
+        let adx_period = ctx.param_or("adx_period", 14.0) as usize;
+        let adx_use_di_confluence =
+            ctx.param_or("adx_use_di_confluence", 0.0) >= 0.5;
 
         // Warm-up — Spec §1.1: c4 ("Chikou über Cloud bei i-26") reads
         // span values at index i - 2*shift, which requires senkou_b at
@@ -668,7 +677,31 @@ impl StrategyAddin for IchimokuStrategy {
             score_threshold,
         );
 
+        // Welle R2-4 ADX regime snapshot — only computed when the filter
+        // is enabled. Reuses the same highs/lows/closes already captured
+        // for the Ichimoku indicator stack so no extra slice copy. When
+        // disabled the gate below is skipped — pre-R2 Ichimoku path
+        // bit-exact preserved.
+        let adx_snapshot = if adx_filter_enabled {
+            calc_adx(&highs, &lows, &closes, adx_period)
+                .map(|out| (out.adx[i], out.plus_di[i], out.minus_di[i]))
+        } else {
+            None
+        };
+
         if entry.long {
+            if let Some((adx_v, pdi, mdi)) = adx_snapshot {
+                if !regime_passes_filter(
+                    adx_v,
+                    pdi,
+                    mdi,
+                    adx_threshold,
+                    true,
+                    adx_use_di_confluence,
+                ) {
+                    return Some(Signal::NoAction);
+                }
+            }
             // Spec §4: long SL = min(Kijun, cloud_lower) — the
             // "großzügig" (further-from-entry) anchor wins.
             let sl = ichimoku_sl_long(kijun_i, current_cloud_lower);
@@ -686,6 +719,18 @@ impl StrategyAddin for IchimokuStrategy {
         }
 
         if entry.short {
+            if let Some((adx_v, pdi, mdi)) = adx_snapshot {
+                if !regime_passes_filter(
+                    adx_v,
+                    pdi,
+                    mdi,
+                    adx_threshold,
+                    false,
+                    adx_use_di_confluence,
+                ) {
+                    return Some(Signal::NoAction);
+                }
+            }
             // Spec §4 short SL = max(Kijun, cloud_upper) — mirror of
             // long; `max` selects the higher anchor.
             let sl = ichimoku_sl_short(kijun_i, current_cloud_upper);
@@ -818,6 +863,43 @@ pub fn ichimoku_manifest() -> AddinManifest {
                 1.0,
                 -12.0,
                 14.0,
+                1.0,
+            ),
+            // ── Welle R2-4 ADX regime filter ──────────────────────────
+            // All four default to "off" — fresh Ichimoku instance
+            // behaves byte-identical to pre-R2. Shape mirrors BB+RSI /
+            // UT-Bot bit-for-bit so the Welle-R3 acceptance backtest
+            // sweeps an IDENTICAL parameter axis across strategies.
+            ParameterSchema::new(
+                "adx_filter_enabled",
+                "ADX Regime Filter Enabled (0/1)",
+                0.0,
+                0.0,
+                1.0,
+                1.0,
+            ),
+            ParameterSchema::new(
+                "adx_threshold",
+                "ADX Threshold",
+                25.0,
+                0.0,
+                100.0,
+                1.0,
+            ),
+            ParameterSchema::new(
+                "adx_period",
+                "ADX Period",
+                14.0,
+                2.0,
+                100.0,
+                1.0,
+            ),
+            ParameterSchema::new(
+                "adx_use_di_confluence",
+                "ADX +DI/-DI Confluence (0/1)",
+                0.0,
+                0.0,
+                1.0,
                 1.0,
             ),
         ],
@@ -1588,6 +1670,13 @@ mod tests {
             ("session_start_hour", 9.0),
             ("session_end_hour", 23.0),
             ("tz_offset_hours", 1.0),
+            // Welle R2-4 ADX regime filter quartet — all defaults 0
+            // (disabled / threshold 25 / period 14 / no confluence)
+            // so a fresh manifest matches pre-R2 behaviour.
+            ("adx_filter_enabled", 0.0),
+            ("adx_threshold", 25.0),
+            ("adx_period", 14.0),
+            ("adx_use_di_confluence", 0.0),
         ];
         assert_eq!(
             m.parameters.len(),
@@ -2027,5 +2116,84 @@ mod tests {
                 );
             }
         }
+    }
+
+    // ── Welle R2-4 ADX regime filter wiring ─────────────────────────────
+    //
+    // Reuses the 130-bar pure-uptrend fixture from
+    // `test_strategy_uptrend_eventually_emits_long_entry` — known to
+    // trigger exactly one EnterLong past warm-up, so the wiring pins
+    // are unambiguous. Confluence semantics are pinned bit-for-bit on
+    // the helper by `addins::common::tests::test_regime_filter_*`.
+
+    fn count_ichimoku_entries(candles: &[Candle], params: HashMap<String, f64>) -> usize {
+        let mut strategy = IchimokuStrategy::new();
+        let mut ctx = Context::new(candles.to_vec(), Timeframe::H1, params);
+        let mut entries = 0usize;
+        for (i, candle) in candles.iter().enumerate() {
+            ctx.set_index(i);
+            if let Some(sig) = strategy.on_candle(&mut ctx, candle) {
+                if matches!(sig, Signal::EnterLong { .. } | Signal::EnterShort { .. }) {
+                    entries += 1;
+                }
+            }
+        }
+        entries
+    }
+
+    #[test]
+    fn test_adx_filter_disabled_does_not_change_signals_on_uptrend_fixture() {
+        let candles = uptrend_fixture(130);
+        let baseline = count_ichimoku_entries(&candles, HashMap::new());
+        let mut explicit = HashMap::new();
+        explicit.insert("adx_filter_enabled".to_string(), 0.0);
+        assert_eq!(
+            count_ichimoku_entries(&candles, explicit),
+            baseline,
+            "adx_filter_enabled=0.0 must equal default-disabled baseline",
+        );
+        assert!(
+            baseline >= 1,
+            "uptrend fixture must emit ≥ 1 Ichimoku entry",
+        );
+    }
+
+    #[test]
+    fn test_adx_filter_high_threshold_blocks_ichimoku_entries() {
+        // Pure-linear uptrend drives ADX close to (but not at) 100 by
+        // construction. Threshold 200 is outside the manifest schema
+        // range but `on_candle` runs the gate without `validate_params`,
+        // so it cleanly proves the parameter is consumed regardless of
+        // the ADX magnitude the fixture happens to produce.
+        let candles = uptrend_fixture(130);
+        let params = HashMap::from([
+            ("adx_filter_enabled".to_string(), 1.0),
+            ("adx_threshold".to_string(), 200.0),
+            ("adx_period".to_string(), 14.0),
+        ]);
+        assert_eq!(
+            count_ichimoku_entries(&candles, params),
+            0,
+            "adx_threshold above max possible ADX must block every entry",
+        );
+    }
+
+    #[test]
+    fn test_adx_filter_zero_threshold_matches_disabled_baseline_ichimoku() {
+        // adx_period=5 → warmup 8 bars ≪ Ichimoku 103-bar gate, so the
+        // ADX is always finite by the time the entry block runs.
+        let candles = uptrend_fixture(130);
+        let baseline = count_ichimoku_entries(&candles, HashMap::new());
+        let params = HashMap::from([
+            ("adx_filter_enabled".to_string(), 1.0),
+            ("adx_threshold".to_string(), 0.0),
+            ("adx_period".to_string(), 5.0),
+            ("adx_use_di_confluence".to_string(), 0.0),
+        ]);
+        assert_eq!(
+            count_ichimoku_entries(&candles, params),
+            baseline,
+            "threshold=0 + no confluence must equal disabled baseline",
+        );
     }
 }

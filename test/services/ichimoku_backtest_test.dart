@@ -167,5 +167,67 @@ void main() {
       expect(result.equityCurve, isEmpty);
       expect(result.metrics.candlesProcessed, equals(50));
     });
+
+    // ── Welle R2-4 ADX regime filter wiring ────────────────────────────
+    //
+    // Uses the same uptrend fixture as the smoke test (known to trigger
+    // ≥ 1 Ichimoku entry). DI-confluence semantics are pinned bit-for-
+    // bit on the helper by
+    // `test/services/strategy_common_test.dart::regimePassesFilter`.
+
+    test('ADX filter disabled = baseline on Ichimoku uptrend fixture', () {
+      final candles = uptrendFixture200();
+      final baseline = BacktestService.runIchimoku(
+        candles: candles, initialBalance: 10000.0, feeRate: 0.0006,
+      );
+      final explicit = BacktestService.runIchimoku(
+        candles: candles, initialBalance: 10000.0, feeRate: 0.0006,
+        params: const IchimokuParams(adxFilterEnabled: false),
+      );
+      expect(baseline.metrics.totalTrades, greaterThan(0));
+      expect(explicit.metrics.totalTrades,
+          equals(baseline.metrics.totalTrades));
+      expect(explicit.metrics.totalPnl, equals(baseline.metrics.totalPnl));
+    });
+
+    test('ADX filter high threshold blocks all Ichimoku entries', () {
+      // Pure-linear uptrend drives ADX close to 100 → threshold above
+      // the max-possible value is needed to guarantee blocking. 200 is
+      // outside the manifest schema range but the engine path runs the
+      // gate without validating, so it cleanly pins parameter consumption.
+      final candles = uptrendFixture200();
+      final blocked = BacktestService.runIchimoku(
+        candles: candles, initialBalance: 10000.0, feeRate: 0.0006,
+        params: const IchimokuParams(
+          adxFilterEnabled: true,
+          adxThreshold: 200.0,
+          adxPeriod: 14,
+        ),
+      );
+      expect(blocked.metrics.totalTrades, equals(0));
+    });
+
+    test('ADX filter threshold 0 + no confluence = baseline Ichimoku', () {
+      // adx_period=5 → warmup 8 bars ≪ 103-bar Ichimoku gate → ADX is
+      // always finite by the time the entry block runs → pure pass-
+      // through under threshold=0 + no confluence.
+      final candles = uptrendFixture200();
+      final baseline = BacktestService.runIchimoku(
+        candles: candles, initialBalance: 10000.0, feeRate: 0.0006,
+      );
+      final passthrough = BacktestService.runIchimoku(
+        candles: candles, initialBalance: 10000.0, feeRate: 0.0006,
+        params: const IchimokuParams(
+          adxFilterEnabled: true,
+          adxThreshold: 0.0,
+          adxPeriod: 5,
+          adxUseDiConfluence: false,
+        ),
+      );
+      expect(passthrough.metrics.totalTrades,
+          equals(baseline.metrics.totalTrades));
+      expect(passthrough.metrics.totalPnl,
+          equals(baseline.metrics.totalPnl));
+    });
   });
 }

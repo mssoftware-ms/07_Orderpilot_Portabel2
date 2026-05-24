@@ -249,6 +249,14 @@ class IchimokuParams {
   final int tzOffsetHours;
   final double slippageBps;
 
+  /// Welle R2-4 ADX regime filter quartet — see [BbRsiParams] for the
+  /// shared rationale. Defaults disabled so the pre-R2 Ichimoku path
+  /// is byte-identical (dart_rust_ichimoku_parity stays bit-exact green).
+  final bool adxFilterEnabled;
+  final double adxThreshold;
+  final int adxPeriod;
+  final bool adxUseDiConfluence;
+
   const IchimokuParams({
     this.tenkanPeriod = 9,
     this.kijunPeriod = 26,
@@ -263,6 +271,10 @@ class IchimokuParams {
     this.sessionEndHour = 23,
     this.tzOffsetHours = 1,
     this.slippageBps = 0.0,
+    this.adxFilterEnabled = false,
+    this.adxThreshold = 25.0,
+    this.adxPeriod = 14,
+    this.adxUseDiConfluence = false,
   });
 }
 
@@ -1284,6 +1296,23 @@ class BacktestService {
     final spanB = calcSenkouSpanB(highs, lows, params.senkouBPeriod);
     if (spanB == null) return _emptyIchimokuResult(n);
 
+    // ── Welle R2-4 ADX regime filter pre-compute ───────────────────────
+    // Pre-compute ADX/+DI/-DI series ONCE when the filter is enabled —
+    // mirrors the Rust on_candle full-recompute via the shared `calcAdx`
+    // helper. When disabled, no ADX work happens — pre-R2 Ichimoku path
+    // bit-exact preserved (dart_rust_ichimoku_parity stays green).
+    List<double>? adxSeries;
+    List<double>? plusDiSeries;
+    List<double>? minusDiSeries;
+    if (params.adxFilterEnabled) {
+      final adxOut = calcAdx(highs, lows, closes, params.adxPeriod);
+      if (adxOut != null) {
+        adxSeries = adxOut.adx;
+        plusDiSeries = adxOut.plusDi;
+        minusDiSeries = adxOut.minusDi;
+      }
+    }
+
     double balance = initialBalance;
     double peakEquity = initialBalance;
     double maxDrawdown = 0;
@@ -1465,7 +1494,28 @@ class BacktestService {
             final longC4 = close > chikouCloudUpper;
             final longC5 = score >= params.scoreThreshold;
 
-            if (longC1 && longC2 && longC3 && longC4 && longC5) {
+            // Welle R2-4 ADX regime gate (closure mirrors BB+RSI /
+            // UT-Bot shape). Returns true when disabled — pre-R2 hot
+            // path bit-exact.
+            bool regimeOk(bool isLong) {
+              if (!params.adxFilterEnabled) return true;
+              if (adxSeries == null ||
+                  plusDiSeries == null ||
+                  minusDiSeries == null) {
+                return false;
+              }
+              return regimePassesFilter(
+                adxSeries[i],
+                plusDiSeries[i],
+                minusDiSeries[i],
+                params.adxThreshold,
+                isLong,
+                params.adxUseDiConfluence,
+              );
+            }
+
+            if (longC1 && longC2 && longC3 && longC4 && longC5 &&
+                regimeOk(true)) {
               // Spec §4: SL = min(kijun, cloud_lower) "großzügig".
               final sl = kijunI < currentCloudLower
                   ? kijunI
@@ -1485,7 +1535,8 @@ class BacktestService {
               final shortC4 = close < chikouCloudLower;
               final shortC5 = score <= -params.scoreThreshold;
 
-              if (shortC1 && shortC2 && shortC3 && shortC4 && shortC5) {
+              if (shortC1 && shortC2 && shortC3 && shortC4 && shortC5 &&
+                  regimeOk(false)) {
                 final sl = kijunI > currentCloudUpper
                     ? kijunI
                     : currentCloudUpper;
