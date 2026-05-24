@@ -973,4 +973,168 @@ void main() {
       expect(pastSenkouAtIMinus26(spanA, 77)!.isNaN, isTrue);
     });
   });
+
+  group('Chikou-Span + ichimoku score (Phase-2 Welle I1)', () {
+    test('calcChikouSpan: returns verbatim copy of closes', () {
+      const closes = [100.0, 101.0, 99.5, 102.0];
+      final c = calcChikouSpan(closes);
+      expect(c.length, closes.length);
+      for (int i = 0; i < closes.length; i++) {
+        expect(c[i], closeTo(closes[i], 1e-12));
+      }
+    });
+
+    test('chikouConfirmsLong: null before shift', () {
+      final closes = List<double>.filled(100, 100.0);
+      expect(chikouConfirmsLong(closes, 0), isNull);
+      expect(chikouConfirmsLong(closes, 25), isNull);
+    });
+
+    test('chikouConfirmsLong: uses close[i] vs close[i - 26]', () {
+      final up = List<double>.generate(50, (i) => i.toDouble());
+      expect(chikouConfirmsLong(up, 26), isTrue);
+      expect(chikouConfirmsLong(up, 49), isTrue);
+
+      final down = List<double>.generate(50, (i) => 100.0 - i);
+      expect(chikouConfirmsLong(down, 26), isFalse);
+    });
+
+    test('chikouConfirmsShort: mirrors long', () {
+      final down = List<double>.generate(50, (i) => 100.0 - i);
+      expect(chikouConfirmsShort(down, 26), isTrue);
+
+      final up = List<double>.generate(50, (i) => i.toDouble());
+      expect(chikouConfirmsShort(up, 26), isFalse);
+    });
+
+    test('chikou helpers: null for i out of bounds', () {
+      final closes = List<double>.filled(30, 1.0);
+      expect(chikouConfirmsLong(closes, 30), isNull);
+      expect(chikouConfirmsShort(closes, 30), isNull);
+    });
+
+    // ── Score helper ───────────────────────────────────────────────────
+
+    /// Build a 60-bar fixture parallel to `score_fixture` in Rust.
+    /// At bar i = 50: tenkan[50], kijun[50], spanA[24], spanB[24],
+    /// close[50] are configurable; everything else is filler.
+    ({
+      List<double> tenkan,
+      List<double> kijun,
+      List<double> spanA,
+      List<double> spanB,
+      List<double> close,
+    }) scoreFixture(
+      double tenkan50,
+      double kijun50,
+      double pastSpanA24,
+      double pastSpanB24,
+      double close50,
+    ) {
+      const n = 60;
+      final tenkan = List<double>.filled(n, 0.0);
+      final kijun = List<double>.filled(n, 0.0);
+      final spanA = List<double>.filled(n, 0.0);
+      final spanB = List<double>.filled(n, 0.0);
+      final close = List<double>.filled(n, 100.0);
+      tenkan[50] = tenkan50;
+      kijun[50] = kijun50;
+      spanA[24] = pastSpanA24;
+      spanB[24] = pastSpanB24;
+      close[50] = close50;
+      return (
+        tenkan: tenkan,
+        kijun: kijun,
+        spanA: spanA,
+        spanB: spanB,
+        close: close,
+      );
+    }
+
+    test('score: full long confluence is +60', () {
+      final f = scoreFixture(110.0, 100.0, 105.0, 95.0, 120.0);
+      expect(
+        calcIchimokuScore(f.tenkan, f.kijun, f.spanA, f.spanB, f.close, 50),
+        60,
+      );
+    });
+
+    test('score: full short confluence is -60', () {
+      final f = scoreFixture(100.0, 110.0, 95.0, 105.0, 80.0);
+      expect(
+        calcIchimokuScore(f.tenkan, f.kijun, f.spanA, f.spanB, f.close, 50),
+        -60,
+      );
+    });
+
+    test('score: components are independent partial sums', () {
+      // Cross+ only
+      var f = scoreFixture(110.0, 100.0, 100.0, 100.0, 100.0);
+      expect(
+        calcIchimokuScore(f.tenkan, f.kijun, f.spanA, f.spanB, f.close, 50),
+        20,
+      );
+      // Color+ only (close == top → Distance = 0)
+      f = scoreFixture(100.0, 100.0, 110.0, 90.0, 110.0);
+      expect(
+        calcIchimokuScore(f.tenkan, f.kijun, f.spanA, f.spanB, f.close, 50),
+        20,
+      );
+      // Distance+ only
+      f = scoreFixture(100.0, 100.0, 100.0, 100.0, 120.0);
+      expect(
+        calcIchimokuScore(f.tenkan, f.kijun, f.spanA, f.spanB, f.close, 50),
+        20,
+      );
+    });
+
+    test('score: close inside cloud → Distance = 0', () {
+      // a > b → Color +20, close between bottom 95 and top 105 → Distance 0,
+      // tenkan == kijun → Cross 0. Total +20.
+      final f = scoreFixture(100.0, 100.0, 105.0, 95.0, 100.0);
+      expect(
+        calcIchimokuScore(f.tenkan, f.kijun, f.spanA, f.spanB, f.close, 50),
+        20,
+      );
+    });
+
+    test('score: NaN tenkan suppresses Cross only', () {
+      final f = scoreFixture(110.0, 100.0, 105.0, 95.0, 120.0);
+      f.tenkan[50] = double.nan;
+      expect(
+        calcIchimokuScore(f.tenkan, f.kijun, f.spanA, f.spanB, f.close, 50),
+        40,
+      );
+    });
+
+    test('score: warm-up (i < 26) only Cross can fire', () {
+      const n = 60;
+      final t = List<double>.filled(n, 0.0);
+      final k = List<double>.filled(n, 0.0);
+      final a = List<double>.filled(n, 1.0);
+      final b = List<double>.filled(n, 2.0);
+      final c = List<double>.filled(n, 100.0);
+      t[25] = 110.0;
+      k[25] = 100.0;
+      expect(calcIchimokuScore(t, k, a, b, c, 25), 20);
+    });
+
+    test('score: out of bounds index returns 0', () {
+      final f = scoreFixture(110.0, 100.0, 105.0, 95.0, 120.0);
+      expect(
+        calcIchimokuScore(f.tenkan, f.kijun, f.spanA, f.spanB, f.close, 200),
+        0,
+      );
+    });
+
+    test('score: ±60 threshold pinned with 3 × scoreWeight', () {
+      // Spec §12.2 entry threshold = ±60 = 3 × 20.
+      expect(3 * scoreWeight, 60);
+      final f = scoreFixture(110.0, 100.0, 105.0, 95.0, 120.0);
+      expect(
+        calcIchimokuScore(f.tenkan, f.kijun, f.spanA, f.spanB, f.close, 50),
+        3 * scoreWeight,
+      );
+    });
+  });
 }

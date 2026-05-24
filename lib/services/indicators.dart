@@ -522,3 +522,103 @@ double? pastSenkouAtIMinus26(List<double> span, int i) {
   if (j >= span.length) return null;
   return span[j];
 }
+
+// ─── Chikou-Span (lagging line, Phase-2 Welle I1) ──────────────────────────
+
+/// Compute the **Chikou-Span** (Lagging Line) series.
+///
+/// Definition (Spec §1.1): Chikou-Span is the close price, visualized
+/// shifted 26 bars backward. The visual displacement happens at
+/// chart-render time, NOT in storage — the helper returns a verbatim
+/// copy of [closes]. Locked bit-identical against `calc_chikou_span`
+/// in Rust.
+List<double> calcChikouSpan(List<double> closes) =>
+    List<double>.of(closes, growable: false);
+
+/// Chikou-Span confirmation for a **long** entry at bar [i].
+///
+/// Rule (Spec §1.1): the Chikou-Span — visually plotted at bar `i-26`
+/// with value `close[i]` — must be above the historical close at that
+/// bar, i.e. `close[i] > close[i - 26]`. Returns `null` if
+/// `i < cloudShiftBars` (no prior history) or `i >= closes.length`.
+bool? chikouConfirmsLong(List<double> closes, int i) {
+  if (i < cloudShiftBars || i >= closes.length) return null;
+  return closes[i] > closes[i - cloudShiftBars];
+}
+
+/// Chikou-Span confirmation for a **short** entry at bar [i]. Mirror
+/// of [chikouConfirmsLong]: requires `close[i] < close[i - 26]`.
+bool? chikouConfirmsShort(List<double> closes, int i) {
+  if (i < cloudShiftBars || i >= closes.length) return null;
+  return closes[i] < closes[i - cloudShiftBars];
+}
+
+// ─── Ichimoku confluence score (Spec §12.2) ────────────────────────────────
+
+/// Per-component weight used by [calcIchimokuScore]: three independent
+/// components × ±[scoreWeight] = a [-60, +60] range. Strategies refer
+/// to `3 * scoreWeight` instead of the literal `60`. Locked bit-identical
+/// against `SCORE_WEIGHT` in Rust.
+const int scoreWeight = 20;
+
+/// Compute the Ichimoku confluence score at bar [i].
+///
+/// Sum of three independent ±[scoreWeight] components (Spec §12.2):
+///
+/// 1. **Cross** — Tenkan vs Kijun at bar `i`.
+/// 2. **Color** — past-visible cloud (`spanA[i-26]` vs `spanB[i-26]`).
+/// 3. **Distance** — close vs visible-cloud band
+///    (`max(past_a, past_b)` / `min(past_a, past_b)`).
+///
+/// Total range `[-60, +60]`. Spec §12.2 entry threshold is `±60` (full
+/// confluence). Past-cloud reads use [pastSenkouAtIMinus26]. Inputs
+/// that are `NaN` or out of bounds suppress only the affected
+/// component (rest of the score still tallies). Locked bit-identical
+/// against `calc_ichimoku_score` in Rust.
+int calcIchimokuScore(
+  List<double> tenkan,
+  List<double> kijun,
+  List<double> spanA,
+  List<double> spanB,
+  List<double> close,
+  int i,
+) {
+  if (i >= tenkan.length || i >= kijun.length || i >= close.length) {
+    return 0;
+  }
+
+  int score = 0;
+
+  final t = tenkan[i];
+  final k = kijun[i];
+  if (!t.isNaN && !k.isNaN) {
+    if (t > k) {
+      score += scoreWeight;
+    } else if (t < k) {
+      score -= scoreWeight;
+    }
+  }
+
+  final pastA = pastSenkouAtIMinus26(spanA, i);
+  final pastB = pastSenkouAtIMinus26(spanB, i);
+  if (pastA != null && pastB != null && !pastA.isNaN && !pastB.isNaN) {
+    if (pastA > pastB) {
+      score += scoreWeight;
+    } else if (pastA < pastB) {
+      score -= scoreWeight;
+    }
+
+    final c = close[i];
+    if (!c.isNaN) {
+      final top = pastA > pastB ? pastA : pastB;
+      final bottom = pastA < pastB ? pastA : pastB;
+      if (c > top) {
+        score += scoreWeight;
+      } else if (c < bottom) {
+        score -= scoreWeight;
+      }
+    }
+  }
+
+  return score;
+}

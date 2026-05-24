@@ -257,6 +257,149 @@ pub fn past_senkou_at_i_minus_26(span: &[f64], i: usize) -> Option<f64> {
     }
 }
 
+// ─── Chikou-Span (lagging line) ────────────────────────────────────────────
+
+/// Compute the **Chikou-Span** (Lagging Line) series.
+///
+/// Definition (Spec §1.1): Chikou-Span is the close price, visualized
+/// **shifted 26 bars backward**. As with the Senkou-Spans, the visual
+/// displacement happens at chart-render time, NOT in storage. The
+/// helper therefore returns a verbatim copy of `closes` and the
+/// strategy reads through the intent-explicit anchor helpers below.
+///
+/// Returning a `Vec<f64>` (rather than `&closes`) gives strategy code
+/// an owned series it can pass through state snapshots / FFI bridges
+/// without worrying about lifetimes.
+pub fn calc_chikou_span(closes: &[f64]) -> Vec<f64> {
+    closes.to_vec()
+}
+
+/// Chikou-Span confirmation for a **long** entry at bar `i`.
+///
+/// Rule (Spec §1.1, classical Ichimoku): the Chikou-Span — visually
+/// plotted at bar `i - 26` with value `close[i]` — must be **above**
+/// the actual close at that historical bar, i.e. `close[i] > close[i - 26]`.
+/// Equivalent to "current close exceeds the close 26 bars ago".
+///
+/// Returns `None` if `i < CLOUD_SHIFT_BARS` (no prior history) or
+/// `i >= closes.len()` (defensive against out-of-bounds reads).
+/// Returns `Some(true/false)` otherwise — no NaN propagation needed
+/// because a strict `>` comparison with NaN is always false in IEEE.
+pub fn chikou_confirms_long(closes: &[f64], i: usize) -> Option<bool> {
+    if i < CLOUD_SHIFT_BARS || i >= closes.len() {
+        return None;
+    }
+    Some(closes[i] > closes[i - CLOUD_SHIFT_BARS])
+}
+
+/// Chikou-Span confirmation for a **short** entry at bar `i`.
+///
+/// Mirror of [`chikou_confirms_long`] — the Chikou-Span plotted at
+/// bar `i - 26` must be **below** the historical close, i.e.
+/// `close[i] < close[i - 26]`. Returns `None` if the comparison
+/// isn't available yet.
+pub fn chikou_confirms_short(closes: &[f64], i: usize) -> Option<bool> {
+    if i < CLOUD_SHIFT_BARS || i >= closes.len() {
+        return None;
+    }
+    Some(closes[i] < closes[i - CLOUD_SHIFT_BARS])
+}
+
+// ─── Ichimoku confluence score (Spec §12.2 default convention) ─────────────
+
+/// Per-component weight used by [`calc_ichimoku_score`] — three
+/// independent components × ±[`SCORE_WEIGHT`] = a [-60, +60] range.
+/// Exposed as a `pub const` so strategy thresholds (Spec §12.2 default
+/// = ±60 = full confluence) can refer to `3 * SCORE_WEIGHT` instead of
+/// embedding the magic number.
+pub const SCORE_WEIGHT: i32 = 20;
+
+/// Compute the Ichimoku confluence score at bar `i`.
+///
+/// Score is the sum of three independent ±[`SCORE_WEIGHT`] components
+/// (Spec §12.2 default convention):
+///
+/// 1. **Cross** (Tenkan vs Kijun at bar `i`):
+///    - `+SCORE_WEIGHT` if `tenkan[i] > kijun[i]`
+///    - `-SCORE_WEIGHT` if `tenkan[i] < kijun[i]`
+///    - `0` if equal or either is `NaN`.
+///
+/// 2. **Color** (currently-visible cloud at bar `i`):
+///    - `+SCORE_WEIGHT` if `past_span_a > past_span_b` (green cloud)
+///    - `-SCORE_WEIGHT` if `past_span_a < past_span_b` (red cloud)
+///    - `0` if equal, either NaN, or the past-shifted reads are
+///      unavailable (warm-up region, `i < 26`).
+///
+/// 3. **Distance** (close vs the visible cloud band):
+///    - `+SCORE_WEIGHT` if `close[i] > max(past_a, past_b)`
+///    - `-SCORE_WEIGHT` if `close[i] < min(past_a, past_b)`
+///    - `0` if the close is inside the cloud, any input is `NaN`, or
+///      the past-shifted cloud reads are unavailable.
+///
+/// Total range: `[-60, +60]`. The canonical Spec §12.2 entry threshold
+/// is `±60` ("all three components confluent in the same direction").
+///
+/// "Past cloud" reads go through [`past_senkou_at_i_minus_26`] — the
+/// cloud actually visible at bar `i`, computed 26 bars ago — which
+/// makes the score consistent with what a chart trader would see.
+pub fn calc_ichimoku_score(
+    tenkan: &[f64],
+    kijun: &[f64],
+    span_a: &[f64],
+    span_b: &[f64],
+    close: &[f64],
+    i: usize,
+) -> i32 {
+    // Defensive bounds check — out-of-range `i` yields a 0 score
+    // (interpretable as "no confluence detected at an invalid bar").
+    if i >= tenkan.len() || i >= kijun.len() || i >= close.len() {
+        return 0;
+    }
+
+    let mut score: i32 = 0;
+
+    // Component 1: Tenkan vs Kijun cross.
+    let t = tenkan[i];
+    let k = kijun[i];
+    if !t.is_nan() && !k.is_nan() {
+        if t > k {
+            score += SCORE_WEIGHT;
+        } else if t < k {
+            score -= SCORE_WEIGHT;
+        }
+    }
+
+    // Past-shifted cloud reads — both component 2 and 3 use the same
+    // pair of values, so compute once.
+    let past_a = past_senkou_at_i_minus_26(span_a, i);
+    let past_b = past_senkou_at_i_minus_26(span_b, i);
+
+    if let (Some(a), Some(b)) = (past_a, past_b) {
+        if !a.is_nan() && !b.is_nan() {
+            // Component 2: cloud color.
+            if a > b {
+                score += SCORE_WEIGHT;
+            } else if a < b {
+                score -= SCORE_WEIGHT;
+            }
+
+            // Component 3: close vs cloud band.
+            let c = close[i];
+            if !c.is_nan() {
+                let top = a.max(b);
+                let bottom = a.min(b);
+                if c > top {
+                    score += SCORE_WEIGHT;
+                } else if c < bottom {
+                    score -= SCORE_WEIGHT;
+                }
+            }
+        }
+    }
+
+    score
+}
+
 // ─── Tests ──────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -744,6 +887,194 @@ mod tests {
         // The NaN region only kicks in at i = cutoff + 26 = 76 onward.
         assert!(past_senkou_at_i_minus_26(&span_a, 75).unwrap().is_finite());
         assert!(past_senkou_at_i_minus_26(&span_a, 77).unwrap().is_nan());
+    }
+
+    // ── Chikou-Span helpers ─────────────────────────────────────────────
+
+    #[test]
+    fn test_chikou_span_returns_verbatim_copy_of_closes() {
+        let closes = [100.0, 101.0, 99.5, 102.0];
+        let c = calc_chikou_span(&closes);
+        assert_eq!(c.len(), closes.len());
+        for (i, &v) in c.iter().enumerate() {
+            assert!((v - closes[i]).abs() < 1e-12);
+        }
+    }
+
+    #[test]
+    fn test_chikou_confirms_long_none_before_shift() {
+        let closes = vec![100.0; 100];
+        assert!(chikou_confirms_long(&closes, 0).is_none());
+        assert!(chikou_confirms_long(&closes, 25).is_none());
+    }
+
+    #[test]
+    fn test_chikou_confirms_long_uses_close_at_i_vs_i_minus_26() {
+        // Linear ramp: close[i] = i. Then close[26] = 26 > close[0] = 0
+        // → confirms_long = true. close[26] < close[26+1] in flat
+        // counter-example: build inverted ramp.
+        let closes_up: Vec<f64> = (0..50).map(|i| i as f64).collect();
+        assert_eq!(chikou_confirms_long(&closes_up, 26), Some(true));
+        assert_eq!(chikou_confirms_long(&closes_up, 49), Some(true));
+
+        let closes_down: Vec<f64> =
+            (0..50).map(|i| 100.0 - i as f64).collect();
+        assert_eq!(chikou_confirms_long(&closes_down, 26), Some(false));
+    }
+
+    #[test]
+    fn test_chikou_confirms_short_mirrors_long() {
+        let closes_down: Vec<f64> =
+            (0..50).map(|i| 100.0 - i as f64).collect();
+        // close[26] = 74 < close[0] = 100 → short confirmed
+        assert_eq!(chikou_confirms_short(&closes_down, 26), Some(true));
+
+        let closes_up: Vec<f64> = (0..50).map(|i| i as f64).collect();
+        assert_eq!(chikou_confirms_short(&closes_up, 26), Some(false));
+    }
+
+    #[test]
+    fn test_chikou_helpers_none_for_i_out_of_bounds() {
+        let closes = vec![1.0; 30];
+        assert!(chikou_confirms_long(&closes, 30).is_none());
+        assert!(chikou_confirms_short(&closes, 30).is_none());
+    }
+
+    // ── Ichimoku score helper ───────────────────────────────────────────
+
+    /// Build a 60-bar fixture where, at bar `i = 50`:
+    /// - tenkan[50] vs kijun[50] is configurable
+    /// - past_span_a[24] vs past_span_b[24] is configurable (since
+    ///   past_senkou_at_i_minus_26(_, 50) reads index 50 - 26 = 24)
+    /// - close[50] is configurable
+    #[allow(clippy::type_complexity)] // 5-tuple of Vec<f64> is the clearest shape; flattening to a struct hurts test ergonomics.
+    fn score_fixture(
+        tenkan_50: f64,
+        kijun_50: f64,
+        past_span_a_24: f64,
+        past_span_b_24: f64,
+        close_50: f64,
+    ) -> (Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>) {
+        let n = 60;
+        let mut tenkan = vec![0.0; n];
+        let mut kijun = vec![0.0; n];
+        let mut span_a = vec![0.0; n];
+        let mut span_b = vec![0.0; n];
+        let mut close = vec![100.0; n];
+        tenkan[50] = tenkan_50;
+        kijun[50] = kijun_50;
+        span_a[24] = past_span_a_24;
+        span_b[24] = past_span_b_24;
+        close[50] = close_50;
+        (tenkan, kijun, span_a, span_b, close)
+    }
+
+    #[test]
+    fn test_score_full_long_confluence_is_plus_60() {
+        // Cross+, Color+, Distance+ → +60 (Spec §12.2 long threshold).
+        let (t, k, a, b, c) = score_fixture(
+            /* tenkan */ 110.0,
+            /* kijun  */ 100.0,  // tenkan > kijun → +20
+            /* span_a (past) */ 105.0,
+            /* span_b (past) */ 95.0,   // a > b → +20
+            /* close */ 120.0,           // > top(105) → +20
+        );
+        assert_eq!(calc_ichimoku_score(&t, &k, &a, &b, &c, 50), 60);
+    }
+
+    #[test]
+    fn test_score_full_short_confluence_is_minus_60() {
+        // Cross-, Color-, Distance- → -60.
+        let (t, k, a, b, c) = score_fixture(
+            100.0, 110.0,  // tenkan < kijun → -20
+            95.0, 105.0,   // a < b → -20
+            80.0,          // < bottom(95) → -20
+        );
+        assert_eq!(calc_ichimoku_score(&t, &k, &a, &b, &c, 50), -60);
+    }
+
+    #[test]
+    fn test_score_components_independent_partial_sums() {
+        // Cross+ only (Color = 0 because a == b, Distance = 0 because
+        // close inside cloud).
+        let (t, k, a, b, c) = score_fixture(110.0, 100.0, 100.0, 100.0, 100.0);
+        assert_eq!(calc_ichimoku_score(&t, &k, &a, &b, &c, 50), 20);
+
+        // Color+ only: tenkan == kijun (Cross = 0); close == cloud_top
+        // (Distance = 0 because strict >).
+        let (t, k, a, b, c) = score_fixture(100.0, 100.0, 110.0, 90.0, 110.0);
+        assert_eq!(calc_ichimoku_score(&t, &k, &a, &b, &c, 50), 20);
+
+        // Distance+ only: equal tenkan/kijun + equal spans + close above
+        // the (degenerate-equal) cloud.
+        let (t, k, a, b, c) = score_fixture(100.0, 100.0, 100.0, 100.0, 120.0);
+        assert_eq!(calc_ichimoku_score(&t, &k, &a, &b, &c, 50), 20);
+    }
+
+    #[test]
+    fn test_score_close_inside_cloud_distance_is_zero() {
+        // close strictly between bottom(95) and top(105) → Distance = 0.
+        // Tenkan == Kijun → Cross = 0. a > b → Color = +20.
+        // Total = +20 only.
+        let (t, k, a, b, c) = score_fixture(100.0, 100.0, 105.0, 95.0, 100.0);
+        assert_eq!(calc_ichimoku_score(&t, &k, &a, &b, &c, 50), 20);
+    }
+
+    #[test]
+    fn test_score_nan_inputs_suppress_individual_components() {
+        // NaN tenkan → Cross = 0; rest works.
+        let (mut t, mut k, a, b, c) = score_fixture(110.0, 100.0, 105.0, 95.0, 120.0);
+        t[50] = f64::NAN;
+        // Color (+20) + Distance (+20) = +40, Cross suppressed.
+        assert_eq!(calc_ichimoku_score(&t, &k, &a, &b, &c, 50), 40);
+
+        // Restore tenkan, NaN-ify kijun → Cross = 0 again.
+        t[50] = 110.0;
+        k[50] = f64::NAN;
+        assert_eq!(calc_ichimoku_score(&t, &k, &a, &b, &c, 50), 40);
+    }
+
+    #[test]
+    fn test_score_warmup_below_cloud_shift_only_cross_fires() {
+        // At i = 25, past_senkou_at_i_minus_26 returns None → Color
+        // and Distance both suppressed. Only Cross can contribute.
+        let n = 60;
+        let mut t = vec![0.0; n];
+        let mut k = vec![0.0; n];
+        let a = vec![1.0; n];  // past reads → None for i < 26
+        let b = vec![2.0; n];
+        let c = vec![100.0; n];
+        t[25] = 110.0;
+        k[25] = 100.0;
+        // Cross+ alone → +20.
+        assert_eq!(calc_ichimoku_score(&t, &k, &a, &b, &c, 25), 20);
+    }
+
+    #[test]
+    fn test_score_out_of_bounds_index_returns_zero() {
+        let (t, k, a, b, c) = score_fixture(110.0, 100.0, 105.0, 95.0, 120.0);
+        // i past close length → defensive return 0.
+        assert_eq!(calc_ichimoku_score(&t, &k, &a, &b, &c, 200), 0);
+    }
+
+    #[test]
+    fn test_score_threshold_boundary_plus_60_means_full_long_confluence() {
+        // Pin the canonical ±60 boundary used by Spec §12.2: a Long
+        // entry triggers when the score is exactly +60 (= 3 ×
+        // SCORE_WEIGHT). Anything below — even +59 — must not trigger.
+        // Construct the fixture so all three components fire and verify
+        // the exact value, then verify the boundary semantics by
+        // weakening one component to confirm the drop to +40.
+        let (t, k, a, b, c) = score_fixture(110.0, 100.0, 105.0, 95.0, 120.0);
+        assert_eq!(calc_ichimoku_score(&t, &k, &a, &b, &c, 50), 60);
+        // 3 * SCORE_WEIGHT = ±60 — pin the relationship so a future
+        // bump to SCORE_WEIGHT propagates through this assertion.
+        assert_eq!(3 * SCORE_WEIGHT, 60);
+
+        // Weaken the Distance component (close inside the cloud) → +40.
+        let (t, k, a, b, mut c2) = score_fixture(110.0, 100.0, 105.0, 95.0, 100.0);
+        c2[50] = 100.0;
+        assert_eq!(calc_ichimoku_score(&t, &k, &a, &b, &c2, 50), 40);
     }
 
     #[test]
