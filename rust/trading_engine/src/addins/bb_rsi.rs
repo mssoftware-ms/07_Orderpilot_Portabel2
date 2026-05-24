@@ -28,6 +28,8 @@ use crate::strategy::{
     AddinManifest, Context, InputSpec, ParameterSchema, Signal, StrategyAddin, StrategyCategory,
 };
 
+use super::common::{calc_adx, regime_passes_filter};
+
 // ─── Indicator helpers (pure functions) ─────────────────────────────────────
 
 /// Compute the Simple Moving Average of a slice.
@@ -298,6 +300,15 @@ impl StrategyAddin for BbRsiStrategy {
         let swing_lookback = ctx.param_or("swing_lookback_bars", 20.0) as usize;
         let tp_rr_ratio = ctx.param_or("tp_rr_ratio", 3.0);
         let risk_per_trade = ctx.param_or("risk_per_trade", 0.02);
+        // Welle R2-2 ADX regime filter. Default disabled → no ADX
+        // compute, no behaviour change vs pre-R2. Threshold + period +
+        // DI-confluence toggle mirror the BB+RSI / UT-Bot / Ichimoku
+        // contract from Welle R2-1.
+        let adx_filter_enabled = ctx.param_or("adx_filter_enabled", 0.0) >= 0.5;
+        let adx_threshold = ctx.param_or("adx_threshold", 25.0);
+        let adx_period = ctx.param_or("adx_period", 14.0) as usize;
+        let adx_use_di_confluence =
+            ctx.param_or("adx_use_di_confluence", 0.0) >= 0.5;
 
         // F-09 parity gate: match Dart `startIdx = max(bbPeriod, rsiPeriod + 1)`.
         // Without this, Rust emits signals one bar earlier than Dart at the
@@ -359,6 +370,25 @@ impl StrategyAddin for BbRsiStrategy {
         let swing_low_price = swing_low(&pre_lows)?;
         let swing_high_price = swing_high(&pre_highs)?;
 
+        // ── Welle R2-2 ADX regime snapshot ──────────────────────────────
+        // Only computed when the filter is enabled — keeps the disabled
+        // path byte-identical to pre-R2 BB+RSI. When enabled, the helper
+        // is called once per bar against the full bar-history up to and
+        // including `i` (mirrors the FFI per-bar full-recompute pattern
+        // used by `calc_atr` / `calc_smi` in the other strategies). DI
+        // confluence is passed through unchanged from the manifest
+        // parameter.
+        let adx_snapshot = if adx_filter_enabled {
+            let i = ctx.index();
+            let highs_full = ctx.highs(i + 1);
+            let lows_full = ctx.lows(i + 1);
+            let closes_full = ctx.closes(i + 1);
+            calc_adx(&highs_full, &lows_full, &closes_full, adx_period)
+                .map(|out| (out.adx[i], out.plus_di[i], out.minus_di[i]))
+        } else {
+            None
+        };
+
         // ── Entry logic ─────────────────────────────────────────────────
         // Diff D-03/D-04 + Diff D-05 + Diff D-06 + Diff D-07: trend-follow
         // + RSI cross-back through the oversold/overbought level +
@@ -378,6 +408,13 @@ impl StrategyAddin for BbRsiStrategy {
         // swing_high ≤ signal-bar price for a short) are suppressed — those
         // SLs would be on the wrong side of entry and trip the position
         // immediately at fill.
+        //
+        // Welle R2-2: once the entry confluence holds, the ADX regime
+        // gate (when enabled) has the last word — the gate evaluates
+        // adx/+DI/-DI for the same bar against the configured threshold
+        // and (optionally) the DI dominance rule. When the filter is
+        // disabled `adx_snapshot` is `None` and the gate is skipped, so
+        // the pre-R2 code path is bit-exact preserved.
         if !ctx.in_position {
             if let Some(prev) = prev_rsi {
                 if price > bb.upper
@@ -385,6 +422,18 @@ impl StrategyAddin for BbRsiStrategy {
                     && rsi >= rsi_oversold
                     && swing_low_price < price
                 {
+                    if let Some((adx_v, pdi, mdi)) = adx_snapshot {
+                        if !regime_passes_filter(
+                            adx_v,
+                            pdi,
+                            mdi,
+                            adx_threshold,
+                            true,
+                            adx_use_di_confluence,
+                        ) {
+                            return Some(Signal::NoAction);
+                        }
+                    }
                     let sl_distance = price - swing_low_price;
                     let tp_price = price + tp_rr_ratio * sl_distance;
                     let size_pct = position_size_pct(price, sl_distance, risk_per_trade);
@@ -401,6 +450,18 @@ impl StrategyAddin for BbRsiStrategy {
                     && rsi <= rsi_overbought
                     && swing_high_price > price
                 {
+                    if let Some((adx_v, pdi, mdi)) = adx_snapshot {
+                        if !regime_passes_filter(
+                            adx_v,
+                            pdi,
+                            mdi,
+                            adx_threshold,
+                            false,
+                            adx_use_di_confluence,
+                        ) {
+                            return Some(Signal::NoAction);
+                        }
+                    }
                     let sl_distance = swing_high_price - price;
                     let tp_price = price - tp_rr_ratio * sl_distance;
                     let size_pct = position_size_pct(price, sl_distance, risk_per_trade);
@@ -490,6 +551,51 @@ pub fn bb_rsi_manifest() -> AddinManifest {
                 0.001,
                 1.0,
                 0.001,
+            ),
+            // ── Welle R2-2 ADX regime filter ──────────────────────────
+            // All four default to "off" so a fresh BB+RSI instance
+            // behaves byte-identical to the pre-R2 implementation. The
+            // four-knob shape (enabled / threshold / period / DI
+            // confluence) is shared bit-for-bit with the UT-Bot and
+            // Ichimoku manifests so the Welle-R3 acceptance backtest
+            // can sweep an IDENTICAL parameter axis across strategies.
+            ParameterSchema::new(
+                "adx_filter_enabled",
+                "ADX Regime Filter Enabled (0/1)",
+                0.0,
+                0.0,
+                1.0,
+                1.0,
+            ),
+            // Wilder's textbook chop/trend boundary is 25; 20–30 is the
+            // commonly cited band. Range allows the Welle-R3 sweep to
+            // explore 15..40 without re-touching the manifest.
+            ParameterSchema::new(
+                "adx_threshold",
+                "ADX Threshold",
+                25.0,
+                0.0,
+                100.0,
+                1.0,
+            ),
+            // Wilder default = 14. Range bracketed to keep the helper
+            // tractable on 1h fixtures while leaving headroom for
+            // higher-TF experiments.
+            ParameterSchema::new(
+                "adx_period",
+                "ADX Period",
+                14.0,
+                2.0,
+                100.0,
+                1.0,
+            ),
+            ParameterSchema::new(
+                "adx_use_di_confluence",
+                "ADX +DI/-DI Confluence (0/1)",
+                0.0,
+                0.0,
+                1.0,
+                1.0,
             ),
         ],
     }
@@ -840,8 +946,10 @@ mod tests {
         assert_eq!(manifest.id, "bb_rsi_v1");
         // bb_period, bb_stddev, bb_ma_type, rsi_period, rsi_oversold,
         // rsi_overbought, swing_lookback_bars (D-07), tp_rr_ratio (D-06),
-        // risk_per_trade (D-09)
-        assert_eq!(manifest.parameters.len(), 9);
+        // risk_per_trade (D-09) + R2-2 ADX filter quartet
+        // (adx_filter_enabled, adx_threshold, adx_period,
+        // adx_use_di_confluence) = 13.
+        assert_eq!(manifest.parameters.len(), 13);
         assert_eq!(manifest.category, StrategyCategory::MeanReversion);
         assert!(manifest
             .parameters
@@ -1246,6 +1354,115 @@ mod tests {
             got
         );
     }
+
+    // ── Welle R2-2: ADX regime filter wiring ────────────────────────────
+    //
+    // The synthetic 20-flat + 14-decline + surge / -ascent + crash
+    // fixtures from the entry-direction tests reach a strong directional
+    // ADX once the trend leg unfolds (≈30+ by the signal bar with
+    // adx_period=14), so they exercise both the "filter blocks" and
+    // "filter passes" paths cleanly.
+
+    fn build_long_fixture() -> Vec<Candle> {
+        // Same shape as `test_strategy_long_entry_signal`: 20 flat, 14
+        // declining bars, then a surge that triggers the BB+RSI cross.
+        let mut closes = vec![100.0; 20];
+        for i in 0..14 {
+            closes.push(100.0 - (i as f64 + 1.0) * 2.0);
+        }
+        closes.push(120.0);
+        closes
+            .iter()
+            .enumerate()
+            .map(|(i, &c)| Candle::new(i as i64 * 60000, c, c + 0.5, c - 0.5, c, 100.0))
+            .collect()
+    }
+
+    fn count_entries(candles: &[Candle], params: HashMap<String, f64>) -> usize {
+        let mut strategy = BbRsiStrategy::new();
+        let mut ctx = Context::new(candles.to_vec(), Timeframe::M1, params);
+        let mut entries = 0usize;
+        for (i, candle) in candles.iter().enumerate() {
+            ctx.set_index(i);
+            if let Some(sig) = strategy.on_candle(&mut ctx, candle) {
+                if matches!(sig, Signal::EnterLong { .. } | Signal::EnterShort { .. }) {
+                    entries += 1;
+                }
+            }
+        }
+        entries
+    }
+
+    #[test]
+    fn test_adx_filter_disabled_does_not_change_signals_on_long_fixture() {
+        // Default `phase1_pinned_params` keeps adx_filter_enabled
+        // absent (param map empty for that key → `param_or(_, 0.0)`
+        // takes the disabled branch). Explicitly setting the flag to
+        // 0.0 must produce the same entry count — pins that the
+        // disabled gate skips all ADX code paths.
+        let candles = build_long_fixture();
+        let baseline = count_entries(&candles, phase1_pinned_params());
+        let mut with_flag = phase1_pinned_params();
+        with_flag.insert("adx_filter_enabled".to_string(), 0.0);
+        assert_eq!(
+            count_entries(&candles, with_flag),
+            baseline,
+            "adx_filter_enabled=0.0 must be identical to default",
+        );
+        // Sanity: the fixture really does emit at least one signal —
+        // otherwise the equality above would be a tautology.
+        assert!(baseline >= 1, "fixture must emit ≥ 1 entry");
+    }
+
+    #[test]
+    fn test_adx_filter_high_threshold_blocks_entries() {
+        // With the filter on and the threshold pegged at 100 the gate
+        // can never pass (ADX is bounded by 100 by construction; only
+        // a perfectly monotone trend approaches the cap, and even then
+        // the smoothing has to settle there). The entry block must
+        // emit 0 EnterLong/EnterShort.
+        let candles = build_long_fixture();
+        let mut params = phase1_pinned_params();
+        params.insert("adx_filter_enabled".to_string(), 1.0);
+        params.insert("adx_threshold".to_string(), 100.0);
+        params.insert("adx_period".to_string(), 14.0);
+        assert_eq!(
+            count_entries(&candles, params),
+            0,
+            "adx_threshold=100 must block every entry",
+        );
+    }
+
+    #[test]
+    fn test_adx_filter_zero_threshold_matches_disabled_count_on_long_fixture() {
+        // adx_threshold=0 collapses the ADX gate to a NaN-only check.
+        // The 14-bar decline + 14-bar warm-up on adx_period=14 means
+        // the first valid ADX seed lands at bar 26 = bar 27 in the
+        // 35-bar fixture (well before the signal bar at 34). So the
+        // entry count under filter=on/threshold=0 must equal the
+        // disabled-baseline — pins that the gate is a true pass-
+        // through when threshold=0 (within DI-confluence rules).
+        let candles = build_long_fixture();
+        let baseline = count_entries(&candles, phase1_pinned_params());
+
+        let mut params = phase1_pinned_params();
+        params.insert("adx_filter_enabled".to_string(), 1.0);
+        params.insert("adx_threshold".to_string(), 0.0);
+        params.insert("adx_period".to_string(), 14.0);
+        params.insert("adx_use_di_confluence".to_string(), 0.0);
+        assert_eq!(
+            count_entries(&candles, params),
+            baseline,
+            "adx_threshold=0 + no DI confluence must equal disabled baseline",
+        );
+    }
+
+    // Note: DI-confluence semantics are pinned bit-for-bit on the helper
+    // itself by `addins::common::tests::test_regime_filter_di_confluence_*`
+    // (5 tests covering pass/block on both sides, equality, NaN). Those
+    // would catch a logic flip; the BB+RSI tests above pin the wiring
+    // (enabled/disabled, threshold range), which is the part the helper
+    // tests cannot see.
 
     /// Example: instantiate and run the strategy on synthetic candle data.
     #[test]

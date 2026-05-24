@@ -118,6 +118,24 @@ class BbRsiParams {
   /// BacktestConfig.slippage_bps for Dart↔Rust parity.
   final double slippageBps;
 
+  /// Welle R2-2 ADX regime filter quartet. All four default to "off" so
+  /// a fresh [BbRsiParams] behaves byte-identical to the pre-R2 contract
+  /// — the Phase-1 reference backtest and the BB+RSI Dart↔Rust parity
+  /// test stay green without touching their fixtures.
+  ///
+  /// When [adxFilterEnabled] is `true` the engine computes
+  /// `(adx, +DI, -DI)` once per bar from the bar history up to and
+  /// including the signal bar and routes the entry through
+  /// `regimePassesFilter` (see `strategy_common.dart`) before queuing
+  /// a pending order. Field shape mirrors `bb_rsi_manifest()` /
+  /// `ut_bot_manifest()` / `ichimoku_manifest()` bit-for-bit so the
+  /// Welle-R3 acceptance backtest can sweep an IDENTICAL parameter
+  /// axis across strategies.
+  final bool adxFilterEnabled;
+  final double adxThreshold;
+  final int adxPeriod;
+  final bool adxUseDiConfluence;
+
   /// Defaults match the video-spec "verbesserte Variante" — see
   /// `01_Projectplan/specs/bb_rsi_spec.md` §1, Diff D-01 + D-02
   /// (BB(200, EMA, 0.2σ) + RSI(3, 20/80)) plus Diff D-06 R:R 1:3 TP,
@@ -134,6 +152,10 @@ class BbRsiParams {
     this.tpRrRatio = 3.0,
     this.riskPerTrade = 0.02,
     this.slippageBps = 0.0,
+    this.adxFilterEnabled = false,
+    this.adxThreshold = 25.0,
+    this.adxPeriod = 14,
+    this.adxUseDiConfluence = false,
   });
 }
 
@@ -391,6 +413,25 @@ class BacktestService {
     // RSI (Wilder's smoothing)
     _computeRsi(closes, params.rsiPeriod, rsiValues);
 
+    // ── Welle R2-2 ADX regime filter pre-compute ───────────────────────
+    // Pre-compute ADX/+DI/-DI series ONCE when the filter is enabled.
+    // Mirrors the Rust on_candle path numerically (same `calc_adx`/
+    // `calcAdx` algorithm, same warm-up convention). Skipping the
+    // compute when disabled keeps the pre-R2 hot path bit-exact.
+    final highs = [for (final c in candles) c.high];
+    final lows = [for (final c in candles) c.low];
+    List<double>? adxSeries;
+    List<double>? plusDiSeries;
+    List<double>? minusDiSeries;
+    if (params.adxFilterEnabled) {
+      final adxOut = calcAdx(highs, lows, closes, params.adxPeriod);
+      if (adxOut != null) {
+        adxSeries = adxOut.adx;
+        plusDiSeries = adxOut.plusDi;
+        minusDiSeries = adxOut.minusDi;
+      }
+    }
+
     // Strategy execution
     double balance = initialBalance;
     double peakEquity = initialBalance;
@@ -601,12 +642,34 @@ class BacktestService {
               }
               final slLong = swingLow(preLows);
               final slShort = swingHigh(preHighs);
+              // Welle R2-2: once the BB+RSI confluence + swing
+              // sanity holds, the ADX regime gate (when enabled) has
+              // the last word. When disabled, `adxSeries == null` and
+              // the closure returns `true` — pre-R2 path bit-exact.
+              bool regimeOk(bool isLong) {
+                if (!params.adxFilterEnabled) return true;
+                if (adxSeries == null ||
+                    plusDiSeries == null ||
+                    minusDiSeries == null) {
+                  return false;
+                }
+                return regimePassesFilter(
+                  adxSeries[i],
+                  plusDiSeries[i],
+                  minusDiSeries[i],
+                  params.adxThreshold,
+                  isLong,
+                  params.adxUseDiConfluence,
+                );
+              }
+
               if (slLong != null &&
                   slShort != null &&
                   close > upper &&
                   prev < params.rsiOversold &&
                   rsi >= params.rsiOversold &&
-                  slLong < close) {
+                  slLong < close &&
+                  regimeOk(true)) {
                 // Diff D-06: TP = entry-proxy + ratio * sl_distance.
                 // The signal-bar close is the entry-price proxy; the
                 // actual fill at the next bar's open may differ slightly
@@ -626,7 +689,8 @@ class BacktestService {
                   close < lower &&
                   prev > params.rsiOverbought &&
                   rsi <= params.rsiOverbought &&
-                  slShort > close) {
+                  slShort > close &&
+                  regimeOk(false)) {
                 final slDistanceShort = slShort - close;
                 final tpShort =
                     close - params.tpRrRatio * slDistanceShort;

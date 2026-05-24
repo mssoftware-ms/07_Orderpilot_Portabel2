@@ -205,6 +205,130 @@ void main() {
         expect(trade.exitReason, isNotEmpty);
       }
     });
+
+    // ── Welle R2-2 ADX regime filter wiring ───────────────────────────
+    //
+    // Build a small dip+surge fixture (same shape as the "custom params"
+    // test above) so the BB+RSI cross actually fires and the ADX gate
+    // has something to act on. Param shape mirrors the Rust unit tests
+    // in `addins::bb_rsi::tests::test_adx_filter_*` bit-for-bit so the
+    // two engines pin the same wiring contract.
+
+    List<CandleData> buildDipSurgeFixture() {
+      final candles = <CandleData>[];
+      final baseTs = DateTime(2024, 1, 1).millisecondsSinceEpoch;
+      for (int i = 0; i < 25; i++) {
+        candles.add(CandleData(
+          timestamp: baseTs + i * 3600000,
+          open: 99.9, high: 100.3, low: 99.7, close: 100.0, volume: 1000.0,
+        ));
+      }
+      for (int i = 0; i < 14; i++) {
+        final close = 100.0 - (i + 1) * 2.0;
+        candles.add(CandleData(
+          timestamp: baseTs + (25 + i) * 3600000,
+          open: close + 0.5, high: close + 0.5, low: close - 0.5,
+          close: close, volume: 1000.0,
+        ));
+      }
+      candles.add(CandleData(
+        timestamp: baseTs + 39 * 3600000,
+        open: 72.5, high: 120.5, low: 72.0, close: 120.0, volume: 1000.0,
+      ));
+      candles.add(CandleData(
+        timestamp: baseTs + 40 * 3600000,
+        open: 119.0, high: 120.0, low: 0.0, close: 110.0, volume: 1000.0,
+      ));
+      for (int i = 41; i < 100; i++) {
+        candles.add(CandleData(
+          timestamp: baseTs + i * 3600000,
+          open: 110.0, high: 110.5, low: 109.5, close: 110.0, volume: 1000.0,
+        ));
+      }
+      return candles;
+    }
+
+    const shortWarmupBase = BbRsiParams(
+      bbPeriod: 10, bbStdDev: 1.0, bbMaType: BbMaType.sma,
+      rsiPeriod: 7, rsiOversold: 30.0, rsiOverbought: 70.0,
+      swingLookbackBars: 20, tpRrRatio: 3.0, riskPerTrade: 0.02,
+    );
+
+    test('ADX filter disabled is bit-exact to pre-R2 trade count', () {
+      // The disabled gate must NOT touch any indicator path. Compare
+      // explicit `adxFilterEnabled: false` to the default-constructor
+      // (also disabled) to pin that the two flag paths cannot diverge.
+      final candles = buildDipSurgeFixture();
+      final baseline = BacktestService.runBbRsi(
+        candles: candles, initialBalance: 10000, feeRate: 0.0006,
+        params: shortWarmupBase,
+      );
+      final explicit = BacktestService.runBbRsi(
+        candles: candles, initialBalance: 10000, feeRate: 0.0006,
+        params: const BbRsiParams(
+          bbPeriod: 10, bbStdDev: 1.0, bbMaType: BbMaType.sma,
+          rsiPeriod: 7, rsiOversold: 30.0, rsiOverbought: 70.0,
+          swingLookbackBars: 20, tpRrRatio: 3.0, riskPerTrade: 0.02,
+          adxFilterEnabled: false,
+        ),
+      );
+      expect(baseline.metrics.totalTrades, greaterThan(0),
+          reason: 'fixture must trigger ≥ 1 BB+RSI entry');
+      expect(explicit.metrics.totalTrades,
+          equals(baseline.metrics.totalTrades));
+      expect(explicit.metrics.totalPnl, equals(baseline.metrics.totalPnl));
+    });
+
+    test('ADX filter with high threshold blocks every entry', () {
+      // threshold=100 caps the gate above any practically reachable ADX
+      // value → 0 entries. Pins that the parameter is actually consumed
+      // by the strategy (not silently ignored).
+      final candles = buildDipSurgeFixture();
+      final blocked = BacktestService.runBbRsi(
+        candles: candles, initialBalance: 10000, feeRate: 0.0006,
+        params: const BbRsiParams(
+          bbPeriod: 10, bbStdDev: 1.0, bbMaType: BbMaType.sma,
+          rsiPeriod: 7, rsiOversold: 30.0, rsiOverbought: 70.0,
+          swingLookbackBars: 20, tpRrRatio: 3.0, riskPerTrade: 0.02,
+          adxFilterEnabled: true,
+          adxThreshold: 100.0,
+          adxPeriod: 14,
+        ),
+      );
+      expect(blocked.metrics.totalTrades, equals(0));
+    });
+
+    test('ADX filter threshold 0 + no confluence equals disabled baseline',
+        () {
+      // threshold=0 collapses the ADX gate to a NaN-only check. With
+      // a small adxPeriod=5 the warm-up region (2*period-2 = 8 bars)
+      // lands well before the first BB+RSI signal bar (≥ 39), so every
+      // signal sees a finite ADX/+DI/-DI sample and the gate becomes
+      // a pure pass-through. Pins that the disabled baseline is
+      // recoverable under permissive ADX settings — the only behavior
+      // the disabled flag has to reproduce.
+      final candles = buildDipSurgeFixture();
+      final baseline = BacktestService.runBbRsi(
+        candles: candles, initialBalance: 10000, feeRate: 0.0006,
+        params: shortWarmupBase,
+      );
+      final passthrough = BacktestService.runBbRsi(
+        candles: candles, initialBalance: 10000, feeRate: 0.0006,
+        params: const BbRsiParams(
+          bbPeriod: 10, bbStdDev: 1.0, bbMaType: BbMaType.sma,
+          rsiPeriod: 7, rsiOversold: 30.0, rsiOverbought: 70.0,
+          swingLookbackBars: 20, tpRrRatio: 3.0, riskPerTrade: 0.02,
+          adxFilterEnabled: true,
+          adxThreshold: 0.0,
+          adxPeriod: 5,
+          adxUseDiConfluence: false,
+        ),
+      );
+      expect(passthrough.metrics.totalTrades,
+          equals(baseline.metrics.totalTrades));
+      expect(passthrough.metrics.totalPnl,
+          equals(baseline.metrics.totalPnl));
+    });
   });
 
   group('EquityPoint', () {
