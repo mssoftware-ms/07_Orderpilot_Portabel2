@@ -23,7 +23,7 @@
 //! individual parameter — the strategy add-in is the single source of truth
 //! for how a parameter maps to behavior.
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
@@ -108,12 +108,20 @@ impl ParameterSpec {
 
 /// A full search space for one strategy: which params to sweep, plus any
 /// parameters held fixed at a known value (e.g. `adx_filter_enabled = 1.0`).
+///
+/// Uses `BTreeMap` (not `HashMap`) so iteration order is the sorted key
+/// order — independent of insertion sequence AND of the per-process
+/// random hash seed. This is load-bearing for the RNG-driven sweep:
+/// `HashMap` iteration order is randomized per process, so two `cargo
+/// run` invocations of the same sweep with the same `seed` would
+/// otherwise produce different parameter sequences (and therefore
+/// different Top-N rankings). See `tests/regression_optimizer_determinism.rs`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SearchSpace {
     pub strategy_name: String,
-    pub parameters: HashMap<String, ParameterSpec>,
+    pub parameters: BTreeMap<String, ParameterSpec>,
     #[serde(default)]
-    pub fixed: HashMap<String, f64>,
+    pub fixed: BTreeMap<String, f64>,
 }
 
 impl SearchSpace {
@@ -146,15 +154,23 @@ impl SearchSpace {
 /// One concrete point in a search space — every parameter resolved to f64.
 /// Includes both swept and fixed values (the latter copied from the
 /// `SearchSpace.fixed` map at sample time).
+///
+/// `values` is a `BTreeMap` so its serde JSON output emits keys in
+/// sorted order — two separate sweep runs at the same seed therefore
+/// produce byte-identical `params_json` blobs in the SQLite store,
+/// which lets us treat the on-disk study DB as a reproducible
+/// artefact (binary diff = 0). The backtest engine still consumes
+/// `HashMap<String, f64>`; the conversion happens at the runner
+/// boundary (see `optimizer/runner.rs`).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct TrialParams {
-    pub values: HashMap<String, f64>,
+    pub values: BTreeMap<String, f64>,
 }
 
 impl TrialParams {
     pub fn new() -> Self {
         Self {
-            values: HashMap::new(),
+            values: BTreeMap::new(),
         }
     }
 
@@ -281,7 +297,7 @@ mod tests {
 
     #[test]
     fn search_space_roundtrips_through_yaml() {
-        let mut params: HashMap<String, ParameterSpec> = HashMap::new();
+        let mut params: BTreeMap<String, ParameterSpec> = BTreeMap::new();
         params.insert(
             "bb_period".into(),
             ParameterSpec::Int { min: 100, max: 300 },
@@ -302,7 +318,7 @@ mod tests {
             },
         );
 
-        let mut fixed = HashMap::new();
+        let mut fixed = BTreeMap::new();
         fixed.insert("adx_filter_enabled".to_string(), 1.0);
 
         let space = SearchSpace {
@@ -321,17 +337,17 @@ mod tests {
     fn search_space_rejects_empty_parameters() {
         let space = SearchSpace {
             strategy_name: "bb_rsi".into(),
-            parameters: HashMap::new(),
-            fixed: HashMap::new(),
+            parameters: BTreeMap::new(),
+            fixed: BTreeMap::new(),
         };
         assert!(space.validate().is_err());
     }
 
     #[test]
     fn search_space_rejects_name_conflict_between_parameters_and_fixed() {
-        let mut params: HashMap<String, ParameterSpec> = HashMap::new();
+        let mut params: BTreeMap<String, ParameterSpec> = BTreeMap::new();
         params.insert("bb_period".into(), ParameterSpec::Int { min: 10, max: 20 });
-        let mut fixed = HashMap::new();
+        let mut fixed = BTreeMap::new();
         fixed.insert("bb_period".to_string(), 15.0);
         let space = SearchSpace {
             strategy_name: "bb_rsi".into(),

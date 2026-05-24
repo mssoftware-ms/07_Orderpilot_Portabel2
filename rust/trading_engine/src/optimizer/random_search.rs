@@ -143,10 +143,10 @@ impl RandomSearchEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
+    use std::collections::BTreeMap;
 
     fn make_space() -> SearchSpace {
-        let mut params: HashMap<String, ParameterSpec> = HashMap::new();
+        let mut params: BTreeMap<String, ParameterSpec> = BTreeMap::new();
         params.insert(
             "bb_period".into(),
             ParameterSpec::Int { min: 100, max: 300 },
@@ -166,7 +166,7 @@ mod tests {
                 values: vec!["a".into(), "b".into(), "c".into()],
             },
         );
-        let mut fixed = HashMap::new();
+        let mut fixed = BTreeMap::new();
         fixed.insert("bb_ma_type".into(), 1.0);
 
         SearchSpace {
@@ -271,7 +271,7 @@ mod tests {
 
     #[test]
     fn log_uniform_sampling_stays_within_bounds() {
-        let mut params: HashMap<String, ParameterSpec> = HashMap::new();
+        let mut params: BTreeMap<String, ParameterSpec> = BTreeMap::new();
         params.insert(
             "lr".into(),
             ParameterSpec::Float {
@@ -283,7 +283,7 @@ mod tests {
         let space = SearchSpace {
             strategy_name: "synthetic".into(),
             parameters: params,
-            fixed: HashMap::new(),
+            fixed: BTreeMap::new(),
         };
         let mut engine = RandomSearchEngine::new(23);
         for _ in 0..200 {
