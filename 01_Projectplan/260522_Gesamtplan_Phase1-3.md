@@ -448,12 +448,17 @@ Drei mögliche Acceptance-Ausgänge pro Strategie (jeder eindeutig in der Spec-M
 - [ ] Mindestens **eine** Strategie auf Pfad A oder B liegt (sonst hat Phase 3 keinen produktiven Default-Kandidaten — dann Phase 2 nicht abgeschlossen, Sub-Diagnose-Session erforderlich)
 - [ ] Commit-Tag `v0.3.0-strategies-verified`
 
-**Status nach BB+RSI-Abschluss (2026-05-23):**
+**Status nach Welle-I3-Abschluss (2026-05-24):**
 - BB+RSI v3: **Pfad C** (Diagnose-Sweep: `bb_rsi_diagnose_2026-05-23.md`)
 - UT Bot v1: **Pfad C** (Diagnose-Sweep: `ut_bot_diagnose_2026-05-23.md`, 7 Variationen alle defizitär — best-of-sweep PF=0.81 auf ETHUSDT 5min; Spec §13.5 finalisiert mit Root-Cause-Hypothese „Confluence-Inkompatibilität auf Krypto-5min")
-- Ichimoku: pending
+- Ichimoku v1: **Pfad C** (Diagnose-Sweep: `ichimoku_diagnose_2026-05-24.md`, 7 Variationen — best-of-sweep T3c BTCUSDT 1h tenkan=7/kijun=21 mit PF=1.29 und profit %=+38.6 %, netto profitabel aber 4/5 Bänder verfehlt; Spec §13.6 finalisiert mit Root-Cause-Hypothese „Asset-Mismatch EUR/USD-Forex vs BTCUSDT-Crypto + Score-Implementation-Drift §12.2")
 
-**Phase-2-Tag-Status:** **Beide bisher implementierten Strategien sind Pfad C.** Phase-2-Tag-Bedingung „mindestens eine Pfad-A-oder-B-Strategie" ist nicht erfüllt → Ichimoku muss als dritte Strategie implementiert werden, bevor `v0.3.0-strategies-verified` gesetzt werden kann. Falls auch Ichimoku Pfad C trifft, wird Phase 2 als Sub-Diagnose-Session eröffnet (Plan §4.4 letzter Aufzählungspunkt).
+**Phase-2-Tag-Status:** **Alle drei Phase-2-Strategien sind Pfad C.** Phase-2-Tag-Bedingung „mindestens eine Pfad-A-oder-B-Strategie" ist **nicht erfüllt** → `v0.3.0-strategies-verified` kann NICHT gesetzt werden ohne Sub-Diagnose-Session.
+
+**Empfehlung an QA: Sub-Diagnose-Session eröffnen** (Plan §4.4 letzter Aufzählungspunkt). Mögliche Aufgaben:
+1. **Phase-3-Optimizer-Lab vorziehen** für die drei Strategien (Optuna-Sweep auf erweiterten Parameter-Räumen), Ziel: mindestens eine Strategie nach Sweep im Pfad-A/B-Band. Best-of-Sweep-Ausgangspunkte: BB+RSI 4h, UT Bot ETHUSDT 5min, Ichimoku BTC 1h tenkan=7/kijun=21.
+2. **Alternative Strategie-Kandidaten** aus dem Phase-3-Backlog ziehen (z.B. eine vierte Strategie mit explizit Crypto-validierter Vorlage statt Forex/NQ).
+3. **Markt-Regime-Filter** als Pre-Stage einbauen (z.B. ADX-basierte Regime-Klassifikation als Pflicht-Vorfilter) — vermeidet Range-Phasen, in denen alle drei Strategien strukturell scheitern.
 
 ---
 

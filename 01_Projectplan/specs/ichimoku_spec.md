@@ -348,9 +348,32 @@ Unabhängig vom Acceptance-Pfad **vor** Phase-2-Tag grün:
 - 3× consecutive Backtest-Runs auf identischen Input-Daten produzieren bit-identische Trade-Liste (analog BB+RSI / UT Bot Pflicht).
 - `totalTrades` > 0 (sonst ist die Konfiguration degeneriert).
 
-### 13.6 Pfad-Klassifikation (offen — wird in Welle I3 finalisiert)
+### 13.6 Pfad-Klassifikation: **Pfad C** (Welle I3 finalisiert 2026-05-24)
 
-Aktuell **pending**. Wird nach Welle-I3-Backtest in einem **separaten Commit** finalisiert (analog UT Bot Status `74a08b9`).
+**Status:** Welle I3 abgeschlossen. Eskalations-Leiter aus 7 Real-Data-Tests (Strict-Spec + 2× Score-Threshold-Sweep + 4× Sanity-Sweep) auf BTCUSDT 1h / 4h und ETHUSDT 1h über 760 Tage 2023-04-01 → 2025-05-01 dokumentiert in `01_Projectplan/specs/ichimoku_diagnose_2026-05-24.md`.
+
+**Actual-Result-Tabelle (BTCUSDT 1h strict-spec Baseline, T1):**
+
+| Metrik | XLSX-Target | Akzeptanz-Band | Actual (T1) | im Band? |
+|---|---|---|---|:---:|
+| Profit-Faktor | 2.44 | [2.14, 2.74] | **1.088** | ✗ |
+| Win-Rate | 55 % | [50 %, 60 %] | **29.75 %** | ✗ |
+| Max-Drawdown | 10 % | < 15 % | **20.87 %** | ✗ |
+| Trades | 100 | [75, 125] | **158** | ✗ (über) |
+| Profit % (nach Fees) | +120 % | [+95 %, +145 %] | **+12.46 %** | ✗ |
+
+**Best-of-Sweep (T3c BTCUSDT 1h tenkan=7 kijun=21):** PF=1.29, WR=32.82 %, MaxDD=17.92 %, trades=131, profit %=+38.61 %. Netto profitabel, aber 4/5 Bänder verfehlt; nur trades-Wert knapp über Band. **Keine Variation erreicht alle 5 Bänder.**
+
+**Pfad-Klassifikation: Pfad C** (video-treu implementiert, XLSX-Targets reflektieren EUR/USD-Forex-Microstructure, die auf BTCUSDT 1h nicht reproduzierbar ist).
+
+**Root-Cause-Hypothese (siehe Diagnose-MD §4):**
+1. **Asset-Mismatch zum Video-EUR/USD-1h:** EUR/USD hat strukturell niedrigere Intra-Bar-Volatilität als BTC → SL an Kijun/Cloud trifft auf Forex seltener. Auf BTC kassieren viele Trades SL zwischen Entry und +1R (realised R = 2.57 in T1 zeigt: die Wins erreichen TP voll, das WR-Defizit kommt aus den Verlierern).
+2. **Score-Implementation §12.2 weicht von „dreams defined"-Original ab:** T2a (score=40) vs T1 (score=60) ändert die Trade-Anzahl nur um 2 (160 vs 158), T2b (score=80) erstickt komplett (0 Trades). Die XLSX behauptet 35 % Setup-Filterung — wir sehen ~1 %. Score-Distribution-Anomalie auf BTC-1h-Daten.
+3. **Trend-vs-Range-Verhältnis BTC vs EUR/USD:** Ichimoku-5-Confluence braucht klare Trend-Phasen. BTC 2023-2025 hatte Bull-Runs, aber dazwischen Wochen-lange Range-Phasen mit Cloud-Crossings, die das WR erodieren.
+
+**Phase-3-Konsequenz:** Ichimoku v1 bleibt im Add-in-Manifest als **Phase-3-Optimizer-Lab-Kandidat** (Default-Defaults bleiben video-treu, keine Default-Änderung in Welle I3). Backlog-Einträge in Diagnose-MD §5 (Punkte 4–6).
+
+**Pre-Diagnose-Reflektion:** §13.7 hatte Pfad-B-Wahrscheinlichkeit bei 40 % und Pfad-C bei 55 % geschätzt. Tatsächlich Pfad C, aber das Pfad-B-Argument war qualitativ richtig: Ichimoku ist die „beste Pfad-C-Strategie" der drei Phase-2-Strategien (4/7 Tests netto profitabel vs UT Bot 0/8). Das Trend-Following-Profil ist auf Crypto strukturell günstiger als die Mean-Reversion-Confluence von UT Bot, reicht aber nicht für das XLSX-Target-Band.
 
 ### 13.7 Pre-Diagnose-Einschätzung (vor Welle I3)
 
