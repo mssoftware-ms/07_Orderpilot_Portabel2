@@ -13,4 +13,5 @@ pub mod addins;
 pub mod api;
 pub mod backtest;
 pub mod models;
+pub mod optimizer;
 pub mod strategy;
