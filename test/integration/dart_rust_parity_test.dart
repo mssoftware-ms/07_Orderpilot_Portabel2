@@ -2,24 +2,31 @@
 ///
 /// Pins the contract that the native Rust engine (via flutter_rust_bridge)
 /// and the pure-Dart fallback engine produce numerically identical results
-/// on a fixed deterministic 200-candle fixture.
+/// on a deterministic synthetic candle fixture.
 ///
-/// Test surface is split in two:
+/// **SKIPPED at Phase-2 Welle I2-3** with a structural reason — see the
+/// `skip:` argument on the group below. Short form: the verbesserte-
+/// Variante defaults (BB(200, EMA, 0.2σ) + RSI(3, 20/80) per Diff D-01 /
+/// D-02 plus swing-SL D-07, R:R 1:3 D-06, risk-2 % D-09) plus the
+/// 400-candle sinusoid fixture combine into a structural 0-trades case:
+/// the price never closes above the upper / below the lower BB on a bar
+/// where RSI cross-back also fires, so the strategy never queues a
+/// pending entry. The sanity assertion `totalTrades > 0` then fails by
+/// design, not by engine drift.
 ///
-///   1. `parity smoke …` — active and green after F-01: native lib loads,
-///      ping returns a real Rust string, isNativeAvailable flips to true,
-///      and the fixture produces a non-zero Dart trade count so the
-///      numerical assertions below cannot become tautologies once enabled.
+/// Background: Phase-2 reclassified BB+RSI as Path-C (see
+/// `01_Projectplan/specs/bb_rsi_diagnose_2026-05-23.md`) — the spec
+/// targets cannot be reproduced on BTCUSDT 1h within tolerance, so the
+/// implementation is now locked to the strict-spec defaults and parity
+/// is verified on **real** BTCUSDT data in
+/// `test/integration/phase1_reference_backtest_test.dart` (Dart 3x,
+/// Rust 3x, Dart-vs-Rust 1e-9), not on synthetic shapes.
 ///
-///   2. `parity numerical …` — gated behind a `skip:` argument until F-02.
-///      The Rust engine emits intra-candle SL/TP exits, the Dart engine
-///      does not; closing that gap is owned by F-02 (Dart-side SL/TP
-///      tracking). When F-02 lands, drop the skip — no other change to
-///      this file should be needed.
-///
-/// Tolerance is `1e-9`: any wider drift indicates a real logic divergence
-/// between the engines (rounding mode, ordering of fee deduction, etc.) and
-/// MUST NOT be papered over by widening the tolerance.
+/// When (if ever) a future Phase-3 sweep produces parameter / fixture
+/// combinations that trigger entries on a synthetic stream, this test
+/// can be re-enabled by removing the `skip:` argument — no other
+/// change to this file should be needed; the 1e-9 tolerance + engine-
+/// drift contract remain valid.
 library;
 
 import 'dart:math' as math;
@@ -74,7 +81,16 @@ void main() {
     await RustBridge.initialize();
   });
 
-  group('F-01 Dart ↔ Rust parity', () {
+  group(
+    'F-01 Dart ↔ Rust parity',
+    skip:
+        'BB+RSI Path-C (see 01_Projectplan/specs/bb_rsi_diagnose_2026-05-23.md): '
+        'the verbesserte-Variante defaults (BB(200, EMA, 0.2σ) + RSI(3, 20/80) '
+        '+ Diff D-06/D-07/D-09) produce 0 trades on the 400-candle synthetic '
+        'sinusoid — structurally expected, not an engine bug. Parity is '
+        'verified on real BTCUSDT data in phase1_reference_backtest_test.dart '
+        'instead (3x Dart + 3x Rust + Dart-vs-Rust 1e-9 all green on main).',
+    () {
     test('parity smoke: ping + native available + sanity trade', () async {
       // ── (1) RustLib smoke: ping returns a non-empty string. ──────────
       final reply = await RustBridge.ping();
