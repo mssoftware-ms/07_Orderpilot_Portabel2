@@ -72,7 +72,94 @@ const _adxConfigs = <(String, bool, double, bool)>[
   ('C3 thr=25 +DI', true, 25.0, true),
 ];
 
+/// Welle R4 staleness guard. The Flutter test runner does NOT invoke
+/// `cargo build` on Rust source changes, so an outdated
+/// `libtrading_engine.{so,dll}` will silently shadow the current Rust
+/// source. Welle R3 misdiagnosed a stale-binary case as a Rust wiring
+/// bug (cf. `01_Projectplan/specs/regime_filter_diagnose_2026-05-24.md`
+/// §4). This guard pins a SYNTHETIC `threshold=100 → 0 trades` invariant
+/// through the JSON API BEFORE the sweep runs: any post-Welle-R2 binary
+/// honours the gate; any pre-R2 binary will baseline-pass and surface
+/// here with a clear "rebuild required" message instead of a noisy
+/// 12-test parity failure 30 seconds into the sweep.
+Future<void> _assertRustEngineHasAdxWiring() async {
+  await RustBridge.initialize();
+  if (!RustBridge.isNativeAvailable) {
+    fail('Rust native engine not available — sweep needs the FFI binary');
+  }
+  // 35-bar BB+RSI fixture identical to
+  // `regression_adx_api_wiring.rs::bb_rsi_long_entry_fixture` so the
+  // Dart-side guard pins the SAME ADX wiring contract as the Rust-side
+  // companion regression test.
+  final closes = <double>[
+    for (var i = 0; i < 20; i++) 100.0,
+    for (var i = 0; i < 14; i++) 100.0 - (i + 1) * 2.0,
+    120.0,
+    121.0,
+    122.0,
+  ];
+  final candles = <CandleData>[
+    for (var i = 0; i < closes.length; i++)
+      CandleData(
+        timestamp: i * 60000,
+        open: closes[i],
+        high: closes[i] + 0.5,
+        low: closes[i] - 0.5,
+        close: closes[i],
+        volume: 100.0,
+      ),
+  ];
+  final base = <String, double>{
+    'bb_period': 20,
+    'bb_stddev': 2.0,
+    'bb_ma_type': 0,
+    'rsi_period': 14,
+    'rsi_oversold': 30,
+    'rsi_overbought': 70,
+    'swing_lookback_bars': 20,
+    'tp_rr_ratio': 3.0,
+    'risk_per_trade': 0.02,
+  };
+  final disabled = await RustBridge.runBacktest(
+    candles: candles,
+    initialBalance: _initialBalance,
+    feeRate: _feeRate,
+    strategyParams: base,
+  );
+  if (disabled.totalTrades < 1) {
+    fail(
+      'Staleness guard fixture lost its signal — expected ≥ 1 baseline '
+      'entry, got ${disabled.totalTrades}. Update the guard fixture.',
+    );
+  }
+  final filtered = await RustBridge.runBacktest(
+    candles: candles,
+    initialBalance: _initialBalance,
+    feeRate: _feeRate,
+    strategyParams: <String, double>{
+      ...base,
+      'adx_filter_enabled': 1.0,
+      'adx_threshold': 100.0,
+      'adx_period': 14,
+      'adx_use_di_confluence': 0.0,
+    },
+  );
+  if (filtered.totalTrades != 0) {
+    fail(
+      'STALE libtrading_engine binary detected — pre-Welle-R2 `.so` is '
+      'shadowing the current Rust source. `adx_threshold=100` must block '
+      'every entry (got ${filtered.totalTrades} trades; baseline '
+      '${disabled.totalTrades}). Run `cargo build --release --lib` in '
+      'rust/trading_engine/ and re-run the sweep. See '
+      '`01_Projectplan/specs/regime_filter_diagnose_2026-05-24.md` §4 '
+      '(Welle R4 RESOLVED) for root-cause context.',
+    );
+  }
+}
+
 void main() {
+  setUpAll(_assertRustEngineHasAdxWiring);
+
   group('ADX_SWEEP BB+RSI BTCUSDT 4h 2024-H1', () {
     for (final (label, enabled, threshold, useDi) in _adxConfigs) {
       test(label, () async {
