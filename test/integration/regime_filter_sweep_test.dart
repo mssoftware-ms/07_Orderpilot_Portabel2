@@ -244,11 +244,7 @@ Future<void> _runBbRsi({
       ));
     }
     _assertRustDeterminism(label, rustRuns);
-    expect(rustRuns[0].totalPnl, closeTo(dartRuns[0].metrics.totalPnl, 1e-9),
-        reason:
-            '$label: dart↔rust totalPnl drift > 1e-9 — Welle R2-2 parity contract');
-    expect(rustRuns[0].totalTrades, equals(dartTrades),
-        reason: '$label: dart↔rust totalTrades mismatch');
+    _assertDartRustParity(label, dartRuns[0].metrics, rustRuns[0], 'R2-2');
     rustHead = rustRuns[0];
   }
 
@@ -291,11 +287,7 @@ Future<void> _runUtBot({
       ));
     }
     _assertRustDeterminism(label, rustRuns);
-    expect(rustRuns[0].totalPnl, closeTo(dartRuns[0].metrics.totalPnl, 1e-9),
-        reason:
-            '$label: dart↔rust totalPnl drift > 1e-9 — Welle R2-3 parity contract');
-    expect(rustRuns[0].totalTrades, equals(dartTrades),
-        reason: '$label: dart↔rust totalTrades mismatch');
+    _assertDartRustParity(label, dartRuns[0].metrics, rustRuns[0], 'R2-3');
     rustHead = rustRuns[0];
   }
 
@@ -338,11 +330,7 @@ Future<void> _runIchimoku({
       ));
     }
     _assertRustDeterminism(label, rustRuns);
-    expect(rustRuns[0].totalPnl, closeTo(dartRuns[0].metrics.totalPnl, 1e-9),
-        reason:
-            '$label: dart↔rust totalPnl drift > 1e-9 — Welle R2-4 parity contract');
-    expect(rustRuns[0].totalTrades, equals(dartTrades),
-        reason: '$label: dart↔rust totalTrades mismatch');
+    _assertDartRustParity(label, dartRuns[0].metrics, rustRuns[0], 'R2-4');
     rustHead = rustRuns[0];
   }
 
@@ -367,6 +355,30 @@ void _assertRustDeterminism(String label, List<BacktestMetrics> runs) {
     expect(runs[i].totalTrades, equals(runs[0].totalTrades),
         reason: '$label: rust run $i totalTrades differs');
   }
+}
+
+/// Welle R4-3 parity contract: PnL, Sharpe, MaxDD all within 1e-9
+/// between Dart and Rust engines. Welle R3 enforced only `totalPnl`;
+/// the bit-exact contract extends to the three metrics that Phase-3
+/// optimizer scoring depends on. `totalTrades` is checked for equality
+/// (integer count, no tolerance).
+void _assertDartRustParity(
+  String label,
+  BacktestMetrics dart,
+  BacktestMetrics rust,
+  String contract,
+) {
+  expect(rust.totalTrades, equals(dart.totalTrades),
+      reason: '$label: dart↔rust totalTrades mismatch ($contract)');
+  expect(rust.totalPnl, closeTo(dart.totalPnl, 1e-9),
+      reason:
+          '$label: dart↔rust totalPnl drift > 1e-9 — $contract parity contract');
+  expect(rust.sharpeRatio, closeTo(dart.sharpeRatio, 1e-9),
+      reason:
+          '$label: dart↔rust sharpeRatio drift > 1e-9 — $contract parity contract');
+  expect(rust.maxDrawdownPercent, closeTo(dart.maxDrawdownPercent, 1e-9),
+      reason:
+          '$label: dart↔rust maxDrawdownPercent drift > 1e-9 — $contract parity contract');
 }
 
 // ─── Param maps (mirror manifest keys 1:1) ──────────────────────────────────
