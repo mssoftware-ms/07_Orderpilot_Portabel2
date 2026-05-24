@@ -9,4 +9,5 @@ pub mod ichimoku;
 pub mod ut_bot;
 
 pub use bb_rsi::BbRsiStrategy;
+pub use ichimoku::IchimokuStrategy;
 pub use ut_bot::UtBotStrategy;

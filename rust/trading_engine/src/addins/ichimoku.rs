@@ -400,6 +400,186 @@ pub fn calc_ichimoku_score(
     score
 }
 
+// ─── IchimokuStrategy ──────────────────────────────────────────────────────
+
+use std::collections::HashMap;
+
+use crate::models::{Candle, Timeframe};
+use crate::strategy::{
+    AddinManifest, Context, InputSpec, ParameterSchema, Signal, StrategyAddin,
+    StrategyCategory,
+};
+
+/// Ichimoku Cloud Retest (Endstand-Variante) strategy add-in.
+///
+/// Body-struct (not unit-struct) so the flutter_rust_bridge codegen
+/// pipeline can introspect it — FRB rejects unit structs. The strategy
+/// is fully stateless; all per-run state lives on `Context`.
+///
+/// Welle I2-1 only lands the manifest + skeleton. `on_candle` is a
+/// warm-up-gated stub that emits `NoAction` after the 78-bar Ichimoku
+/// boundary so callers can wire the strategy into the engine without
+/// crashes. The 5-confluence entry logic from Spec §2/§3 lands in I2-2.
+#[derive(Debug, Clone, Default)]
+pub struct IchimokuStrategy {}
+
+impl IchimokuStrategy {
+    pub fn new() -> Self {
+        Self {}
+    }
+}
+
+impl StrategyAddin for IchimokuStrategy {
+    fn manifest(&self) -> AddinManifest {
+        ichimoku_manifest()
+    }
+
+    fn required_inputs(&self) -> Vec<InputSpec> {
+        // Senkou-B(52) + cloud shift(26) = 78 dominates the warm-up; we
+        // add headroom so the Ichimoku-Score can settle. Mirrors the
+        // start_idx computation in `on_candle` below.
+        vec![
+            InputSpec::OhlcvTimeframe(Timeframe::H1),
+            InputSpec::MinCandles(100),
+            InputSpec::Indicator("Ichimoku".to_string()),
+        ]
+    }
+
+    fn on_candle(&mut self, ctx: &mut Context, _candle: &Candle) -> Option<Signal> {
+        // Welle I2-1 skeleton: hold the warm-up gate so the engine can
+        // step the strategy without triggering an out-of-bounds read in
+        // the indicator helpers, but DO NOT emit entries yet — that is
+        // I2-2's scope. Returning `NoAction` (vs `None`) lets the
+        // BacktestEngine still record per-bar state without treating
+        // the bar as a missing call.
+        let senkou_b_period = ctx.param_or("senkou_b_period", 52.0) as usize;
+        let shift = ctx.param_or("shift", 26.0) as usize;
+        let start_idx = senkou_b_period + shift;
+        if ctx.index() < start_idx {
+            return None;
+        }
+        Some(Signal::NoAction)
+    }
+
+    fn on_reset(&mut self) {
+        // Stateless — every on_candle rebuilds the indicator series
+        // from `ctx.all_candles()`. Nothing to clear here.
+    }
+
+    fn validate_params(&self, params: &HashMap<String, f64>) -> Result<(), String> {
+        for schema in &self.manifest().parameters {
+            if let Some(&val) = params.get(&schema.name) {
+                schema.validate(val)?;
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Build the canonical AddinManifest for the Ichimoku Cloud Retest
+/// strategy. Defaults match `01_Projectplan/specs/ichimoku_spec.md` and
+/// the engineering plan §2 Welle I2 parameter table; the strict-spec
+/// `score_threshold = 60` (Spec §12.2) gates entries to "all three
+/// components confluent in the same direction".
+pub fn ichimoku_manifest() -> AddinManifest {
+    AddinManifest {
+        id: "ichimoku_v1".to_string(),
+        name: "Ichimoku Cloud Retest (Endstand-Variante)".to_string(),
+        version: "1.0.0".to_string(),
+        author: "Trading App Team".to_string(),
+        description:
+            "Trend-following strategy: 5-confluence entry (price vs cloud, future cloud color, \
+             Tenkan vs Kijun, Chikou vs past cloud, Ichimoku-Score), SL at min(Kijun, cloud bottom) \
+             for long / max for short, R:R 1:2 with engine-side break-even trail."
+                .to_string(),
+        category: StrategyCategory::Trend,
+        timeframes: vec![Timeframe::H1, Timeframe::H4],
+        parameters: vec![
+            // Spec §1 standard Ichimoku periods.
+            ParameterSchema::new("tenkan_period", "Tenkan-Sen Period", 9.0, 3.0, 30.0, 1.0),
+            ParameterSchema::new("kijun_period", "Kijun-Sen Period", 26.0, 5.0, 100.0, 1.0),
+            ParameterSchema::new(
+                "senkou_b_period",
+                "Senkou-Span B Period",
+                52.0,
+                10.0,
+                200.0,
+                1.0,
+            ),
+            // Cloud-shift / Chikou-lag in bars. `CLOUD_SHIFT_BARS` is the
+            // hard-coded value used by the read-anchor helpers; the
+            // parameter lets the manifest surface the convention but the
+            // strategy still reads through the const internally.
+            ParameterSchema::new("shift", "Cloud / Chikou Shift", 26.0, 5.0, 100.0, 1.0),
+            // Spec §12.2 default: ±60 = "3 × SCORE_WEIGHT" = full
+            // confluence (all three Cross/Color/Distance components in
+            // the same direction). Long fires at `score >= +threshold`,
+            // short at `score <= -threshold`.
+            ParameterSchema::new(
+                "score_threshold",
+                "Ichimoku-Score Threshold (±)",
+                60.0,
+                20.0,
+                100.0,
+                5.0,
+            ),
+            // Spec §5: R:R 1:2 with engine-driven BE-trail at +1R.
+            ParameterSchema::new("tp_rr_ratio", "TP R:R Ratio", 2.0, 0.5, 10.0, 0.1),
+            // Spec §8: 2 % of equity per trade.
+            ParameterSchema::new("risk_per_trade", "Risk Per Trade", 0.02, 0.001, 1.0, 0.001),
+            // Spec §4 algorithmic SL distance uses kijun/cloud anchors;
+            // `swing_lookback_bars` is currently unused by the Ichimoku
+            // SL (kept in the manifest so a Phase-3 hybrid SL variant
+            // can opt in without breaking the parameter map).
+            ParameterSchema::new(
+                "swing_lookback_bars",
+                "Swing Lookback Bars",
+                20.0,
+                5.0,
+                100.0,
+                1.0,
+            ),
+            // Spec §7 session filter (London + NY). Default OFF for
+            // BTCUSDT (24/7); Phase-3 EUR/USD reruns can enable it
+            // without code changes.
+            ParameterSchema::new(
+                "session_filter_enabled",
+                "Session Filter Enabled (0/1)",
+                0.0,
+                0.0,
+                1.0,
+                1.0,
+            ),
+            ParameterSchema::new(
+                "session_start_hour",
+                "Session Start Hour (local)",
+                9.0,
+                0.0,
+                23.0,
+                1.0,
+            ),
+            ParameterSchema::new(
+                "session_end_hour",
+                "Session End Hour (local)",
+                23.0,
+                1.0,
+                24.0,
+                1.0,
+            ),
+            // Local timezone offset east of UTC (Berlin = +1, no DST).
+            // Range covers the major liquid trading sessions.
+            ParameterSchema::new(
+                "tz_offset_hours",
+                "Local TZ Offset (hours east of UTC)",
+                1.0,
+                -12.0,
+                14.0,
+                1.0,
+            ),
+        ],
+    }
+}
+
 // ─── Tests ──────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -1128,5 +1308,177 @@ mod tests {
             "rolling_min(199, 52) = {}",
             rolling_min(&v, 199, 52)
         );
+    }
+
+    // ── Manifest / skeleton (Welle I2-1) ────────────────────────────────
+
+    #[test]
+    fn test_ichimoku_manifest_id_category_timeframes() {
+        let m = ichimoku_manifest();
+        assert_eq!(m.id, "ichimoku_v1");
+        assert_eq!(m.category, StrategyCategory::Trend);
+        // Spec §1: 1h is the video baseline TF; 4h is the Mandatory
+        // Sanity-Sweep partner. Pin both so an accidental drop here
+        // would fail loud.
+        assert!(m.timeframes.contains(&Timeframe::H1));
+        assert!(m.timeframes.contains(&Timeframe::H4));
+    }
+
+    #[test]
+    fn test_ichimoku_manifest_has_all_12_parameters_with_spec_defaults() {
+        // The 12 parameters mandated by `01_Projectplan/specs/ichimoku_engineering_plan.md`
+        // §2 Welle I2 table, each with their spec-default. Locked here so
+        // any drift surfaces immediately rather than during a downstream
+        // Dart-Rust parameter-map mismatch.
+        let m = ichimoku_manifest();
+        let expected: &[(&str, f64)] = &[
+            ("tenkan_period", 9.0),
+            ("kijun_period", 26.0),
+            ("senkou_b_period", 52.0),
+            ("shift", 26.0),
+            ("score_threshold", 60.0),
+            ("tp_rr_ratio", 2.0),
+            ("risk_per_trade", 0.02),
+            ("swing_lookback_bars", 20.0),
+            ("session_filter_enabled", 0.0),
+            ("session_start_hour", 9.0),
+            ("session_end_hour", 23.0),
+            ("tz_offset_hours", 1.0),
+        ];
+        assert_eq!(
+            m.parameters.len(),
+            expected.len(),
+            "manifest should expose exactly {} parameters, found {}",
+            expected.len(),
+            m.parameters.len()
+        );
+        for &(name, default) in expected {
+            let p = m
+                .parameters
+                .iter()
+                .find(|p| p.name == name)
+                .unwrap_or_else(|| panic!("manifest missing parameter '{}'", name));
+            assert!(
+                (p.default - default).abs() < 1e-12,
+                "{} default = {}, want {}",
+                name,
+                p.default,
+                default
+            );
+        }
+    }
+
+    #[test]
+    fn test_ichimoku_manifest_score_threshold_matches_three_score_weights() {
+        // Spec §12.2: the canonical "full confluence" threshold is
+        // `3 * SCORE_WEIGHT = 60`. Pin the relationship so a future bump
+        // to SCORE_WEIGHT propagates through the manifest default.
+        let m = ichimoku_manifest();
+        let st = m
+            .parameters
+            .iter()
+            .find(|p| p.name == "score_threshold")
+            .unwrap();
+        assert_eq!(st.default as i32, 3 * SCORE_WEIGHT);
+    }
+
+    #[test]
+    fn test_ichimoku_validate_params_ok_and_out_of_range() {
+        let s = IchimokuStrategy::new();
+        let mut ok = HashMap::new();
+        ok.insert("score_threshold".to_string(), 80.0);
+        ok.insert("tp_rr_ratio".to_string(), 1.5);
+        assert!(s.validate_params(&ok).is_ok());
+
+        let mut bad = HashMap::new();
+        bad.insert("score_threshold".to_string(), 200.0); // max is 100
+        assert!(s.validate_params(&bad).is_err());
+    }
+
+    #[test]
+    fn test_ichimoku_skeleton_no_signal_during_warmup() {
+        // 10 candles is far below the 78-bar warm-up gate — every
+        // on_candle call must return `None` (warm-up region).
+        let mut s = IchimokuStrategy::new();
+        let candles: Vec<Candle> = (0..10)
+            .map(|i| Candle::new(i * 3_600_000, 100.0, 101.0, 99.0, 100.0, 1.0))
+            .collect();
+        let mut ctx = Context::new(candles.clone(), Timeframe::H1, HashMap::new());
+        for (i, candle) in candles.iter().enumerate() {
+            ctx.set_index(i);
+            assert!(s.on_candle(&mut ctx, candle).is_none(), "bar {} produced a signal", i);
+        }
+    }
+
+    #[test]
+    fn test_ichimoku_skeleton_emits_no_action_after_warmup() {
+        // Welle I2-1 guarantees only the warm-up gate + a `NoAction`
+        // pass-through past it. Confluence-based entries land in I2-2;
+        // this test will be widened then.
+        let mut s = IchimokuStrategy::new();
+        let n = 100; // > 78-bar warm-up
+        let candles: Vec<Candle> = (0..n)
+            .map(|i| Candle::new(i * 3_600_000, 100.0, 101.0, 99.0, 100.0, 1.0))
+            .collect();
+        let mut ctx = Context::new(candles.clone(), Timeframe::H1, HashMap::new());
+        // Spec §1.1 minimum warm-up: senkou_b(52) + shift(26) = 78.
+        let start_idx = 78usize;
+        for (i, candle) in candles.iter().enumerate() {
+            ctx.set_index(i);
+            let sig = s.on_candle(&mut ctx, candle);
+            if i < start_idx {
+                assert!(sig.is_none(), "bar {} (warm-up) emitted {:?}", i, sig);
+            } else {
+                assert_eq!(
+                    sig,
+                    Some(Signal::NoAction),
+                    "bar {} should emit NoAction skeleton",
+                    i
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_ichimoku_skeleton_warmup_respects_override_periods() {
+        // Smaller senkou_b/shift override → smaller warm-up gate. Proves
+        // the start_idx math is parameterised, not hard-coded to 78.
+        let mut s = IchimokuStrategy::new();
+        let n = 50;
+        let candles: Vec<Candle> = (0..n)
+            .map(|i| Candle::new(i * 3_600_000, 100.0, 101.0, 99.0, 100.0, 1.0))
+            .collect();
+        let params = HashMap::from([
+            ("senkou_b_period".to_string(), 10.0),
+            ("shift".to_string(), 5.0),
+        ]);
+        let mut ctx = Context::new(candles.clone(), Timeframe::H1, params);
+        let start_idx = 15usize; // 10 + 5
+        for (i, candle) in candles.iter().enumerate() {
+            ctx.set_index(i);
+            let sig = s.on_candle(&mut ctx, candle);
+            if i < start_idx {
+                assert!(sig.is_none(), "bar {} warm-up violated", i);
+            } else {
+                assert_eq!(sig, Some(Signal::NoAction), "bar {} skeleton", i);
+            }
+        }
+    }
+
+    #[test]
+    fn test_ichimoku_required_inputs_include_h1_and_min_candles() {
+        let s = IchimokuStrategy::new();
+        let inputs = s.required_inputs();
+        assert!(inputs
+            .iter()
+            .any(|i| matches!(i, InputSpec::OhlcvTimeframe(Timeframe::H1))));
+        assert!(inputs.iter().any(|i| matches!(i, InputSpec::MinCandles(_))));
+    }
+
+    #[test]
+    fn test_ichimoku_reset_is_noop_on_stateless_struct() {
+        let mut s = IchimokuStrategy::new();
+        s.on_reset();
+        let _ = s.manifest();
     }
 }
