@@ -15,7 +15,9 @@
 /// in aggregate) and 72 backtests. The plain-name filter alone is
 /// insufficient because `flutter_test` always honours `skip:`.
 ///
-/// Manual run:
+/// Manual run (always rebuild the Rust FFI first — Flutter does not
+/// invoke cargo on .rs changes, see Welle R4 staleness guard below):
+///   bash tool/build_rust.sh
 ///   ADX_SWEEP=1 flutter test --plain-name "ADX_SWEEP" \
 ///     test/integration/regime_filter_sweep_test.dart
 ///
