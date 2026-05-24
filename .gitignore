@@ -93,3 +93,6 @@ agentdb.rvf
 agentdb.rvf.lock
 **/agentdb.rvf
 **/agentdb.rvf.lock
+
+# ─── Phase-3 optimizer raw candle cache (regenerable via tool/fetch_sweep_data.dart) ─
+01_Projectplan/optimizer_data/
