@@ -67,7 +67,7 @@ class RustLib extends BaseEntrypoint<RustLibApi, RustLibApiImpl, RustLibWire> {
   String get codegenVersion => '2.12.0';
 
   @override
-  int get rustContentHash => -845801149;
+  int get rustContentHash => -1219223650;
 
   static const kDefaultExternalLibraryLoaderConfig =
       ExternalLibraryLoaderConfig(
@@ -111,6 +111,13 @@ abstract class RustLibApi extends BaseApi {
   Future<String> crateApiRunBbRsiStrategy({
     required String candlesJson,
     required String paramsJson,
+  });
+
+  Future<String> crateApiRunIchimokuBacktest({
+    required String candlesJson,
+    required String paramsJson,
+    required double initialBalance,
+    required double feeRate,
   });
 
   Future<String> crateApiRunUtBotBacktest({
@@ -509,7 +516,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   );
 
   @override
-  Future<String> crateApiRunUtBotBacktest({
+  Future<String> crateApiRunIchimokuBacktest({
     required String candlesJson,
     required String paramsJson,
     required double initialBalance,
@@ -527,6 +534,45 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
             generalizedFrbRustBinding,
             serializer,
             funcId: 14,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_String,
+          decodeErrorData: null,
+        ),
+        constMeta: kCrateApiRunIchimokuBacktestConstMeta,
+        argValues: [candlesJson, paramsJson, initialBalance, feeRate],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiRunIchimokuBacktestConstMeta =>
+      const TaskConstMeta(
+        debugName: "run_ichimoku_backtest",
+        argNames: ["candlesJson", "paramsJson", "initialBalance", "feeRate"],
+      );
+
+  @override
+  Future<String> crateApiRunUtBotBacktest({
+    required String candlesJson,
+    required String paramsJson,
+    required double initialBalance,
+    required double feeRate,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_String(candlesJson, serializer);
+          sse_encode_String(paramsJson, serializer);
+          sse_encode_f_64(initialBalance, serializer);
+          sse_encode_f_64(feeRate, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 15,
             port: port_,
           );
         },

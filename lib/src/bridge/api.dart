@@ -110,3 +110,29 @@ Future<String> runUtBotBacktest({
   initialBalance: initialBalance,
   feeRate: feeRate,
 );
+
+/// Run a full backtest of the Ichimoku Cloud Retest strategy on
+/// historical candles.
+///
+/// `candles_json`    – JSON array of `Candle` objects.
+/// `params_json`     – JSON object with parameter overrides (e.g.
+///                     `{"score_threshold": 40, "kijun_period": 30}`).
+/// `initial_balance` – Starting account balance in quote currency.
+/// `fee_rate`        – Taker fee rate per side.
+///
+/// Returns a JSON-serialised `BacktestResult` identical in shape to
+/// `run_bb_rsi_backtest` / `run_ut_bot_backtest`. The Phase-2
+/// video-spec defaults map to the BTCUSDT 1-hour timeframe (per Spec
+/// §1 / §12.1 asset substitution from EUR/USD); override via
+/// `params_json` for Welle-I3 sweeps.
+Future<String> runIchimokuBacktest({
+  required String candlesJson,
+  required String paramsJson,
+  required double initialBalance,
+  required double feeRate,
+}) => RustLib.instance.api.crateApiRunIchimokuBacktest(
+  candlesJson: candlesJson,
+  paramsJson: paramsJson,
+  initialBalance: initialBalance,
+  feeRate: feeRate,
+);

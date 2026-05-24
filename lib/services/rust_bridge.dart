@@ -430,6 +430,58 @@ class RustBridge {
     );
   }
 
+  /// Run an Ichimoku Cloud Retest backtest on the given candles.
+  ///
+  /// Mirrors [runBacktest] / [runUtBotBacktest] for the third Phase-2
+  /// strategy. Delegates to `run_ichimoku_backtest` via flutter_rust_
+  /// bridge when the native engine is available; logs a warning and
+  /// returns an empty [BacktestMetrics] otherwise — same fail-soft
+  /// contract as the BB+RSI / UT-Bot wrappers.
+  ///
+  /// [strategyParams] is a JSON-compatible parameter override map
+  /// matching the keys in `ichimoku_manifest()` (e.g.
+  /// `{'score_threshold': 40, 'kijun_period': 30}`). Empty = use Rust
+  /// defaults (strict-spec per Spec §1 / §12.2).
+  static Future<BacktestMetrics> runIchimokuBacktest({
+    required List<CandleData> candles,
+    required double initialBalance,
+    required double feeRate,
+    Map<String, double> strategyParams = const {},
+  }) async {
+    if (!_nativeAvailable) {
+      // ignore: avoid_print
+      print('[RustBridge] runIchimokuBacktest called without native engine — '
+          'returning empty metrics');
+      return BacktestMetrics.empty();
+    }
+
+    final candlesJson =
+        jsonEncode(candles.map((c) => c.toRustJson()).toList());
+    final paramsJson = jsonEncode(strategyParams);
+
+    final responseJson = await rust.runIchimokuBacktest(
+      candlesJson: candlesJson,
+      paramsJson: paramsJson,
+      initialBalance: initialBalance,
+      feeRate: feeRate,
+    );
+
+    final decoded = jsonDecode(responseJson) as Map<String, dynamic>;
+    if (decoded.containsKey('error')) {
+      throw Exception('Rust Ichimoku backtest failed: ${decoded['error']}');
+    }
+
+    final metricsJson = decoded['metrics'] as Map<String, dynamic>;
+    final totalFees = (decoded['total_fees'] as num).toDouble();
+    final candlesProcessed = decoded['candles_processed'] as int;
+
+    final rustMetrics = RustBacktestMetrics.fromJson(metricsJson);
+    return rustMetrics.toBacktestMetrics(
+      totalFees: totalFees,
+      candlesProcessed: candlesProcessed,
+    );
+  }
+
   /// Start paper trading with live data.
   static Future<bool> startPaperTrading({
     required String symbol,

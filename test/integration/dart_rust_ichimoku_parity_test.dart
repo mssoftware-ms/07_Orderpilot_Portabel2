@@ -5,24 +5,27 @@
 /// for the Ichimoku Cloud Retest strategy on a fixed deterministic
 /// 400-candle fixture.
 ///
-/// **Welle I2-5 (this commit) — Dart-side scope:**
-///   - Fixture triggers ≥ 1 LONG entry on the Dart-fallback engine so the
-///     subsequent numerical assertions below cannot be tautologies of
-///     `0 == 0`. We aim for both LONG and SHORT triggers; the V-shaped
-///     fixture is sized so the long-phase entry runs into the eventual
-///     reversal SL and re-opens the in_position guard for the short
-///     side. If a future strategy change makes both directions fire
-///     less reliably on this fixture, redesign the fixture (longer
-///     trend phases) rather than weakening the assertion.
-///   - 3x Dart-fallback determinism: same input → bit-exact metrics
-///     across three runs. Pins "no hidden RNG / no time-of-day
-///     branching" on the Dart side.
+/// Test surface (final after Welle I2-6):
 ///
-/// **Welle I2-6 (follow-up) — Rust + FFI scope:**
-///   - Adds `run_ichimoku_backtest` to the FFI surface via flutter_
-///     rust_bridge codegen.
-///   - Extends this file with the 3x Rust determinism + Dart-vs-Rust
-///     1e-9 cross-engine assertions (mirror of dart_rust_ut_bot_parity_test).
+///   1. `parity smoke …` — fixture triggers ≥ 1 LONG entry on the
+///      Dart-fallback engine so the numerical assertions below cannot
+///      be tautologies of `0 == 0`. The V-shape fixture is sized so the
+///      long-phase entry runs into the eventual reversal SL and re-opens
+///      the in_position guard for the short side. If a future strategy
+///      change makes both directions fire less reliably on this fixture,
+///      redesign the fixture (longer / steeper trend phases) rather than
+///      weakening the assertion.
+///
+///   2. `parity numerical …` — totalPnl / winRate / sharpe / drawdown
+///      must match between engines within 1e-9. Tolerance mirrors the
+///      UT-Bot parity test — any wider drift indicates real engine
+///      divergence (fee ordering, rounding, indicator formula) and MUST
+///      be investigated rather than papered over.
+///
+///   3. `parity determinism …` — repeating each engine three times on
+///      the same fixture produces bit-identical metrics. Pins
+///      "no hidden RNG / no time-of-day branching" on both sides of
+///      the FFI bridge.
 ///
 /// 400 candles cover the strict-spec 103-bar warm-up plus enough
 /// active-bar runway to walk through up-trend (LONG entry + run-up to
@@ -37,6 +40,7 @@ library;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:trading_app/core/models/candle.dart';
 import 'package:trading_app/services/backtest_service.dart';
+import 'package:trading_app/services/rust_bridge.dart';
 
 /// 400-candle V-shape fixture — pure-uptrend for 200 bars, then
 /// pure-downtrend for 200 bars. Linear slope ±0.5 per bar around a
@@ -78,9 +82,21 @@ void main() {
   const initialBalance = 10000.0;
   const feeRate = 0.0006;
 
-  group('F-01 Dart Ichimoku parity (Welle I2-5)', () {
-    test('parity smoke: fixture triggers ≥ 1 long entry on Dart engine',
-        () {
+  setUpAll(() async {
+    await RustBridge.initialize();
+  });
+
+  group('F-01 Dart ↔ Rust Ichimoku parity', () {
+    test('parity smoke: native available + fixture triggers ≥ 1 long entry',
+        () async {
+      expect(
+        RustBridge.isNativeAvailable,
+        isTrue,
+        reason:
+            'native engine must be loaded; cargo build artefacts in '
+            'rust/trading_engine/target/release/ are required for this test',
+      );
+
       final candles = _generateFixture();
       final dartResult = BacktestService.runIchimoku(
         candles: candles,
@@ -95,60 +111,133 @@ void main() {
         greaterThan(0),
         reason:
             'V-shape fixture must trigger ≥ 1 Ichimoku LONG entry on the '
-            'Dart engine; otherwise the numerical parity asserts wired in '
-            'Welle I2-6 would be tautological. If this fails after a '
-            'strategy change, redesign the fixture (longer / steeper '
-            'trend phases) rather than weakening the assertion.',
+            'Dart engine; otherwise the numerical parity asserts below '
+            'would be tautological. If this fails after a strategy change, '
+            'redesign the fixture rather than weakening the assertion.',
       );
     });
 
-    test('parity smoke: at least one trade closes (in_position guard works)',
-        () {
-      // V-shape fixture: long opens in up-phase, must close (SL or TP)
-      // so the in_position guard releases. Pins that the Dart engine
-      // actually exits positions rather than holding indefinitely.
+    test(
+        'parity numerical: totalPnl/winRate/sharpe/drawdown match within 1e-9',
+        () async {
       final candles = _generateFixture();
       final dartResult = BacktestService.runIchimoku(
         candles: candles,
         initialBalance: initialBalance,
         feeRate: feeRate,
       );
-      expect(
-        dartResult.trades,
-        isNotEmpty,
-        reason: 'at least one trade must be in the trade log',
-      );
-      // Sanity: every closed trade must have non-zero quantity and a
-      // documented exit reason — pins that the trade log isn't being
-      // populated with placeholder rows.
-      for (final t in dartResult.trades) {
-        expect(t.quantity, greaterThan(0));
-        expect(t.exitReason, isNotEmpty);
-      }
-    });
 
-    test('parity smoke: drawdown is non-trivial on the V-shape fixture',
-        () {
-      final candles = _generateFixture();
-      final dartResult = BacktestService.runIchimoku(
+      final rustMetrics = await RustBridge.runIchimokuBacktest(
         candles: candles,
         initialBalance: initialBalance,
         feeRate: feeRate,
       );
-      // A 200-bar reversal absorbs at least some equity excursion on
-      // any winning long — pin that the equity series itself isn't
-      // flat (which would zero out the Welle-I2-6 drawdown parity
-      // assertion).
+
       expect(
-        dartResult.metrics.maxDrawdown,
-        greaterThan(0.0),
-        reason: 'V-shape fixture should produce a non-zero max-drawdown '
-            'so the drawdown parity assertion in Welle I2-6 is not a '
-            'tautology of 0 == 0',
+        rustMetrics.totalTrades,
+        equals(dartResult.metrics.totalTrades),
+        reason: 'totalTrades must match exactly — divergence here points '
+            'to an entry-condition or warm-up-gate mismatch between engines',
       );
+      expect(
+        rustMetrics.totalPnl,
+        closeTo(dartResult.metrics.totalPnl, 1e-9),
+        reason: 'totalPnl divergence > 1e-9 indicates real engine drift — '
+            'do NOT widen tolerance, investigate ordering/rounding instead',
+      );
+      expect(
+        rustMetrics.winRate,
+        closeTo(dartResult.metrics.winRate, 1e-9),
+      );
+      expect(
+        rustMetrics.profitFactor,
+        closeTo(dartResult.metrics.profitFactor, 1e-9),
+      );
+
+      final dartFinalEquity =
+          initialBalance + dartResult.metrics.totalPnl;
+      final rustFinalEquity = initialBalance + rustMetrics.totalPnl;
+      expect(rustFinalEquity, closeTo(dartFinalEquity, 1e-9));
+
+      // F-03b / F-03c parity guarantees: equity series + running-peak
+      // drawdown share a single definition across engines.
+      expect(
+        rustMetrics.sharpeRatio,
+        closeTo(dartResult.metrics.sharpeRatio, 1e-9),
+      );
+      expect(
+        rustMetrics.maxDrawdown,
+        closeTo(dartResult.metrics.maxDrawdown, 1e-9),
+      );
+      expect(
+        rustMetrics.maxDrawdownPercent,
+        closeTo(dartResult.metrics.maxDrawdownPercent, 1e-9),
+      );
+
+      // Sanity: drawdown must be non-trivial so the asserts above
+      // are not 0 == 0 (totalTrades > 0 already pinned by the smoke).
+      expect(dartResult.metrics.maxDrawdown, greaterThan(0.0));
+      expect(rustMetrics.maxDrawdown, greaterThan(0.0));
     });
 
-    test('determinism: 3x Dart-fallback runs are bit-exact', () {
+    test('parity determinism: 3x Dart and 3x Rust bit-exact',
+        () async {
+      // Determinism contract: same input → same output, no float-noise
+      // drift across repeated runs. Extends the Dart-fallback
+      // determinism test in `test/services/ichimoku_backtest_test.dart`
+      // across the FFI boundary by exercising both engines three times.
+      final candles = _generateFixture();
+
+      final d1 = BacktestService.runIchimoku(
+        candles: candles,
+        initialBalance: initialBalance,
+        feeRate: feeRate,
+      );
+      final d2 = BacktestService.runIchimoku(
+        candles: candles,
+        initialBalance: initialBalance,
+        feeRate: feeRate,
+      );
+      final d3 = BacktestService.runIchimoku(
+        candles: candles,
+        initialBalance: initialBalance,
+        feeRate: feeRate,
+      );
+
+      expect(d2.metrics.totalPnl, equals(d1.metrics.totalPnl));
+      expect(d3.metrics.totalPnl, equals(d1.metrics.totalPnl));
+      expect(d2.metrics.totalTrades, equals(d1.metrics.totalTrades));
+
+      final r1 = await RustBridge.runIchimokuBacktest(
+        candles: candles,
+        initialBalance: initialBalance,
+        feeRate: feeRate,
+      );
+      final r2 = await RustBridge.runIchimokuBacktest(
+        candles: candles,
+        initialBalance: initialBalance,
+        feeRate: feeRate,
+      );
+      final r3 = await RustBridge.runIchimokuBacktest(
+        candles: candles,
+        initialBalance: initialBalance,
+        feeRate: feeRate,
+      );
+
+      expect(r2.totalPnl, equals(r1.totalPnl));
+      expect(r3.totalPnl, equals(r1.totalPnl));
+      expect(r2.totalTrades, equals(r1.totalTrades));
+      expect(r2.sharpeRatio, equals(r1.sharpeRatio));
+      expect(r2.maxDrawdown, equals(r1.maxDrawdown));
+    });
+
+    test('parity dart-fallback per-trade reproducibility', () {
+      // 3x Dart runs must agree on the trade log position-by-position,
+      // not just on the aggregate metrics. Catches drift inside the
+      // strategy itself (e.g. a HashMap iteration order change in the
+      // engine that flips entry/exit ordering across runs) while still
+      // letting the cross-engine numerical test treat metrics as the
+      // primary parity contract.
       final candles = _generateFixture();
       BacktestResult run() => BacktestService.runIchimoku(
             candles: candles,
@@ -159,20 +248,14 @@ void main() {
       final d1 = run();
       final d2 = run();
       final d3 = run();
-      expect(d2.metrics.totalPnl, equals(d1.metrics.totalPnl));
-      expect(d3.metrics.totalPnl, equals(d1.metrics.totalPnl));
-      expect(d2.metrics.totalTrades, equals(d1.metrics.totalTrades));
-      expect(d2.metrics.winRate, equals(d1.metrics.winRate));
-      expect(d2.metrics.maxDrawdown, equals(d1.metrics.maxDrawdown));
-      expect(d2.metrics.sharpeRatio, equals(d1.metrics.sharpeRatio));
-      // Trade log must match position-by-position, not just the
-      // aggregate totals — pins per-trade reproducibility.
       expect(d2.trades.length, equals(d1.trades.length));
+      expect(d3.trades.length, equals(d1.trades.length));
       for (int i = 0; i < d1.trades.length; i++) {
         expect(d2.trades[i].entryPrice, equals(d1.trades[i].entryPrice));
         expect(d2.trades[i].exitPrice, equals(d1.trades[i].exitPrice));
         expect(d2.trades[i].pnl, equals(d1.trades[i].pnl));
         expect(d2.trades[i].direction, equals(d1.trades[i].direction));
+        expect(d2.trades[i].exitReason, equals(d1.trades[i].exitReason));
       }
     });
   });

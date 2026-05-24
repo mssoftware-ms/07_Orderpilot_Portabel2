@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 
-use crate::addins::{BbRsiStrategy, UtBotStrategy};
+use crate::addins::{BbRsiStrategy, IchimokuStrategy, UtBotStrategy};
 use crate::models::{Candle, Timeframe};
 use crate::strategy::{AddinManifest, ParameterSchema, Signal, StrategyAddin, StrategyCategory};
 
@@ -239,6 +239,49 @@ pub fn run_ut_bot_backtest(
     serde_json::to_string(&result).unwrap_or_else(|e| format!(r#"{{"error":"{}"}}"#, e))
 }
 
+/// Run a full backtest of the Ichimoku Cloud Retest strategy on
+/// historical candles.
+///
+/// `candles_json`    – JSON array of `Candle` objects.
+/// `params_json`     – JSON object with parameter overrides (e.g.
+///                     `{"score_threshold": 40, "kijun_period": 30}`).
+/// `initial_balance` – Starting account balance in quote currency.
+/// `fee_rate`        – Taker fee rate per side.
+///
+/// Returns a JSON-serialised `BacktestResult` identical in shape to
+/// `run_bb_rsi_backtest` / `run_ut_bot_backtest`. The Phase-2
+/// video-spec defaults map to the BTCUSDT 1-hour timeframe (per Spec
+/// §1 / §12.1 asset substitution from EUR/USD); override via
+/// `params_json` for Welle-I3 sweeps.
+pub fn run_ichimoku_backtest(
+    candles_json: String,
+    params_json: String,
+    initial_balance: f64,
+    fee_rate: f64,
+) -> String {
+    use crate::backtest::{BacktestConfig, BacktestEngine};
+
+    let candles: Vec<Candle> = match serde_json::from_str(&candles_json) {
+        Ok(c) => c,
+        Err(e) => return format!(r#"{{"error":"bad candles json: {}"}}"#, e),
+    };
+    let params: HashMap<String, f64> = match serde_json::from_str(&params_json) {
+        Ok(p) => p,
+        Err(e) => return format!(r#"{{"error":"bad params json: {}"}}"#, e),
+    };
+
+    let mut strategy = IchimokuStrategy::new();
+    if let Err(e) = strategy.validate_params(&params) {
+        return format!(r#"{{"error":"{}"}}"#, e);
+    }
+
+    let config = BacktestConfig::new(initial_balance, fee_rate, Timeframe::H1);
+    let mut engine = BacktestEngine::new(config);
+    let result = engine.run(&mut strategy, &candles, params);
+
+    serde_json::to_string(&result).unwrap_or_else(|e| format!(r#"{{"error":"{}"}}"#, e))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -305,6 +348,67 @@ mod tests {
         let manifest: AddinManifest = serde_json::from_str(&json).unwrap();
         assert_eq!(manifest.id, "bb_rsi_v1");
         assert_eq!(manifest.category, StrategyCategory::MeanReversion);
+    }
+
+    #[test]
+    fn test_run_ichimoku_backtest_bad_json_returns_error() {
+        // Malformed candles JSON must surface as a structured error
+        // rather than panicking — same contract as run_bb_rsi_backtest
+        // and run_ut_bot_backtest.
+        let result = run_ichimoku_backtest(
+            "not json".to_string(),
+            "{}".to_string(),
+            10_000.0,
+            0.0006,
+        );
+        assert!(
+            result.contains("\"error\""),
+            "expected error JSON, got: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_run_ichimoku_backtest_emits_valid_metrics_on_uptrend_fixture() {
+        // 200-bar linear uptrend on 1h candles: clears the 103-bar
+        // warm-up and triggers at least the long-side entry on the
+        // strict-spec 5-confluence (Spec §2). Mirrors the
+        // `runIchimoku` smoke from `test/services/ichimoku_backtest_test.dart`.
+        let closes: Vec<f64> = (0..200).map(|i| 100.0 + i as f64 * 0.5).collect();
+        let candles: Vec<Candle> = closes
+            .iter()
+            .enumerate()
+            .map(|(i, &c)| {
+                Candle::new(
+                    1_700_000_000_000 + i as i64 * 3_600_000,
+                    c - 0.2,
+                    c + 0.3,
+                    c - 0.3,
+                    c,
+                    1000.0 + i as f64,
+                )
+            })
+            .collect();
+
+        let candles_json = serde_json::to_string(&candles).unwrap();
+        let params_json = "{}".to_string(); // strict-spec defaults
+
+        let result =
+            run_ichimoku_backtest(candles_json, params_json, 10_000.0, 0.0006);
+        assert!(
+            !result.contains("\"error\""),
+            "backtest must not error on the uptrend fixture, got: {}",
+            result
+        );
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(
+            parsed["candles_processed"].as_u64().unwrap(),
+            candles.len() as u64
+        );
+        assert_eq!(
+            parsed["equity_curve"].as_array().unwrap().len(),
+            candles.len()
+        );
     }
 
     #[test]
