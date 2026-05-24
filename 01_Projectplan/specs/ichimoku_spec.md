@@ -52,7 +52,14 @@ Die Senkou-Spans werden **visuell** 26 Bars in die Zukunft projiziert. Für den 
 - Bedingung „Tenkan über Kijun" → `Tenkan_i > Kijun_i`
 - Bedingung „Chikou über Cloud" → `close_i > max(Senkou_A_{i-26}, Senkou_B_{i-26})` mit Werten aus Bar i-52
 
-**Mindest-Warmup für volle Ichimoku-Confluence:** `max(52, 26+52) = 78 Bars` (für Chikou-vs-Cloud-Vergleich braucht man die Cloud-bei-{i-26}, deren Berechnung 52-Bar-Lookback in Bar-{i-78} braucht).
+**Mindest-Warmup für volle Ichimoku-Confluence:** `max(senkou_b_period, 2 * shift + senkou_b_period - 1) = 103 Bars` (default-params: senkou_b=52, shift=26).
+
+**Herleitung** (korrigiert 2026-05-23 nach Welle-I2-Implementation, vorherige Spec-Berechnung `78 = 52 + 26` zählte nur c1, nicht c4):
+- Bedingung c1 „Preis über Cloud“ liest Senkou_A_i und Senkou_B_i; diese wurden bei i-26 berechnet aus high_max(52). Erste Validität: i = 51 + 26 = 77, also Bar **78**.
+- Bedingung c4 „Chikou über Cloud“ liest Senkou bei i-26, deren Berechnung bereits Senkou-B-Validität bei i-26-26 = i-52 braucht. Senkou-B bei Bar-Index i-52 verlangt high_max(52)-Lookback bis i-52-51 = i-103. Erste Validität: i = 103, also Bar **104**.
+- Die strengere c4-Bedingung dominiert: **`start_idx = (senkou_b_period - 1) + 2 * shift = 103`**, erstes Confluence-evaluable Bar ist also Index 103.
+
+Code-Referenz: `rust/trading_engine/src/addins/ichimoku.rs::ICHIMOKU_WARMUP_BARS`.
 
 ---
 
