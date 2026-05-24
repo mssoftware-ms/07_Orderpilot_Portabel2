@@ -148,6 +148,115 @@ pub fn calc_kijun_sen(
     calc_midpoint_series(highs, lows, period)
 }
 
+// ─── Senkou-Span A / B (cloud edges) ───────────────────────────────────────
+
+/// Canonical Ichimoku cloud-shift in bars (Spec §1.1 — Senkou-Span A/B
+/// are visually displaced **forward** by this many bars; Chikou-Span is
+/// displaced **backward** by the same amount). Hard-coded here because
+/// every read-anchor helper below assumes this value; making it a
+/// parameter would change three signatures simultaneously and force
+/// every strategy to thread the value through.
+pub const CLOUD_SHIFT_BARS: usize = 26;
+
+/// Compute **Senkou-Span A** = `(Tenkan + Kijun) / 2`.
+///
+/// The output is stored **time-aligned to the bar at which both inputs
+/// were computed** — there is NO future-shift baked into storage. The
+/// visual `+26`-bar shift happens at READ time via the explicit
+/// read-anchor helpers [`future_senkou_at_i`] (still-projected cloud)
+/// and [`past_senkou_at_i_minus_26`] (cloud currently plotted at bar
+/// `i`). See module doc for the rationale (no-look-ahead).
+///
+/// Returns `None` if the two inputs have mismatched lengths. NaN inputs
+/// propagate per-bar (any NaN ⇒ NaN slot).
+pub fn calc_senkou_span_a(tenkan: &[f64], kijun: &[f64]) -> Option<Vec<f64>> {
+    if tenkan.len() != kijun.len() {
+        return None;
+    }
+    let n = tenkan.len();
+    let mut out = vec![f64::NAN; n];
+    for (i, slot) in out.iter_mut().enumerate() {
+        let t = tenkan[i];
+        let k = kijun[i];
+        if !t.is_nan() && !k.is_nan() {
+            *slot = (t + k) / 2.0;
+        }
+    }
+    Some(out)
+}
+
+/// Compute **Senkou-Span B** = `(HH_period + LL_period) / 2`.
+///
+/// Same midpoint math as [`calc_tenkan_sen`] / [`calc_kijun_sen`] with
+/// the canonical 52-bar window (Spec §1.1 default `period = 52`).
+/// Storage convention is identical to [`calc_senkou_span_a`] — no
+/// future-shift in storage; reads go through the explicit helpers.
+pub fn calc_senkou_span_b(
+    highs: &[f64],
+    lows: &[f64],
+    period: usize,
+) -> Option<Vec<f64>> {
+    calc_midpoint_series(highs, lows, period)
+}
+
+// ─── Senkou-Span read anchors (explicit time-shift semantics) ──────────────
+//
+// These three helpers exist so strategy code reads self-documentingly
+// instead of indexing raw `span[i]` / `span[i - 26]` without context.
+// All three are pure index-into-slice; the only purpose is to pin
+// temporal intent at every call site (Spec §1.1).
+
+/// Read the Senkou-Span value computed at bar `i` — no time-shift
+/// interpretation. Returns `NaN` for `i >= span.len()`.
+///
+/// Neutral helper: callers that don't need to disambiguate
+/// past/future cloud semantics use this one and document context
+/// separately.
+pub fn senkou_at_i(span: &[f64], i: usize) -> f64 {
+    if i >= span.len() {
+        f64::NAN
+    } else {
+        span[i]
+    }
+}
+
+/// Read the Senkou-Span value that, when visualized on a chart, will
+/// be plotted at bar `i + 26` — the "still-projected" cloud computed
+/// at bar `i`.
+///
+/// Numerically identical to [`senkou_at_i`] (because the visual
+/// `+26`-shift happens at chart-render time, NOT in storage). Exists
+/// so a strategy call site like
+/// `future_senkou_at_i(&span_a, i) > kijun[i]` reads as "the cloud
+/// projected forward from now is above Kijun", rather than the
+/// opaque `span_a[i] > kijun[i]`.
+pub fn future_senkou_at_i(span: &[f64], i: usize) -> f64 {
+    senkou_at_i(span, i)
+}
+
+/// Read the Senkou-Span value that gets visualized **at bar `i`
+/// itself** — i.e. the cloud currently plotted at bar `i`, which was
+/// computed 26 bars ago. Returns `None` if `i < CLOUD_SHIFT_BARS` (no
+/// prior history) or `i - CLOUD_SHIFT_BARS` is past the slice end.
+///
+/// This is the workhorse for Ichimoku confluence at bar `i`: to ask
+/// "is the close above the current cloud?", compare `close[i]` to
+/// `past_senkou_at_i_minus_26(&span_a, i)` and
+/// `past_senkou_at_i_minus_26(&span_b, i)`. The helper proves
+/// no-look-ahead by construction — it only ever reads `span[i - 26]`,
+/// which depends on data at or before bar `i - 26 ≤ i`.
+pub fn past_senkou_at_i_minus_26(span: &[f64], i: usize) -> Option<f64> {
+    if i < CLOUD_SHIFT_BARS {
+        return None;
+    }
+    let j = i - CLOUD_SHIFT_BARS;
+    if j >= span.len() {
+        None
+    } else {
+        Some(span[j])
+    }
+}
+
 // ─── Tests ──────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -501,6 +610,140 @@ mod tests {
         // i = 7: window [5..=7] = highs [15,16,17] / lows [6,7,8]
         //   → (17 + 6) / 2 = 11.5
         assert!((t[7] - 11.5).abs() < 1e-12, "t[7] = {}", t[7]);
+    }
+
+    // ── Senkou-Span A / B ───────────────────────────────────────────────
+
+    #[test]
+    fn test_senkou_span_a_mismatched_lengths_returns_none() {
+        assert!(calc_senkou_span_a(&[1.0, 2.0], &[1.0]).is_none());
+    }
+
+    #[test]
+    fn test_senkou_span_a_propagates_nan_per_bar() {
+        // tenkan[0] = NaN (warm-up) → span_a[0] = NaN; bar 1 both
+        // present → span_a[1] = (10 + 20) / 2 = 15.
+        let tenkan = [f64::NAN, 10.0, 12.0];
+        let kijun = [5.0, 20.0, f64::NAN];
+        let a = calc_senkou_span_a(&tenkan, &kijun).unwrap();
+        assert!(a[0].is_nan(), "a[0] = {}", a[0]);
+        assert!((a[1] - 15.0).abs() < 1e-12, "a[1] = {}", a[1]);
+        assert!(a[2].is_nan(), "a[2] = {}", a[2]);
+    }
+
+    #[test]
+    fn test_senkou_span_a_average_of_tenkan_and_kijun() {
+        // span_a is purely (t + k) / 2 — verify across a longer fixture.
+        let tenkan: Vec<f64> = (0..10).map(|i| i as f64).collect();
+        let kijun: Vec<f64> = (0..10).map(|i| (i as f64) * 2.0).collect();
+        let a = calc_senkou_span_a(&tenkan, &kijun).unwrap();
+        for (i, got) in a.iter().enumerate() {
+            let want = (i as f64 + 2.0 * i as f64) / 2.0;
+            assert!((got - want).abs() < 1e-12, "a[{}] = {}", i, got);
+        }
+    }
+
+    #[test]
+    fn test_senkou_span_b_zero_period_returns_none() {
+        assert!(calc_senkou_span_b(&[1.0], &[1.0], 0).is_none());
+    }
+
+    #[test]
+    fn test_senkou_span_b_uses_period_52_midpoint() {
+        // 60 bars, period 52 — first valid index = 51. high[i]=i+1,
+        // low[i]=i. At i=51: HH=52, LL=0 → midpoint=26.0.
+        let n = 60;
+        let highs: Vec<f64> = (0..n).map(|i| (i + 1) as f64).collect();
+        let lows: Vec<f64> = (0..n).map(|i| i as f64).collect();
+        let b = calc_senkou_span_b(&highs, &lows, 52).unwrap();
+        for v in b.iter().take(51) {
+            assert!(v.is_nan(), "warm-up must be NaN, got {}", v);
+        }
+        assert!((b[51] - 26.0).abs() < 1e-12, "b[51] = {}", b[51]);
+        // At i=52: window slides → HH=53, LL=1 → 27.0.
+        assert!((b[52] - 27.0).abs() < 1e-12, "b[52] = {}", b[52]);
+    }
+
+    // ── Read anchors (senkou_at_i / future_/ past_) ─────────────────────
+
+    #[test]
+    fn test_senkou_at_i_out_of_bounds_returns_nan() {
+        let span = [1.0, 2.0, 3.0];
+        assert!(senkou_at_i(&span, 5).is_nan());
+    }
+
+    #[test]
+    fn test_senkou_at_i_returns_raw_value() {
+        let span = [10.0, 20.0, 30.0];
+        assert!((senkou_at_i(&span, 0) - 10.0).abs() < 1e-12);
+        assert!((senkou_at_i(&span, 2) - 30.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_future_senkou_at_i_numerically_equals_senkou_at_i() {
+        // Future-shift semantics happen at chart-render time, NOT in
+        // storage — so future_senkou_at_i is bit-identical to
+        // senkou_at_i. Pin that contract so a "helpful" optimisation
+        // can't quietly drift the two apart.
+        let span: Vec<f64> = (0..50).map(|i| 100.0 + i as f64 * 0.5).collect();
+        for i in 0..50 {
+            let a = senkou_at_i(&span, i);
+            let b = future_senkou_at_i(&span, i);
+            assert!(
+                (a - b).abs() < 1e-12 || (a.is_nan() && b.is_nan()),
+                "future_senkou_at_i diverged from senkou_at_i at i={}: {} vs {}",
+                i, a, b,
+            );
+        }
+    }
+
+    #[test]
+    fn test_past_senkou_at_i_minus_26_none_for_i_below_shift() {
+        let span = vec![1.0; 100];
+        assert!(past_senkou_at_i_minus_26(&span, 0).is_none());
+        assert!(past_senkou_at_i_minus_26(&span, 25).is_none());
+    }
+
+    #[test]
+    fn test_past_senkou_at_i_minus_26_returns_span_at_i_minus_26() {
+        let span: Vec<f64> = (0..100).map(|i| i as f64 * 0.5).collect();
+        // i = 26 → span[0] = 0.0
+        assert_eq!(past_senkou_at_i_minus_26(&span, 26), Some(0.0));
+        // i = 80 → span[54] = 27.0
+        assert_eq!(past_senkou_at_i_minus_26(&span, 80), Some(27.0));
+    }
+
+    #[test]
+    fn test_past_senkou_at_i_minus_26_none_for_i_beyond_span() {
+        // i - 26 >= len → None (defensive against caller bugs feeding
+        // a bar index past the available span).
+        let span = vec![1.0; 30];
+        // i = 56 → j = 30, which is >= len = 30 → None.
+        assert!(past_senkou_at_i_minus_26(&span, 56).is_none());
+    }
+
+    #[test]
+    fn test_no_look_ahead_past_cloud_at_i_only_uses_data_at_or_before_i() {
+        // No-look-ahead beleg: build a tenkan/kijun pair where everything
+        // past bar `cutoff` is poisoned with NaN. The cloud-at-bar-i read
+        // (past_senkou_at_i_minus_26) for i <= cutoff must NEVER touch the
+        // NaN region — proven by getting a finite value back even though
+        // the slice after `cutoff` is corrupt.
+        let n = 100;
+        let cutoff: usize = 50;
+        let tenkan: Vec<f64> = (0..n)
+            .map(|i| if i <= cutoff { 100.0 + i as f64 } else { f64::NAN })
+            .collect();
+        let kijun: Vec<f64> = (0..n)
+            .map(|i| if i <= cutoff { 200.0 + i as f64 } else { f64::NAN })
+            .collect();
+        let span_a = calc_senkou_span_a(&tenkan, &kijun).unwrap();
+        // At i = cutoff = 50, past cloud reads span_a[24] = (124 + 224)/2 = 174
+        let got = past_senkou_at_i_minus_26(&span_a, cutoff).unwrap();
+        assert!((got - 174.0).abs() < 1e-12, "got = {}", got);
+        // The NaN region only kicks in at i = cutoff + 26 = 76 onward.
+        assert!(past_senkou_at_i_minus_26(&span_a, 75).unwrap().is_finite());
+        assert!(past_senkou_at_i_minus_26(&span_a, 77).unwrap().is_nan());
     }
 
     #[test]

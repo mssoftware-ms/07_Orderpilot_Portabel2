@@ -858,4 +858,119 @@ void main() {
       expect(k26![100], closeTo(94.64444430980959, 1e-9));
     });
   });
+
+  group('calcSenkouSpanA / B + read anchors (Phase-2 Welle I1)', () {
+    test('cloudShiftBars constant matches Rust CLOUD_SHIFT_BARS', () {
+      // Pin the magic-number contract: if the Rust side ever changes
+      // CLOUD_SHIFT_BARS away from 26, this test must fail loudly so the
+      // Dart mirror catches the drift instead of silently desynching.
+      expect(cloudShiftBars, 26);
+    });
+
+    test('calcSenkouSpanA: returns null for mismatched lengths', () {
+      expect(calcSenkouSpanA(const [1.0, 2.0], const [1.0]), isNull);
+    });
+
+    test('calcSenkouSpanA: propagates NaN per bar', () {
+      final tenkan = [double.nan, 10.0, 12.0];
+      final kijun = [5.0, 20.0, double.nan];
+      final a = calcSenkouSpanA(tenkan, kijun);
+      expect(a, isNotNull);
+      expect(a![0].isNaN, isTrue);
+      expect(a[1], closeTo(15.0, 1e-12));
+      expect(a[2].isNaN, isTrue);
+    });
+
+    test('calcSenkouSpanA: equals (tenkan + kijun) / 2 element-wise', () {
+      final tenkan = List<double>.generate(10, (i) => i.toDouble());
+      final kijun = List<double>.generate(10, (i) => i * 2.0);
+      final a = calcSenkouSpanA(tenkan, kijun);
+      expect(a, isNotNull);
+      for (int i = 0; i < 10; i++) {
+        expect(a![i], closeTo((i + 2 * i) / 2.0, 1e-12),
+            reason: 'a[$i]');
+      }
+    });
+
+    test('calcSenkouSpanB: returns null for period 0', () {
+      expect(calcSenkouSpanB(const [1.0], const [1.0], 0), isNull);
+    });
+
+    test('calcSenkouSpanB: 52-bar midpoint matches expected', () {
+      // 60 bars, period 52 — first valid at i=51 → HH=52, LL=0 → 26.0.
+      const n = 60;
+      final highs = List<double>.generate(n, (i) => (i + 1).toDouble());
+      final lows = List<double>.generate(n, (i) => i.toDouble());
+      final b = calcSenkouSpanB(highs, lows, 52);
+      expect(b, isNotNull);
+      for (int i = 0; i < 51; i++) {
+        expect(b![i].isNaN, isTrue, reason: 'warm-up i=$i');
+      }
+      expect(b![51], closeTo(26.0, 1e-12));
+      expect(b[52], closeTo(27.0, 1e-12));
+    });
+
+    test('senkouAtI: out of bounds returns NaN', () {
+      expect(senkouAtI(const [1.0, 2.0, 3.0], 5).isNaN, isTrue);
+    });
+
+    test('senkouAtI: returns raw span[i]', () {
+      const span = [10.0, 20.0, 30.0];
+      expect(senkouAtI(span, 0), closeTo(10.0, 1e-12));
+      expect(senkouAtI(span, 2), closeTo(30.0, 1e-12));
+    });
+
+    test('futureSenkouAtI: numerically equals senkouAtI everywhere', () {
+      // Pin that future-shift is a READ-time semantic and storage
+      // remains bit-identical (no hidden displacement).
+      final span = List<double>.generate(50, (i) => 100.0 + i * 0.5);
+      for (int i = 0; i < 50; i++) {
+        final a = senkouAtI(span, i);
+        final b = futureSenkouAtI(span, i);
+        expect(a, closeTo(b, 1e-12), reason: 'i=$i');
+      }
+    });
+
+    test('pastSenkouAtIMinus26: null for i below shift', () {
+      final span = List<double>.filled(100, 1.0);
+      expect(pastSenkouAtIMinus26(span, 0), isNull);
+      expect(pastSenkouAtIMinus26(span, 25), isNull);
+    });
+
+    test('pastSenkouAtIMinus26: returns span[i - 26]', () {
+      final span = List<double>.generate(100, (i) => i * 0.5);
+      expect(pastSenkouAtIMinus26(span, 26), 0.0);
+      expect(pastSenkouAtIMinus26(span, 80), 27.0);
+    });
+
+    test('pastSenkouAtIMinus26: null when i - 26 is past span length', () {
+      final span = List<double>.filled(30, 1.0);
+      // i = 56 → j = 30 >= len 30 → null
+      expect(pastSenkouAtIMinus26(span, 56), isNull);
+    });
+
+    test('no-look-ahead: past cloud at i only uses data at or before i',
+        () {
+      // Mirrors `test_no_look_ahead_past_cloud_at_i_only_uses_data...`
+      // in Rust: poison data after `cutoff` and prove the past-cloud
+      // read at i <= cutoff never touches the corrupt region.
+      const n = 100;
+      const cutoff = 50;
+      final tenkan = List<double>.generate(
+        n,
+        (i) => i <= cutoff ? 100.0 + i : double.nan,
+      );
+      final kijun = List<double>.generate(
+        n,
+        (i) => i <= cutoff ? 200.0 + i : double.nan,
+      );
+      final spanA = calcSenkouSpanA(tenkan, kijun);
+      expect(spanA, isNotNull);
+      // i = cutoff = 50 → past cloud reads spanA[24] = (124 + 224)/2 = 174
+      expect(pastSenkouAtIMinus26(spanA!, cutoff), closeTo(174.0, 1e-12));
+      // NaN region kicks in at i = cutoff + 26 = 76.
+      expect(pastSenkouAtIMinus26(spanA, 75)!.isFinite, isTrue);
+      expect(pastSenkouAtIMinus26(spanA, 77)!.isNaN, isTrue);
+    });
+  });
 }

@@ -440,3 +440,85 @@ List<double>? calcKijunSen(
   int period,
 ) =>
     _midpointSeries(highs, lows, period);
+
+// ─── Senkou-Span A / B (cloud edges, Phase-2 Welle I1) ──────────────────────
+
+/// Canonical Ichimoku cloud-shift in bars (Spec §1.1). Hardcoded here
+/// because every read-anchor helper below assumes this value — making
+/// it a parameter would change three signatures simultaneously and
+/// force every strategy to thread it through. Locked bit-identical
+/// against `CLOUD_SHIFT_BARS` in `addins/ichimoku.rs`.
+const int cloudShiftBars = 26;
+
+/// Compute **Senkou-Span A** = `(Tenkan + Kijun) / 2`.
+///
+/// Output is stored **time-aligned to the bar at which both inputs
+/// were computed** — there is NO future-shift baked into storage. The
+/// visual `+26`-bar shift happens at read time via the explicit
+/// read-anchor helpers [futureSenkouAtI] and [pastSenkouAtIMinus26].
+///
+/// Returns `null` on mismatched lengths. NaN inputs propagate per-bar.
+/// Locked bit-identical against `calc_senkou_span_a` in Rust.
+List<double>? calcSenkouSpanA(List<double> tenkan, List<double> kijun) {
+  if (tenkan.length != kijun.length) return null;
+  final n = tenkan.length;
+  final out = List<double>.filled(n, double.nan);
+  for (int i = 0; i < n; i++) {
+    final t = tenkan[i];
+    final k = kijun[i];
+    if (!t.isNaN && !k.isNaN) {
+      out[i] = (t + k) / 2.0;
+    }
+  }
+  return out;
+}
+
+/// Compute **Senkou-Span B** = `(HH_period + LL_period) / 2`.
+///
+/// Same midpoint math as Tenkan/Kijun with the canonical 52-bar window
+/// (Spec §1.1 default `period = 52`). Storage convention identical to
+/// [calcSenkouSpanA] — no future-shift in storage; reads go through
+/// the explicit helpers. Locked bit-identical against
+/// `calc_senkou_span_b` in Rust.
+List<double>? calcSenkouSpanB(
+  List<double> highs,
+  List<double> lows,
+  int period,
+) =>
+    _midpointSeries(highs, lows, period);
+
+// ─── Senkou-Span read anchors (explicit time-shift semantics) ───────────────
+//
+// These three helpers exist so strategy code reads self-documentingly
+// instead of indexing raw `span[i]` / `span[i - 26]` without context.
+// All three are pure index-into-list; the only purpose is to pin
+// temporal intent at every call site (Spec §1.1).
+
+/// Read the Senkou-Span value computed at bar [i] — no time-shift
+/// interpretation. Returns `double.nan` for `i >= span.length`.
+double senkouAtI(List<double> span, int i) {
+  if (i >= span.length) return double.nan;
+  return span[i];
+}
+
+/// Read the Senkou-Span value that, when visualized on a chart, will
+/// be plotted at bar `i + 26` — the "still-projected" cloud computed
+/// at bar [i]. Numerically identical to [senkouAtI] because the visual
+/// `+26`-shift happens at chart-render time, NOT in storage. Exists so
+/// strategy call sites state intent.
+double futureSenkouAtI(List<double> span, int i) => senkouAtI(span, i);
+
+/// Read the Senkou-Span value that gets visualized **at bar [i]
+/// itself** — the cloud currently plotted at bar [i], computed 26 bars
+/// ago. Returns `null` if `i < cloudShiftBars` (no prior history) or
+/// `i - cloudShiftBars` is past the list end.
+///
+/// Workhorse for Ichimoku confluence at bar `i`: to ask "is the close
+/// above the current cloud?", compare `close[i]` to
+/// `pastSenkouAtIMinus26(spanA, i)` and `pastSenkouAtIMinus26(spanB, i)`.
+double? pastSenkouAtIMinus26(List<double> span, int i) {
+  if (i < cloudShiftBars) return null;
+  final j = i - cloudShiftBars;
+  if (j >= span.length) return null;
+  return span[j];
+}
