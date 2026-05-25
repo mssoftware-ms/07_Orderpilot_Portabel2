@@ -27,7 +27,15 @@
 //! half-open `[start, end)` so `slice[range.0..range.1]` gives exactly
 //! `range.1 - range.0` candles.
 
+use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
+
+use crate::backtest::BacktestConfig;
+use crate::models::Candle;
+
+use super::runner::run_optimization_trial;
+use super::scoring::StrategyKind;
+use super::{ScoreConstraints, TrialMetrics, TrialParams};
 
 /// Configuration for a rolling-window walk-forward run.
 ///
@@ -126,6 +134,195 @@ pub fn generate_splits(
         });
     }
     out
+}
+
+// ─── Trial Runner ────────────────────────────────────────────────────────────
+
+/// Result for one (train, validate) split inside a walk-forward trial.
+/// Carries the raw `TrialMetrics` from both windows so the aggregation
+/// layer (and the SQLite store) can recompute or re-display any
+/// per-split diagnostic without re-running the backtest.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct WalkForwardSplitResult {
+    pub split_index: usize,
+    pub train_metrics: TrialMetrics,
+    pub validate_metrics: TrialMetrics,
+}
+
+/// Outcome of one full walk-forward trial: per-split metrics plus
+/// aggregated stability-penalized score.
+///
+/// # Aggregated score
+/// ```text
+/// aggregated_score = mean(OOS_PF) - std(OOS_PF) * stability_penalty
+/// ```
+/// computed over **sanitized** OOS profit factors (NaN / ±Inf → 0.0).
+/// If every split's raw OOS PF is non-finite (e.g. zero gross loss
+/// across all validate windows, indicating no meaningful trades),
+/// `aggregated_score = f64::NEG_INFINITY` so the trial sorts to the
+/// bottom of any Top-N query — identical sentinel convention to
+/// Welle-O1 `score_trial`.
+///
+/// # Why stability over raw mean
+/// A trial whose OOS-PF distribution is `[3.0, 0.1, 3.0, 0.1, …]`
+/// (mean ≈ 1.55) is dangerous in Live-Trading despite its high mean —
+/// it's one regime-shift away from a 0.1-PF stretch. The penalty
+/// pushes the optimizer toward `[1.5, 1.5, 1.5, …]` style trials
+/// where mean and worst converge.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct WalkForwardResult {
+    pub trial_id: u32,
+    pub params: TrialParams,
+    pub splits: Vec<WalkForwardSplitResult>,
+    pub aggregated_score: f64,
+    pub mean_oos_pf: f64,
+    pub std_oos_pf: f64,
+    pub worst_oos_pf: f64,
+    pub mean_is_pf: f64,
+    /// Mean IS-PF minus mean OOS-PF — positive values indicate
+    /// overfitting (in-sample beat out-of-sample).
+    pub is_oos_decay: f64,
+}
+
+/// Sanitize a single profit-factor reading: NaN / ±Inf → 0.0, finite
+/// values pass through unchanged. Pure function.
+fn sanitize_pf(pf: f64) -> f64 {
+    if pf.is_finite() {
+        pf
+    } else {
+        0.0
+    }
+}
+
+/// Aggregate per-split results into a `WalkForwardResult`. Pure
+/// function — no engine calls, no I/O — so the score formula can be
+/// unit-tested against handcrafted split sequences without paying the
+/// backtest cost.
+///
+/// # Panics
+/// Never; `splits` must be non-empty (caller responsibility).
+pub fn aggregate_walk_forward(
+    trial_id: u32,
+    params: TrialParams,
+    splits: Vec<WalkForwardSplitResult>,
+    stability_penalty: f64,
+) -> WalkForwardResult {
+    debug_assert!(!splits.is_empty(), "aggregate_walk_forward requires non-empty splits");
+    let n = splits.len() as f64;
+
+    let any_finite_oos = splits
+        .iter()
+        .any(|s| s.validate_metrics.profit_factor.is_finite());
+
+    let oos_pfs: Vec<f64> = splits
+        .iter()
+        .map(|s| sanitize_pf(s.validate_metrics.profit_factor))
+        .collect();
+    let is_pfs: Vec<f64> = splits
+        .iter()
+        .map(|s| sanitize_pf(s.train_metrics.profit_factor))
+        .collect();
+
+    let mean_oos = oos_pfs.iter().sum::<f64>() / n;
+    let variance_oos = oos_pfs
+        .iter()
+        .map(|x| (x - mean_oos).powi(2))
+        .sum::<f64>()
+        / n;
+    let std_oos = variance_oos.sqrt();
+    let worst_oos = oos_pfs.iter().copied().fold(f64::INFINITY, f64::min);
+    let mean_is = is_pfs.iter().sum::<f64>() / n;
+
+    let aggregated = if any_finite_oos {
+        mean_oos - std_oos * stability_penalty
+    } else {
+        f64::NEG_INFINITY
+    };
+
+    WalkForwardResult {
+        trial_id,
+        params,
+        splits,
+        aggregated_score: aggregated,
+        mean_oos_pf: mean_oos,
+        std_oos_pf: std_oos,
+        worst_oos_pf: worst_oos,
+        mean_is_pf: mean_is,
+        is_oos_decay: mean_is - mean_oos,
+    }
+}
+
+/// Run one walk-forward trial: generate splits, score every (train,
+/// validate) window via `run_optimization_trial`, then aggregate.
+///
+/// # Errors
+/// Returns `Err` when `candles.len() < train_bars + validate_bars`
+/// (i.e. `generate_splits` yields zero splits). Callers in production
+/// sweeps should treat this as a configuration error, not a per-trial
+/// failure — every trial in the study would hit the same condition.
+///
+/// # Per-split disqualification semantics
+/// The runner does **not** disqualify individual splits — it collects
+/// raw metrics for every window and lets the aggregator sanitize. A
+/// validate window with zero trades / NaN PF therefore contributes a
+/// sanitized 0.0 to the mean / std calculation, dragging the
+/// aggregated score down (which is the correct behavior: a strategy
+/// that misses an entire OOS window deserves to be penalized).
+pub fn run_walk_forward_trial(
+    strategy: StrategyKind,
+    trial_id: u32,
+    params: TrialParams,
+    candles: &[Candle],
+    config: &WalkForwardConfig,
+    base_config: BacktestConfig,
+    constraints: &ScoreConstraints,
+) -> Result<WalkForwardResult> {
+    let splits = generate_splits(config, candles.len());
+    if splits.is_empty() {
+        return Err(anyhow!(
+            "walk-forward: insufficient data — {} candles cannot host one (train={} + validate={}) split (step={})",
+            candles.len(),
+            config.train_bars,
+            config.validate_bars,
+            config.step_bars,
+        ));
+    }
+
+    let mut split_results = Vec::with_capacity(splits.len());
+    for split in splits {
+        let train_slice = &candles[split.train_range.0..split.train_range.1];
+        let validate_slice = &candles[split.validate_range.0..split.validate_range.1];
+
+        let train_trial = run_optimization_trial(
+            strategy,
+            trial_id,
+            params.clone(),
+            train_slice,
+            base_config.clone(),
+            constraints,
+        );
+        let validate_trial = run_optimization_trial(
+            strategy,
+            trial_id,
+            params.clone(),
+            validate_slice,
+            base_config.clone(),
+            constraints,
+        );
+
+        split_results.push(WalkForwardSplitResult {
+            split_index: split.split_index,
+            train_metrics: train_trial.metrics,
+            validate_metrics: validate_trial.metrics,
+        });
+    }
+
+    Ok(aggregate_walk_forward(
+        trial_id,
+        params,
+        split_results,
+        config.stability_penalty,
+    ))
 }
 
 #[cfg(test)]
@@ -285,5 +482,289 @@ mod tests {
         for (i, s) in splits.iter().enumerate() {
             assert_eq!(s.split_index, i);
         }
+    }
+
+    // ─── Aggregation tests (pure, no backtests) ──────────────────────────────
+
+    use crate::models::Timeframe;
+
+    fn metrics_with_pf(pf: f64, trades: u32) -> TrialMetrics {
+        TrialMetrics {
+            total_trades: trades,
+            total_pnl: 100.0,
+            win_rate: 55.0,
+            sharpe_ratio: 1.0,
+            max_drawdown_pct: 10.0,
+            profit_factor: pf,
+            final_equity: 10_100.0,
+        }
+    }
+
+    fn split(i: usize, train_pf: f64, validate_pf: f64) -> WalkForwardSplitResult {
+        WalkForwardSplitResult {
+            split_index: i,
+            train_metrics: metrics_with_pf(train_pf, 50),
+            validate_metrics: metrics_with_pf(validate_pf, 50),
+        }
+    }
+
+    #[test]
+    fn aggregate_score_constant_oos_zero_std_means_score_equals_mean() {
+        let splits = vec![
+            split(0, 1.5, 1.5),
+            split(1, 1.5, 1.5),
+            split(2, 1.5, 1.5),
+        ];
+        let result = aggregate_walk_forward(0, TrialParams::new(), splits, 0.5);
+        assert!((result.aggregated_score - 1.5).abs() < 1e-12);
+        assert!((result.mean_oos_pf - 1.5).abs() < 1e-12);
+        assert!(result.std_oos_pf.abs() < 1e-12);
+    }
+
+    #[test]
+    fn aggregate_score_volatile_oos_penalized_below_stable_with_same_mean() {
+        // Trial A: stable [1.5, 1.5, 1.5, 1.5, 1.5, 1.5] → mean=1.5, std=0
+        // Trial B: volatile [3.0, 0.1, 3.0, 0.1, 3.0, 0.1] → mean≈1.55, std≈1.45
+        //   penalty 0.5 ⇒ B-score = 1.55 - 0.725 = 0.825
+        // Acceptance: stability wins.
+        let a_splits: Vec<_> = (0..6).map(|i| split(i, 1.5, 1.5)).collect();
+        let b_pfs = [3.0, 0.1, 3.0, 0.1, 3.0, 0.1];
+        let b_splits: Vec<_> = (0..6)
+            .map(|i| split(i, 1.5, b_pfs[i]))
+            .collect();
+        let a = aggregate_walk_forward(1, TrialParams::new(), a_splits, 0.5);
+        let b = aggregate_walk_forward(2, TrialParams::new(), b_splits, 0.5);
+        assert!(
+            a.aggregated_score > b.aggregated_score,
+            "stable trial must score higher: a={} (mean={}, std={}), b={} (mean={}, std={})",
+            a.aggregated_score,
+            a.mean_oos_pf,
+            a.std_oos_pf,
+            b.aggregated_score,
+            b.mean_oos_pf,
+            b.std_oos_pf,
+        );
+        // Pinned numerical sanity: B aggregated ≈ 0.825 (precise per formula)
+        assert!((b.aggregated_score - 0.825).abs() < 1e-9, "b={}", b.aggregated_score);
+    }
+
+    #[test]
+    fn aggregate_score_all_nan_validate_returns_neg_infinity() {
+        let splits = vec![
+            split(0, 1.5, f64::NAN),
+            split(1, 1.5, f64::NAN),
+            split(2, 1.5, f64::INFINITY),
+        ];
+        let result = aggregate_walk_forward(0, TrialParams::new(), splits, 0.5);
+        assert!(result.aggregated_score.is_infinite() && result.aggregated_score < 0.0);
+    }
+
+    #[test]
+    fn aggregate_partial_disqualification_uses_zero_for_nan_splits() {
+        // 3 finite (PF=2.0) + 1 NaN → sanitized PFs [2,2,2,0]
+        // mean=1.5, var=((0.5)*3 + (1.5)^2)/4 = (0.75 + 2.25)/4 = 0.75 → std=√0.75≈0.866
+        // aggregated = 1.5 - 0.866*0.5 ≈ 1.067
+        let splits = vec![
+            split(0, 1.0, 2.0),
+            split(1, 1.0, 2.0),
+            split(2, 1.0, 2.0),
+            split(3, 1.0, f64::NAN),
+        ];
+        let result = aggregate_walk_forward(0, TrialParams::new(), splits, 0.5);
+        assert!(result.aggregated_score.is_finite());
+        assert!((result.mean_oos_pf - 1.5).abs() < 1e-9, "mean={}", result.mean_oos_pf);
+        let expected_std = 0.75f64.sqrt();
+        assert!(
+            (result.std_oos_pf - expected_std).abs() < 1e-9,
+            "std={} (expected {})",
+            result.std_oos_pf,
+            expected_std,
+        );
+        let expected_agg = 1.5 - expected_std * 0.5;
+        assert!(
+            (result.aggregated_score - expected_agg).abs() < 1e-9,
+            "agg={} (expected {})",
+            result.aggregated_score,
+            expected_agg,
+        );
+    }
+
+    #[test]
+    fn aggregate_worst_oos_pf_is_minimum_of_sanitized_validate_pfs() {
+        let splits = vec![
+            split(0, 1.5, 2.5),
+            split(1, 1.5, 0.7),
+            split(2, 1.5, 1.8),
+            split(3, 1.5, 1.2),
+        ];
+        let result = aggregate_walk_forward(0, TrialParams::new(), splits, 0.5);
+        assert!((result.worst_oos_pf - 0.7).abs() < 1e-12);
+    }
+
+    #[test]
+    fn aggregate_is_oos_decay_positive_when_train_outperforms_validate() {
+        // train PFs all 3.0 → mean_is = 3.0
+        // validate PFs all 1.5 → mean_oos = 1.5
+        // decay = 1.5 (positive, indicating overfitting)
+        let splits: Vec<_> = (0..4).map(|i| split(i, 3.0, 1.5)).collect();
+        let result = aggregate_walk_forward(0, TrialParams::new(), splits, 0.5);
+        assert!((result.mean_is_pf - 3.0).abs() < 1e-12);
+        assert!((result.mean_oos_pf - 1.5).abs() < 1e-12);
+        assert!((result.is_oos_decay - 1.5).abs() < 1e-12);
+    }
+
+    #[test]
+    fn aggregate_sanitizes_nan_train_pf_to_zero_in_mean_is() {
+        // train PFs [2.0, 2.0, NaN, 2.0] → sanitized [2,2,0,2] → mean=1.5
+        let splits = vec![
+            split(0, 2.0, 1.0),
+            split(1, 2.0, 1.0),
+            split(2, f64::NAN, 1.0),
+            split(3, 2.0, 1.0),
+        ];
+        let result = aggregate_walk_forward(0, TrialParams::new(), splits, 0.5);
+        assert!((result.mean_is_pf - 1.5).abs() < 1e-9);
+    }
+
+    // ─── Runner integration tests (with real backtests on synthetic data) ────
+
+    fn synthetic_candles(n: usize) -> Vec<Candle> {
+        let mut candles = Vec::with_capacity(n);
+        let start_ts: i64 = 1_700_000_000_000;
+        let step_ms: i64 = 60 * 60 * 1_000;
+        for i in 0..n {
+            let t = i as f64;
+            let drift = 60_000.0 + t * 5.0;
+            let osc = 800.0 * (t * 0.21).sin();
+            let micro = 120.0 * (t * 1.7).cos();
+            let close = drift + osc + micro;
+            let open = drift + osc + 60.0 * ((t - 1.0) * 1.7).cos();
+            let high = close.max(open) + 80.0;
+            let low = close.min(open) - 80.0;
+            let volume = 100.0 + 20.0 * (t * 0.13).sin().abs();
+            candles.push(Candle::new(
+                start_ts + (i as i64) * step_ms,
+                open,
+                high,
+                low,
+                close,
+                volume,
+            ));
+        }
+        candles
+    }
+
+    fn h1_base_config() -> BacktestConfig {
+        BacktestConfig {
+            initial_balance: 10_000.0,
+            fee_rate: 0.0006,
+            timeframe: Timeframe::H1,
+            slippage_bps: 0.0,
+        }
+    }
+
+    fn permissive_constraints() -> ScoreConstraints {
+        ScoreConstraints {
+            max_drawdown_cap_pct: 100.0,
+            min_trades: 0,
+        }
+    }
+
+    fn ichimoku_default_params() -> TrialParams {
+        let mut p = TrialParams::new();
+        p.insert("tenkan_period", 9.0);
+        p.insert("kijun_period", 26.0);
+        p.insert("senkou_b_period", 52.0);
+        p.insert("shift", 26.0);
+        p.insert("score_threshold", 60.0);
+        p.insert("adx_filter_enabled", 0.0);
+        p
+    }
+
+    #[test]
+    fn run_walk_forward_trial_returns_err_when_candles_below_train_plus_validate() {
+        let candles = synthetic_candles(240);
+        let config = cfg(200, 50, 50);
+        let result = run_walk_forward_trial(
+            StrategyKind::Ichimoku,
+            0,
+            ichimoku_default_params(),
+            &candles,
+            &config,
+            h1_base_config(),
+            &permissive_constraints(),
+        );
+        assert!(result.is_err(), "240 candles must Err under train=200+validate=50");
+    }
+
+    #[test]
+    fn run_walk_forward_trial_smoke_on_synthetic_data_produces_well_formed_result() {
+        let candles = synthetic_candles(500);
+        // train=200, validate=50, step=50 → ⌊(500-250)/50⌋+1 = 6 splits
+        let config = cfg(200, 50, 50);
+        let result = run_walk_forward_trial(
+            StrategyKind::Ichimoku,
+            515,
+            ichimoku_default_params(),
+            &candles,
+            &config,
+            h1_base_config(),
+            &permissive_constraints(),
+        )
+        .expect("smoke run must succeed");
+        assert_eq!(result.trial_id, 515);
+        assert_eq!(result.splits.len(), 6);
+        for s in &result.splits {
+            // Validate metrics are populated (engine emits TrialMetrics
+            // for every run, even zero-trade ones).
+            assert!(s.validate_metrics.final_equity > 0.0);
+        }
+    }
+
+    #[test]
+    fn run_walk_forward_trial_is_reproducible_for_identical_inputs() {
+        let candles = synthetic_candles(500);
+        let config = cfg(200, 50, 50);
+        let a = run_walk_forward_trial(
+            StrategyKind::Ichimoku,
+            42,
+            ichimoku_default_params(),
+            &candles,
+            &config,
+            h1_base_config(),
+            &permissive_constraints(),
+        )
+        .unwrap();
+        let b = run_walk_forward_trial(
+            StrategyKind::Ichimoku,
+            42,
+            ichimoku_default_params(),
+            &candles,
+            &config,
+            h1_base_config(),
+            &permissive_constraints(),
+        )
+        .unwrap();
+        // Compare every aggregated stat — split-level metrics may carry
+        // NaN (PartialEq false), so use stat-level f64 equality.
+        assert_eq!(a.trial_id, b.trial_id);
+        assert_eq!(a.params, b.params);
+        assert_eq!(a.splits.len(), b.splits.len());
+        // Split-by-split: train+validate metric fields must match bit-
+        // for-bit on the finite components.
+        for (sa, sb) in a.splits.iter().zip(b.splits.iter()) {
+            assert_eq!(sa.split_index, sb.split_index);
+            assert_eq!(sa.train_metrics.total_trades, sb.train_metrics.total_trades);
+            assert_eq!(sa.validate_metrics.total_trades, sb.validate_metrics.total_trades);
+            assert_eq!(sa.train_metrics.final_equity, sb.train_metrics.final_equity);
+            assert_eq!(sa.validate_metrics.final_equity, sb.validate_metrics.final_equity);
+        }
+        // Aggregated fields are sanitized → no NaN risk in equality.
+        assert_eq!(a.mean_oos_pf, b.mean_oos_pf);
+        assert_eq!(a.std_oos_pf, b.std_oos_pf);
+        assert_eq!(a.worst_oos_pf, b.worst_oos_pf);
+        assert_eq!(a.mean_is_pf, b.mean_is_pf);
+        assert_eq!(a.is_oos_decay, b.is_oos_decay);
+        assert_eq!(a.aggregated_score, b.aggregated_score);
     }
 }
