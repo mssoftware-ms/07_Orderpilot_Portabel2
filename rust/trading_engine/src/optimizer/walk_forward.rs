@@ -252,6 +252,69 @@ pub fn aggregate_walk_forward(
     }
 }
 
+// ─── Survivor Criteria ───────────────────────────────────────────────────────
+
+/// Hard-constraint gate applied to a `WalkForwardResult` after the
+/// rolling-window backtests are scored. A trial that fails **any**
+/// criterion is rejected as not-a-survivor; the soft-score (mean −
+/// penalty × std) only ranks the survivors against each other.
+///
+/// # Why four gates instead of one composite score
+/// The composite `aggregated_score` collapses overfitting, stability,
+/// and floor performance into a single number — a 1.5-mean / 0-std trial
+/// scores the same as a 3.0-mean / 1.5-std trial. The four hard gates
+/// surface those orthogonal failure modes individually so QA can read
+/// off *why* a trial was rejected (or relax exactly the constraint that
+/// killed the population).
+///
+/// # Defaults (Phase-3.1 Welle W2 Ichimoku)
+/// | gate              | default | rationale                          |
+/// |-------------------|---------|------------------------------------|
+/// | `min_mean_oos_pf` | `1.3`   | floor PF on the validate set (≥ ~3 × round-trip fees) |
+/// | `max_std_oos_pf`  | `1.0`   | reject wild OOS swings (1.0 PF-σ)  |
+/// | `max_is_oos_decay`| `0.7`   | reject IS-PF > OOS-PF by 0.7 (overfitting band) |
+/// | `min_worst_oos_pf`| `0.6`   | no single split below 0.6 PF (no disaster regime) |
+///
+/// These thresholds are an initial Welle-W2 estimate; QA may relax them
+/// against the observed distribution if the survivor pool collapses.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+pub struct SurvivorCriteria {
+    /// Lower bound on `mean_oos_pf`.
+    pub min_mean_oos_pf: f64,
+    /// Upper bound on `std_oos_pf`.
+    pub max_std_oos_pf: f64,
+    /// Upper bound on `is_oos_decay` (= mean_is − mean_oos). Positive
+    /// values indicate overfitting; the cap rejects strategies whose
+    /// in-sample fit collapses on out-of-sample.
+    pub max_is_oos_decay: f64,
+    /// Lower bound on `worst_oos_pf` — the worst single validate-window
+    /// profit factor across the splits.
+    pub min_worst_oos_pf: f64,
+}
+
+impl Default for SurvivorCriteria {
+    /// Welle-W2 Ichimoku defaults — see struct docs for rationale.
+    fn default() -> Self {
+        Self {
+            min_mean_oos_pf: 1.3,
+            max_std_oos_pf: 1.0,
+            max_is_oos_decay: 0.7,
+            min_worst_oos_pf: 0.6,
+        }
+    }
+}
+
+/// Apply every survivor gate; returns `true` iff every gate is
+/// satisfied. Pure function — no I/O, no engine calls — so callers can
+/// recompute survivor flags on the fly against tweaked criteria
+/// without re-running the walk-forward backtests.
+pub fn survives(result: &WalkForwardResult, criteria: &SurvivorCriteria) -> bool {
+    result.mean_oos_pf >= criteria.min_mean_oos_pf
+        && result.std_oos_pf <= criteria.max_std_oos_pf
+        && result.is_oos_decay <= criteria.max_is_oos_decay
+        && result.worst_oos_pf >= criteria.min_worst_oos_pf
+}
+
 /// Run one walk-forward trial: generate splits, score every (train,
 /// validate) window via `run_optimization_trial`, then aggregate.
 ///
@@ -624,6 +687,120 @@ mod tests {
         ];
         let result = aggregate_walk_forward(0, TrialParams::new(), splits, 0.5);
         assert!((result.mean_is_pf - 1.5).abs() < 1e-9);
+    }
+
+    // ─── Survivor Criteria (pure, no backtests) ──────────────────────────────
+
+    fn passing_result() -> WalkForwardResult {
+        // Hits the Welle-W2 defaults with a small safety margin:
+        // mean_oos=1.5 (>1.3), std_oos=0.5 (<1.0), decay=0.2 (<0.7),
+        // worst_oos=0.9 (>0.6).
+        WalkForwardResult {
+            trial_id: 1,
+            params: TrialParams::new(),
+            splits: vec![],
+            aggregated_score: 1.25,
+            mean_oos_pf: 1.5,
+            std_oos_pf: 0.5,
+            worst_oos_pf: 0.9,
+            mean_is_pf: 1.7,
+            is_oos_decay: 0.2,
+        }
+    }
+
+    #[test]
+    fn survives_when_mean_oos_pf_meets_minimum_threshold() {
+        let mut r = passing_result();
+        r.mean_oos_pf = 1.3; // exactly at the gate
+        assert!(survives(&r, &SurvivorCriteria::default()));
+    }
+
+    #[test]
+    fn fails_when_mean_oos_pf_below_minimum_threshold() {
+        let mut r = passing_result();
+        r.mean_oos_pf = 1.29; // one bp under the gate
+        assert!(!survives(&r, &SurvivorCriteria::default()));
+    }
+
+    #[test]
+    fn survives_when_std_oos_pf_meets_maximum_threshold() {
+        let mut r = passing_result();
+        r.std_oos_pf = 1.0; // exactly at the cap
+        assert!(survives(&r, &SurvivorCriteria::default()));
+    }
+
+    #[test]
+    fn fails_when_std_oos_pf_above_maximum_threshold() {
+        let mut r = passing_result();
+        r.std_oos_pf = 1.01;
+        assert!(!survives(&r, &SurvivorCriteria::default()));
+    }
+
+    #[test]
+    fn survives_when_is_oos_decay_meets_maximum_threshold() {
+        let mut r = passing_result();
+        r.is_oos_decay = 0.7; // exactly at the cap
+        assert!(survives(&r, &SurvivorCriteria::default()));
+    }
+
+    #[test]
+    fn fails_when_is_oos_decay_above_maximum_threshold() {
+        let mut r = passing_result();
+        r.is_oos_decay = 0.71;
+        assert!(!survives(&r, &SurvivorCriteria::default()));
+    }
+
+    #[test]
+    fn survives_when_worst_oos_pf_meets_minimum_threshold() {
+        let mut r = passing_result();
+        r.worst_oos_pf = 0.6; // exactly at the gate
+        assert!(survives(&r, &SurvivorCriteria::default()));
+    }
+
+    #[test]
+    fn fails_when_worst_oos_pf_below_minimum_threshold() {
+        let mut r = passing_result();
+        r.worst_oos_pf = 0.59;
+        assert!(!survives(&r, &SurvivorCriteria::default()));
+    }
+
+    #[test]
+    fn survives_composite_when_all_four_criteria_satisfied() {
+        let r = passing_result();
+        assert!(survives(&r, &SurvivorCriteria::default()));
+    }
+
+    #[test]
+    fn fails_composite_when_any_single_criterion_breaks_others_passing() {
+        // Confirm the gate is AND-conjunctive — flipping any one of the
+        // four off rejects the whole.
+        let mut r = passing_result();
+        r.std_oos_pf = 2.0;
+        assert!(!survives(&r, &SurvivorCriteria::default()));
+    }
+
+    #[test]
+    fn default_criteria_match_documented_welle_w2_thresholds() {
+        let c = SurvivorCriteria::default();
+        assert_eq!(c.min_mean_oos_pf, 1.3);
+        assert_eq!(c.max_std_oos_pf, 1.0);
+        assert_eq!(c.max_is_oos_decay, 0.7);
+        assert_eq!(c.min_worst_oos_pf, 0.6);
+    }
+
+    #[test]
+    fn survivor_criteria_are_serde_round_trippable() {
+        // Persistence path: the CLI writes SurvivorCriteria into
+        // config_json side-by-side with WalkForwardConfig (audit trail).
+        let c = SurvivorCriteria {
+            min_mean_oos_pf: 1.42,
+            max_std_oos_pf: 0.75,
+            max_is_oos_decay: 0.5,
+            min_worst_oos_pf: 0.85,
+        };
+        let json = serde_json::to_string(&c).unwrap();
+        let parsed: SurvivorCriteria = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, c);
     }
 
     // ─── Runner integration tests (with real backtests on synthetic data) ────

@@ -53,8 +53,9 @@ use chrono::Utc;
 use trading_engine::backtest::BacktestConfig;
 use trading_engine::models::{Candle, Timeframe};
 use trading_engine::optimizer::{
-    run_walk_forward_trial, score_constraints_for_strategy, ScoreConstraints, StrategyKind,
-    StudyStorage, TrialResult, WalkForwardConfig, WalkForwardResult,
+    run_walk_forward_trial, score_constraints_for_strategy, survives, ScoreConstraints,
+    StrategyKind, StudyStorage, SurvivorCriteria, TrialResult, WalkForwardConfig,
+    WalkForwardResult,
 };
 
 // ─── Constants ───────────────────────────────────────────────────────────────
@@ -87,6 +88,40 @@ struct CliArgs {
     output_csv: PathBuf,
     output_db: PathBuf,
     seed: u64,
+    /// When `true`, apply `SurvivorCriteria` to every walk-forward
+    /// result, write a `survives` column to the CSV, and print the
+    /// survivor-count summary to the console. When `false`, skip every
+    /// survivor-related action — the CSV format reverts to the original
+    /// pre-W2-3 layout.
+    survivor_filter: bool,
+    /// Custom survivor thresholds; `None` fields fall back to
+    /// `SurvivorCriteria::default()`. The merged criteria are reflected
+    /// in the console summary.
+    survivor_overrides: SurvivorOverrides,
+    /// When `true`, skip the backtest loop and read every walk-forward
+    /// result back from the existing `--output-db` instead. Use case:
+    /// re-apply tweaked `SurvivorCriteria` to a previously-generated DB
+    /// without paying the (~30 min) compute cost again.
+    skip_replay: bool,
+}
+
+#[derive(Debug, Clone, Default)]
+struct SurvivorOverrides {
+    min_mean_oos_pf: Option<f64>,
+    max_std_oos_pf: Option<f64>,
+    max_is_oos_decay: Option<f64>,
+    min_worst_oos_pf: Option<f64>,
+}
+
+impl SurvivorOverrides {
+    fn merge_into(&self, base: SurvivorCriteria) -> SurvivorCriteria {
+        SurvivorCriteria {
+            min_mean_oos_pf: self.min_mean_oos_pf.unwrap_or(base.min_mean_oos_pf),
+            max_std_oos_pf: self.max_std_oos_pf.unwrap_or(base.max_std_oos_pf),
+            max_is_oos_decay: self.max_is_oos_decay.unwrap_or(base.max_is_oos_decay),
+            min_worst_oos_pf: self.min_worst_oos_pf.unwrap_or(base.min_worst_oos_pf),
+        }
+    }
 }
 
 fn parse_strategy(arg: &str) -> Result<StrategyKind> {
@@ -110,6 +145,7 @@ fn timeframe_for(kind: StrategyKind) -> Timeframe {
 }
 
 fn print_usage() {
+    let defaults = SurvivorCriteria::default();
     eprintln!(
         "usage: walk_forward_replay \\\n\
          \t--study <db>           Welle-O2 study DB to read trials from \\\n\
@@ -122,14 +158,32 @@ fn print_usage() {
          \t[--stability-penalty F] OOS-std penalty (default {}) \\\n\
          \t--output-csv <path>    Top-N CSV export \\\n\
          \t--output-db <path>     fresh SQLite for walk-forward rows \\\n\
-         \t[--seed N]             audit seed (default {})",
+         \t[--seed N]             audit seed (default {}) \\\n\
+         \t[--survivor-filter on|off]  apply survivor gate (default on) \\\n\
+         \t[--min-mean-oos-pf F]   override survivor floor (default {}) \\\n\
+         \t[--max-std-oos-pf F]    override survivor cap (default {}) \\\n\
+         \t[--max-is-oos-decay F]  override survivor cap (default {}) \\\n\
+         \t[--min-worst-oos-pf F]  override survivor floor (default {}) \\\n\
+         \t[--skip-replay]         reuse existing --output-db rows, no compute",
         DEFAULT_TOP_N,
         DEFAULT_TRAIN_BARS,
         DEFAULT_VALIDATE_BARS,
         DEFAULT_STEP_BARS,
         DEFAULT_STABILITY_PENALTY,
         DEFAULT_SEED,
+        defaults.min_mean_oos_pf,
+        defaults.max_std_oos_pf,
+        defaults.max_is_oos_decay,
+        defaults.min_worst_oos_pf,
     );
+}
+
+fn parse_on_off(s: &str) -> Result<bool> {
+    match s {
+        "on" | "true" | "1" => Ok(true),
+        "off" | "false" | "0" => Ok(false),
+        other => bail!("expected 'on' or 'off', got '{}'", other),
+    }
 }
 
 fn parse_args() -> Result<CliArgs> {
@@ -150,10 +204,14 @@ fn parse_args() -> Result<CliArgs> {
     let mut output_csv: Option<PathBuf> = None;
     let mut output_db: Option<PathBuf> = None;
     let mut seed: u64 = DEFAULT_SEED;
+    let mut survivor_filter = true;
+    let mut survivor_overrides = SurvivorOverrides::default();
+    let mut skip_replay = false;
 
     let mut i = 0;
     while i < raw.len() {
         let key = raw[i].as_str();
+        let mut consume_value = true;
         let val = raw.get(i + 1).map(String::as_str);
         let need = || -> Result<&str> {
             val.with_context(|| format!("flag '{}' requires a value", key))
@@ -184,9 +242,42 @@ fn parse_args() -> Result<CliArgs> {
             "--output-csv" => output_csv = Some(PathBuf::from(need()?)),
             "--output-db" => output_db = Some(PathBuf::from(need()?)),
             "--seed" => seed = need()?.parse().with_context(|| "--seed must be u64")?,
+            "--survivor-filter" => survivor_filter = parse_on_off(need()?)?,
+            "--min-mean-oos-pf" => {
+                survivor_overrides.min_mean_oos_pf = Some(
+                    need()?
+                        .parse()
+                        .with_context(|| "--min-mean-oos-pf must be f64")?,
+                )
+            }
+            "--max-std-oos-pf" => {
+                survivor_overrides.max_std_oos_pf = Some(
+                    need()?
+                        .parse()
+                        .with_context(|| "--max-std-oos-pf must be f64")?,
+                )
+            }
+            "--max-is-oos-decay" => {
+                survivor_overrides.max_is_oos_decay = Some(
+                    need()?
+                        .parse()
+                        .with_context(|| "--max-is-oos-decay must be f64")?,
+                )
+            }
+            "--min-worst-oos-pf" => {
+                survivor_overrides.min_worst_oos_pf = Some(
+                    need()?
+                        .parse()
+                        .with_context(|| "--min-worst-oos-pf must be f64")?,
+                )
+            }
+            "--skip-replay" => {
+                skip_replay = true;
+                consume_value = false; // boolean toggle, no value follows
+            }
             other => bail!("unknown flag '{}'", other),
         }
-        i += 2;
+        i += if consume_value { 2 } else { 1 };
     }
 
     Ok(CliArgs {
@@ -201,6 +292,9 @@ fn parse_args() -> Result<CliArgs> {
         output_csv: output_csv.context("--output-csv is required")?,
         output_db: output_db.context("--output-db is required")?,
         seed,
+        survivor_filter,
+        survivor_overrides,
+        skip_replay,
     })
 }
 
@@ -270,7 +364,14 @@ fn load_qualified_trials(
 
 // ─── CSV writer ──────────────────────────────────────────────────────────────
 
-fn write_walk_forward_csv(results: &[WalkForwardResult], path: &Path) -> Result<()> {
+/// When `survivor_criteria` is `Some`, each row gains a `survives`
+/// column (`1` / `0`) after `n_splits` and the param columns shift right
+/// by one. When `None`, the CSV uses the original pre-W2-3 layout.
+fn write_walk_forward_csv(
+    results: &[WalkForwardResult],
+    path: &Path,
+    survivor_criteria: Option<&SurvivorCriteria>,
+) -> Result<()> {
     let mut file =
         File::create(path).with_context(|| format!("create CSV {}", path.display()))?;
     let mut param_keys: Vec<&String> = results
@@ -283,6 +384,9 @@ fn write_walk_forward_csv(results: &[WalkForwardResult], path: &Path) -> Result<
         "rank,trial_id,aggregated_score,mean_oos_pf,std_oos_pf,worst_oos_pf,\
          mean_is_pf,is_oos_decay,n_splits"
     )?;
+    if survivor_criteria.is_some() {
+        write!(file, ",survives")?;
+    }
     for k in &param_keys {
         write!(file, ",p_{}", k)?;
     }
@@ -302,6 +406,10 @@ fn write_walk_forward_csv(results: &[WalkForwardResult], path: &Path) -> Result<
             r.is_oos_decay,
             r.splits.len(),
         )?;
+        if let Some(c) = survivor_criteria {
+            let flag = if survives(r, c) { 1 } else { 0 };
+            write!(file, ",{}", flag)?;
+        }
         for k in &param_keys {
             let v = r.params.values.get(*k).copied().unwrap_or(f64::NAN);
             write!(file, ",{}", v)?;
@@ -331,6 +439,44 @@ fn fmt_duration_secs(secs: f64) -> String {
 
 fn main() -> Result<()> {
     let args = parse_args()?;
+    let merged_criteria = args
+        .survivor_overrides
+        .merge_into(SurvivorCriteria::default());
+    let survivor_criteria_for_output =
+        if args.survivor_filter { Some(&merged_criteria) } else { None };
+
+    let (study_id, n_expected) = if args.skip_replay {
+        run_skip_replay(&args)?
+    } else {
+        run_full_replay(&args)?
+    };
+
+    let storage = StudyStorage::open(&args.output_db)
+        .with_context(|| format!("open output DB {}", args.output_db.display()))?;
+    let top_all = storage.top_n_walk_forward(study_id, n_expected)?;
+
+    write_walk_forward_csv(&top_all, &args.output_csv, survivor_criteria_for_output)?;
+    println!("[wf-replay] wrote CSV {}", args.output_csv.display());
+
+    print_top_table(&top_all, survivor_criteria_for_output);
+    if let Some(c) = survivor_criteria_for_output {
+        print_survivor_summary(&top_all, c);
+    }
+
+    println!();
+    println!(
+        "Finished at {} (replay_date={})",
+        Utc::now().to_rfc3339(),
+        REPLAY_DATE,
+    );
+    Ok(())
+}
+
+/// Run the full walk-forward pipeline: load candles, fetch qualified
+/// Welle-O2 trials, run sanity + batch backtests, persist into the new
+/// output DB. Returns `(study_id, expected_row_count)` for the
+/// downstream CSV + console steps.
+fn run_full_replay(args: &CliArgs) -> Result<(i64, usize)> {
     let constraints: ScoreConstraints = score_constraints_for_strategy(args.strategy);
     let base_config = BacktestConfig {
         initial_balance: INITIAL_BALANCE,
@@ -345,7 +491,6 @@ fn main() -> Result<()> {
         stability_penalty: args.stability_penalty,
     };
 
-    // ─── Load candles + qualified trials ────────────────────────────────
     let candles = load_candles(&args.candles_path)?;
     println!(
         "[wf-replay] candles: {} bars from {}",
@@ -362,7 +507,6 @@ fn main() -> Result<()> {
         trials.len()
     );
 
-    // ─── Open output DB + create fresh study row ────────────────────────
     if let Some(parent) = args.output_db.parent() {
         if !parent.as_os_str().is_empty() {
             create_dir_all(parent)
@@ -371,8 +515,6 @@ fn main() -> Result<()> {
     }
     let storage = StudyStorage::open(&args.output_db)
         .with_context(|| format!("open output DB {}", args.output_db.display()))?;
-    // Carry the source-study search-space text into the new study so the
-    // walk-forward DB is self-describing (audit trail).
     let search_space_yaml = read_to_string(repo_search_space_path(args.strategy))
         .unwrap_or_else(|_| {
             format!(
@@ -387,8 +529,11 @@ fn main() -> Result<()> {
         args.seed,
         REPLAY_DATE,
     );
-    let new_study_id =
-        storage.create_study(&new_study_name, args.strategy.as_str(), &search_space_yaml)?;
+    let new_study_id = storage.create_study(
+        &new_study_name,
+        args.strategy.as_str(),
+        &search_space_yaml,
+    )?;
     println!(
         "[wf-replay] output study '{}' (id={}) in {}",
         new_study_name,
@@ -438,8 +583,6 @@ fn main() -> Result<()> {
 
     // ─── Batch replay (trial[1..]) ─────────────────────────────────────
     let batch_start = Instant::now();
-    let mut all_results: Vec<WalkForwardResult> = Vec::with_capacity(trials.len());
-    all_results.push(first_result);
     for (idx, trial) in trials.iter().enumerate().skip(1) {
         let r = run_walk_forward_trial(
             args.strategy,
@@ -459,9 +602,8 @@ fn main() -> Result<()> {
             )
         })?;
         storage.insert_walk_forward_trial(new_study_id, &r, &wf_config)?;
-        all_results.push(r);
 
-        let done = idx + 1; // 1-based count including the sanity trial
+        let done = idx + 1;
         if done % PROGRESS_EVERY == 0 || done == trials.len() {
             let elapsed = batch_start.elapsed().as_secs_f64();
             let per_trial = elapsed / (done - 1).max(1) as f64;
@@ -486,7 +628,6 @@ fn main() -> Result<()> {
         total_secs / trials.len().max(1) as f64,
     );
 
-    // ─── Persistence audit ─────────────────────────────────────────────
     let n_persisted = storage.count_walk_forward_trials(new_study_id)?;
     if n_persisted as usize != trials.len() {
         bail!(
@@ -499,19 +640,62 @@ fn main() -> Result<()> {
         "[wf-replay] persisted {} walk_forward_trials rows in study_id={}",
         n_persisted, new_study_id,
     );
+    Ok((new_study_id, trials.len()))
+}
 
-    // ─── Top-N pull-back + CSV + console ────────────────────────────────
-    let top_all = storage.top_n_walk_forward(new_study_id, trials.len())?;
-    write_walk_forward_csv(&top_all, &args.output_csv)?;
-    println!("[wf-replay] wrote CSV {}", args.output_csv.display());
-
-    println!();
-    println!("Top-5 Walk-Forward (sorted by aggregated_score):");
+/// `--skip-replay` mode: read every walk-forward row from the existing
+/// `--output-db` and re-apply the survivor criteria without paying the
+/// (slow) backtest cost. Chooses the highest-id study whose strategy
+/// matches `--strategy` — single-strategy DBs (the convention) yield
+/// the one and only study.
+fn run_skip_replay(args: &CliArgs) -> Result<(i64, usize)> {
+    let storage = StudyStorage::open(&args.output_db).with_context(|| {
+        format!(
+            "open existing output DB {} (--skip-replay mode)",
+            args.output_db.display()
+        )
+    })?;
+    let studies = storage.list_studies()?;
+    let candidate = studies
+        .iter()
+        .filter(|s| s.strategy == args.strategy.as_str())
+        .max_by(|a, b| a.id.cmp(&b.id))
+        .with_context(|| {
+            format!(
+                "no study for strategy '{}' in {} (--skip-replay)",
+                args.strategy.as_str(),
+                args.output_db.display()
+            )
+        })?;
+    let n = storage.count_walk_forward_trials(candidate.id)? as usize;
+    if n == 0 {
+        bail!(
+            "study '{}' has zero walk_forward_trials rows; nothing to summarize",
+            candidate.name
+        );
+    }
     println!(
-        " rank trial_id  aggregated  mean_oos  std_oos  worst_oos  mean_is  is_oos_decay"
+        "[wf-replay] skip-replay: reading {} walk_forward_trials rows from study '{}' (id={})",
+        n, candidate.name, candidate.id
     );
-    for (i, r) in top_all.iter().enumerate().take(5) {
+    Ok((candidate.id, n))
+}
+
+fn print_top_table(top_all: &[WalkForwardResult], survivor_criteria: Option<&SurvivorCriteria>) {
+    println!();
+    if survivor_criteria.is_some() {
+        println!("Top-5 Walk-Forward (sorted by aggregated_score, survives = does row meet criteria):");
         println!(
+            " rank trial_id  aggregated  mean_oos  std_oos  worst_oos  mean_is  is_oos_decay  survives"
+        );
+    } else {
+        println!("Top-5 Walk-Forward (sorted by aggregated_score):");
+        println!(
+            " rank trial_id  aggregated  mean_oos  std_oos  worst_oos  mean_is  is_oos_decay"
+        );
+    }
+    for (i, r) in top_all.iter().enumerate().take(5) {
+        let prefix = format!(
             "  {:>3}  {:>7}    {:>7.4}   {:>6.3}   {:>6.3}    {:>6.3}   {:>6.3}      {:>+6.3}",
             i + 1,
             r.trial_id,
@@ -522,14 +706,61 @@ fn main() -> Result<()> {
             r.mean_is_pf,
             r.is_oos_decay,
         );
+        match survivor_criteria {
+            Some(c) => {
+                let flag = if survives(r, c) { "✓" } else { "✗" };
+                println!("{}     {}", prefix, flag);
+            }
+            None => println!("{}", prefix),
+        }
     }
+}
+
+fn print_survivor_summary(top_all: &[WalkForwardResult], criteria: &SurvivorCriteria) {
+    let n_survivors = top_all.iter().filter(|r| survives(r, criteria)).count();
     println!();
     println!(
-        "Finished at {} (replay_date={})",
-        Utc::now().to_rfc3339(),
-        REPLAY_DATE,
+        "Survivor summary: {} / {} trials pass all four gates",
+        n_survivors,
+        top_all.len()
     );
-    Ok(())
+    println!(
+        "  gates: mean_oos_pf >= {:.3}, std_oos_pf <= {:.3}, is_oos_decay <= {:.3}, worst_oos_pf >= {:.3}",
+        criteria.min_mean_oos_pf,
+        criteria.max_std_oos_pf,
+        criteria.max_is_oos_decay,
+        criteria.min_worst_oos_pf,
+    );
+    if n_survivors == 0 {
+        println!(
+            "  WARN: zero survivors — consider --min-mean-oos-pf / --max-std-oos-pf / \
+             --max-is-oos-decay / --min-worst-oos-pf overrides to relax the gate"
+        );
+    }
+    // Per-criterion failure breakdown — surface which constraint is the
+    // binding one when the survivor pool collapses. Reported as
+    // "would-survive-if-this-one-were-relaxed".
+    let n_fail_mean = top_all
+        .iter()
+        .filter(|r| r.mean_oos_pf < criteria.min_mean_oos_pf)
+        .count();
+    let n_fail_std = top_all
+        .iter()
+        .filter(|r| r.std_oos_pf > criteria.max_std_oos_pf)
+        .count();
+    let n_fail_decay = top_all
+        .iter()
+        .filter(|r| r.is_oos_decay > criteria.max_is_oos_decay)
+        .count();
+    let n_fail_worst = top_all
+        .iter()
+        .filter(|r| r.worst_oos_pf < criteria.min_worst_oos_pf)
+        .count();
+    println!("  per-gate fail counts:");
+    println!("    mean_oos_pf  < {:.3}: {}", criteria.min_mean_oos_pf, n_fail_mean);
+    println!("    std_oos_pf   > {:.3}: {}", criteria.max_std_oos_pf, n_fail_std);
+    println!("    is_oos_decay > {:.3}: {}", criteria.max_is_oos_decay, n_fail_decay);
+    println!("    worst_oos_pf < {:.3}: {}", criteria.min_worst_oos_pf, n_fail_worst);
 }
 
 /// Locate the canonical search-space YAML for `strategy` relative to the
@@ -714,7 +945,7 @@ mod tests {
         };
 
         let csv_path = NamedTempFile::new().unwrap().into_temp_path();
-        write_walk_forward_csv(&[result], csv_path.as_ref()).unwrap();
+        write_walk_forward_csv(&[result], csv_path.as_ref(), None).unwrap();
         let content = read_to_string(&csv_path).unwrap();
         let mut lines = content.lines();
         let header = lines.next().expect("header line");
@@ -723,6 +954,12 @@ mod tests {
             "rank,trial_id,aggregated_score,mean_oos_pf,std_oos_pf,worst_oos_pf,\
              mean_is_pf,is_oos_decay,n_splits"
         ));
+        // No `survives` column when survivor_criteria is None.
+        assert!(
+            !header.contains("survives"),
+            "no survives column expected when criteria is None: {}",
+            header
+        );
         // Sorted-key param columns
         assert!(
             header.contains(",p_kijun_period,p_senkou_b_period,p_tenkan_period"),
@@ -734,8 +971,60 @@ mod tests {
         let mut fields = row.split(',');
         assert_eq!(fields.next(), Some("1"), "rank column");
         assert_eq!(fields.next(), Some("515"), "trial_id column");
-        // Remaining fields just need to be present (numeric formatting
-        // is delegated to f64::Display).
         assert_eq!(fields.count(), 10, "expected 10 remaining columns");
+    }
+
+    /// CSV with survivor criteria gains a `survives` column whose value
+    /// is 1 / 0 per row. The column position is fixed: directly after
+    /// `n_splits`, before the `p_*` param block.
+    #[test]
+    fn write_walk_forward_csv_includes_survives_column_when_criteria_provided() {
+        let mut params = TrialParams::new();
+        params.insert("kijun_period", 26.0);
+        params.insert("tenkan_period", 9.0);
+
+        let surviving = WalkForwardResult {
+            trial_id: 1,
+            params: params.clone(),
+            splits: vec![],
+            aggregated_score: 1.25,
+            mean_oos_pf: 1.5,
+            std_oos_pf: 0.5,
+            worst_oos_pf: 0.9,
+            mean_is_pf: 1.7,
+            is_oos_decay: 0.2,
+        };
+        let mut failing = surviving.clone();
+        failing.trial_id = 2;
+        failing.std_oos_pf = 5.0; // breaks max_std_oos_pf gate
+
+        let csv_path = NamedTempFile::new().unwrap().into_temp_path();
+        let criteria = SurvivorCriteria::default();
+        write_walk_forward_csv(
+            &[surviving, failing],
+            csv_path.as_ref(),
+            Some(&criteria),
+        )
+        .unwrap();
+
+        let content = read_to_string(&csv_path).unwrap();
+        let mut lines = content.lines();
+        let header = lines.next().expect("header line");
+        // `survives` sits between `n_splits` and the first `p_*` column.
+        assert!(
+            header.contains(",n_splits,survives,p_"),
+            "survives column must follow n_splits, precede param block; got: {}",
+            header
+        );
+
+        let row1 = lines.next().expect("first data row");
+        let fields1: Vec<&str> = row1.split(',').collect();
+        // Survives flag is at column index 9 (rank, trial_id, agg, mean,
+        // std, worst, mean_is, decay, n_splits, *survives*).
+        assert_eq!(fields1[9], "1", "first row must be a survivor (1)");
+
+        let row2 = lines.next().expect("second data row");
+        let fields2: Vec<&str> = row2.split(',').collect();
+        assert_eq!(fields2[9], "0", "second row must fail gate (0)");
     }
 }
