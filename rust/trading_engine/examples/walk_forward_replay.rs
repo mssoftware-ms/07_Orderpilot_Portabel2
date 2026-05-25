@@ -54,8 +54,8 @@ use trading_engine::backtest::BacktestConfig;
 use trading_engine::models::{Candle, Timeframe};
 use trading_engine::optimizer::{
     run_walk_forward_trial, score_constraints_for_strategy, survives, ScoreConstraints,
-    StrategyKind, StudyStorage, SurvivorCriteria, TrialResult, WalkForwardConfig,
-    WalkForwardResult,
+    StabilityScoreMethod, StrategyKind, StudyStorage, SurvivorCriteria, TrialResult,
+    WalkForwardConfig, WalkForwardResult,
 };
 
 // ─── Constants ───────────────────────────────────────────────────────────────
@@ -66,6 +66,10 @@ const SLIPPAGE_BPS: f64 = 0.0;
 const DEFAULT_SEED: u64 = 42;
 const DEFAULT_TOP_N: usize = 109;
 const DEFAULT_STABILITY_PENALTY: f64 = 0.5;
+/// Default trim percentile for `--stability-method trimmed` — removes
+/// 20 % off each tail (4 of 9 splits on the Welle-W2 Ichimoku grid)
+/// before computing the centred mean / std.
+const DEFAULT_TRIM_PCT: f64 = 0.2;
 const DEFAULT_TRAIN_BARS: usize = 4392;
 const DEFAULT_VALIDATE_BARS: usize = 1464;
 const DEFAULT_STEP_BARS: usize = 1464;
@@ -74,6 +78,51 @@ const PROGRESS_EVERY: usize = 10;
 const REPLAY_DATE: &str = "2026-05-25";
 
 // ─── CLI args ────────────────────────────────────────────────────────────────
+
+/// CLI selection for the Welle-W3 stability score method. Parses from
+/// `mean | median | trimmed`; defaults to `Mean` to keep pre-W3
+/// invocations bit-identical to the Welle-W2 behaviour.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StabilityMethodArg {
+    /// Legacy `mean(OOS_PF) − std(OOS_PF) · stability_penalty`.
+    Mean,
+    /// `median(OOS_PF) − iqr(OOS_PF) · stability_penalty`. Reuses the
+    /// existing `--stability-penalty` flag for the IQR weight so the
+    /// CLI grows by one flag, not three.
+    Median,
+    /// `trimmed_mean(OOS_PF) − 0.5 · trimmed_std(OOS_PF)` after
+    /// removing `--trim-pct` off each tail. `--stability-penalty` is
+    /// ignored in this mode (the trim is the primary outlier defense).
+    Trimmed,
+}
+
+impl StabilityMethodArg {
+    fn parse(s: &str) -> Result<Self> {
+        match s {
+            "mean" => Ok(Self::Mean),
+            "median" => Ok(Self::Median),
+            "trimmed" => Ok(Self::Trimmed),
+            other => bail!(
+                "unknown --stability-method '{}' (expected mean | median | trimmed)",
+                other
+            ),
+        }
+    }
+
+    /// Resolve to a `StabilityScoreMethod` using the two penalty knobs
+    /// (`stability_penalty` for mean / median, `trim_pct` for trimmed).
+    fn into_method(self, stability_penalty: f64, trim_pct: f64) -> StabilityScoreMethod {
+        match self {
+            Self::Mean => StabilityScoreMethod::MeanStdPenalty {
+                penalty: stability_penalty,
+            },
+            Self::Median => StabilityScoreMethod::MedianIqr {
+                iqr_penalty: stability_penalty,
+            },
+            Self::Trimmed => StabilityScoreMethod::TrimmedMean { trim_pct },
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 struct CliArgs {
@@ -85,6 +134,15 @@ struct CliArgs {
     validate_bars: usize,
     step_bars: usize,
     stability_penalty: f64,
+    /// Welle-W3 stability scoring method. `None` keeps the legacy
+    /// `mean(OOS_PF) − std(OOS_PF) · stability_penalty` semantics so
+    /// pre-W3 invocations stay bit-identical. `Some` flows into the
+    /// `WalkForwardConfig.stability_method` field.
+    stability_method: Option<StabilityMethodArg>,
+    /// Trim percentile for `--stability-method trimmed` — fraction of
+    /// the OOS series removed off each tail before scoring. Ignored
+    /// for `mean` / `median` methods.
+    trim_pct: f64,
     output_csv: PathBuf,
     output_db: PathBuf,
     seed: u64,
@@ -155,7 +213,9 @@ fn print_usage() {
          \t[--train-bars N]       training-window bars (default {}) \\\n\
          \t[--validate-bars N]    validate-window bars (default {}) \\\n\
          \t[--step-bars N]        bars per slide (default {}) \\\n\
-         \t[--stability-penalty F] OOS-std penalty (default {}) \\\n\
+         \t[--stability-method M] mean | median | trimmed (default mean) \\\n\
+         \t[--stability-penalty F] OOS-std/iqr penalty (default {}; ignored for trimmed) \\\n\
+         \t[--trim-pct F]         tail fraction trimmed under --stability-method trimmed (default {}) \\\n\
          \t--output-csv <path>    Top-N CSV export \\\n\
          \t--output-db <path>     fresh SQLite for walk-forward rows \\\n\
          \t[--seed N]             audit seed (default {}) \\\n\
@@ -170,6 +230,7 @@ fn print_usage() {
         DEFAULT_VALIDATE_BARS,
         DEFAULT_STEP_BARS,
         DEFAULT_STABILITY_PENALTY,
+        DEFAULT_TRIM_PCT,
         DEFAULT_SEED,
         defaults.min_mean_oos_pf,
         defaults.max_std_oos_pf,
@@ -188,6 +249,14 @@ fn parse_on_off(s: &str) -> Result<bool> {
 
 fn parse_args() -> Result<CliArgs> {
     let raw: Vec<String> = std::env::args().skip(1).collect();
+    parse_args_from(&raw)
+}
+
+/// Testable arg parser — `parse_args` wraps this with `std::env::args`.
+/// Keeping it standalone lets the unit tests drive every flag without
+/// spawning a child process. Pass arguments without the program-name
+/// element (i.e. what `std::env::args().skip(1)` produces).
+fn parse_args_from(raw: &[String]) -> Result<CliArgs> {
     if raw.is_empty() || raw.iter().any(|a| a == "--help" || a == "-h") {
         print_usage();
         bail!("missing required arguments");
@@ -201,6 +270,8 @@ fn parse_args() -> Result<CliArgs> {
     let mut validate_bars: usize = DEFAULT_VALIDATE_BARS;
     let mut step_bars: usize = DEFAULT_STEP_BARS;
     let mut stability_penalty: f64 = DEFAULT_STABILITY_PENALTY;
+    let mut stability_method: Option<StabilityMethodArg> = None;
+    let mut trim_pct: f64 = DEFAULT_TRIM_PCT;
     let mut output_csv: Option<PathBuf> = None;
     let mut output_db: Option<PathBuf> = None;
     let mut seed: u64 = DEFAULT_SEED;
@@ -238,6 +309,12 @@ fn parse_args() -> Result<CliArgs> {
                 stability_penalty = need()?
                     .parse()
                     .with_context(|| "--stability-penalty must be f64")?
+            }
+            "--stability-method" => {
+                stability_method = Some(StabilityMethodArg::parse(need()?)?)
+            }
+            "--trim-pct" => {
+                trim_pct = need()?.parse().with_context(|| "--trim-pct must be f64")?
             }
             "--output-csv" => output_csv = Some(PathBuf::from(need()?)),
             "--output-db" => output_db = Some(PathBuf::from(need()?)),
@@ -280,6 +357,13 @@ fn parse_args() -> Result<CliArgs> {
         i += if consume_value { 2 } else { 1 };
     }
 
+    if !(0.0..0.5).contains(&trim_pct) {
+        bail!(
+            "--trim-pct must be in [0.0, 0.5) (got {}); higher values would trim every value",
+            trim_pct,
+        );
+    }
+
     Ok(CliArgs {
         study_db: study_db.context("--study is required")?,
         strategy: strategy.context("--strategy is required")?,
@@ -289,6 +373,8 @@ fn parse_args() -> Result<CliArgs> {
         validate_bars,
         step_bars,
         stability_penalty,
+        stability_method,
+        trim_pct,
         output_csv: output_csv.context("--output-csv is required")?,
         output_db: output_db.context("--output-db is required")?,
         seed,
@@ -489,7 +575,9 @@ fn run_full_replay(args: &CliArgs) -> Result<(i64, usize)> {
         validate_bars: args.validate_bars,
         step_bars: args.step_bars,
         stability_penalty: args.stability_penalty,
-        stability_method: None,
+        stability_method: args
+            .stability_method
+            .map(|m| m.into_method(args.stability_penalty, args.trim_pct)),
     };
 
     let candles = load_candles(&args.candles_path)?;
@@ -540,6 +628,13 @@ fn run_full_replay(args: &CliArgs) -> Result<(i64, usize)> {
         new_study_name,
         new_study_id,
         args.output_db.display()
+    );
+    println!(
+        "[wf-replay] stability score method: {:?} (train={} bars, validate={} bars, step={} bars)",
+        wf_config.stability_method(),
+        wf_config.train_bars,
+        wf_config.validate_bars,
+        wf_config.step_bars,
     );
 
     // ─── Sanity: run the first (top-ranked) trial in isolation ─────────
@@ -1027,5 +1122,170 @@ mod tests {
         let row2 = lines.next().expect("second data row");
         let fields2: Vec<&str> = row2.split(',').collect();
         assert_eq!(fields2[9], "0", "second row must fail gate (0)");
+    }
+
+    // ─── W3-2 CLI tests: --stability-method + --trim-pct ────────────────────
+
+    fn min_args() -> Vec<String> {
+        vec![
+            "--study".into(),
+            "x.db".into(),
+            "--strategy".into(),
+            "ichimoku".into(),
+            "--candles".into(),
+            "c.json".into(),
+            "--output-csv".into(),
+            "out.csv".into(),
+            "--output-db".into(),
+            "out.db".into(),
+        ]
+    }
+
+    #[test]
+    fn parse_args_defaults_keep_pre_w3_behaviour_when_method_flag_absent() {
+        let args = parse_args_from(&min_args()).unwrap();
+        assert_eq!(args.stability_method, None);
+        // trim_pct still gets its default for round-trip safety, but
+        // it never reaches WalkForwardConfig.stability_method when the
+        // flag was omitted.
+        assert!((args.trim_pct - DEFAULT_TRIM_PCT).abs() < 1e-12);
+    }
+
+    #[test]
+    fn parse_args_stability_method_mean_routes_to_mean_std_penalty() {
+        let mut raw = min_args();
+        raw.extend([
+            "--stability-method".into(),
+            "mean".into(),
+            "--stability-penalty".into(),
+            "0.4".into(),
+        ]);
+        let args = parse_args_from(&raw).unwrap();
+        assert_eq!(args.stability_method, Some(StabilityMethodArg::Mean));
+        let method = args
+            .stability_method
+            .unwrap()
+            .into_method(args.stability_penalty, args.trim_pct);
+        assert_eq!(
+            method,
+            StabilityScoreMethod::MeanStdPenalty { penalty: 0.4 },
+        );
+    }
+
+    #[test]
+    fn parse_args_stability_method_median_reuses_stability_penalty_as_iqr_weight() {
+        let mut raw = min_args();
+        raw.extend([
+            "--stability-method".into(),
+            "median".into(),
+            "--stability-penalty".into(),
+            "0.3".into(),
+        ]);
+        let args = parse_args_from(&raw).unwrap();
+        assert_eq!(args.stability_method, Some(StabilityMethodArg::Median));
+        let method = args
+            .stability_method
+            .unwrap()
+            .into_method(args.stability_penalty, args.trim_pct);
+        assert_eq!(
+            method,
+            StabilityScoreMethod::MedianIqr { iqr_penalty: 0.3 },
+        );
+    }
+
+    #[test]
+    fn parse_args_stability_method_trimmed_uses_trim_pct_and_ignores_stability_penalty() {
+        let mut raw = min_args();
+        raw.extend([
+            "--stability-method".into(),
+            "trimmed".into(),
+            "--trim-pct".into(),
+            "0.25".into(),
+            "--stability-penalty".into(),
+            // Must not leak into the resolved method — TrimmedMean
+            // carries the trim_pct only; the inner std penalty is
+            // hard-wired to TRIMMED_STD_PENALTY = 0.5 in the engine.
+            "0.9".into(),
+        ]);
+        let args = parse_args_from(&raw).unwrap();
+        assert_eq!(args.stability_method, Some(StabilityMethodArg::Trimmed));
+        let method = args
+            .stability_method
+            .unwrap()
+            .into_method(args.stability_penalty, args.trim_pct);
+        assert_eq!(
+            method,
+            StabilityScoreMethod::TrimmedMean { trim_pct: 0.25 },
+        );
+    }
+
+    #[test]
+    fn parse_args_rejects_unknown_stability_method_token() {
+        let mut raw = min_args();
+        raw.extend(["--stability-method".into(), "geomean".into()]);
+        let err = parse_args_from(&raw).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("unknown --stability-method"),
+            "error must mention unknown method, got: {}",
+            msg,
+        );
+    }
+
+    #[test]
+    fn parse_args_rejects_trim_pct_outside_legal_range() {
+        // trim_pct >= 0.5 would trim every value on n <= 4 series.
+        let mut raw = min_args();
+        raw.extend([
+            "--stability-method".into(),
+            "trimmed".into(),
+            "--trim-pct".into(),
+            "0.5".into(),
+        ]);
+        let err = parse_args_from(&raw).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("--trim-pct must be in"),
+            "error must mention --trim-pct range, got: {}",
+            msg,
+        );
+    }
+
+    #[test]
+    fn walk_forward_config_built_from_cli_args_roundtrips_via_serde() {
+        // The CLI ultimately feeds a WalkForwardConfig into
+        // storage.insert_walk_forward_trial → config_json. Make sure the
+        // (config_json) blob deserialises losslessly so audit/replay
+        // tooling can reconstruct the exact method used.
+        let mut raw = min_args();
+        raw.extend([
+            "--stability-method".into(),
+            "trimmed".into(),
+            "--trim-pct".into(),
+            "0.2".into(),
+            "--train-bars".into(),
+            "4392".into(),
+            "--validate-bars".into(),
+            "2196".into(),
+            "--step-bars".into(),
+            "2196".into(),
+        ]);
+        let args = parse_args_from(&raw).unwrap();
+        let cfg = WalkForwardConfig {
+            train_bars: args.train_bars,
+            validate_bars: args.validate_bars,
+            step_bars: args.step_bars,
+            stability_penalty: args.stability_penalty,
+            stability_method: args
+                .stability_method
+                .map(|m| m.into_method(args.stability_penalty, args.trim_pct)),
+        };
+        let json = serde_json::to_string(&cfg).unwrap();
+        let back: WalkForwardConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, cfg);
+        assert_eq!(
+            back.stability_method(),
+            StabilityScoreMethod::TrimmedMean { trim_pct: 0.2 },
+        );
     }
 }
