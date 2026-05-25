@@ -46,6 +46,7 @@ use chrono::Utc;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
+use super::walk_forward::{WalkForwardConfig, WalkForwardResult, WalkForwardSplitResult};
 use super::{TrialMetrics, TrialParams, TrialResult};
 
 /// Wrapper around the optimizer SQLite database connection.
@@ -106,6 +107,30 @@ impl StudyStorage {
 
             CREATE INDEX IF NOT EXISTS trials_study_score_idx
                 ON trials(study_id, score DESC);
+
+            -- Welle-W1 walk-forward results table (additive migration).
+            -- `IF NOT EXISTS` lets us extend an existing Welle-O2 study DB
+            -- without touching the original `trials` table — old rows
+            -- remain queryable, new walk-forward runs land here.
+            CREATE TABLE IF NOT EXISTS walk_forward_trials (
+                id                INTEGER PRIMARY KEY AUTOINCREMENT,
+                study_id          INTEGER NOT NULL,
+                trial_id          INTEGER NOT NULL,
+                params_json       TEXT NOT NULL,
+                aggregated_score  REAL NOT NULL,
+                mean_oos_pf       REAL NOT NULL,
+                std_oos_pf        REAL NOT NULL,
+                worst_oos_pf      REAL NOT NULL,
+                mean_is_pf        REAL NOT NULL,
+                is_oos_decay      REAL NOT NULL,
+                config_json       TEXT NOT NULL,
+                splits_json       TEXT NOT NULL,
+                created_at        TEXT NOT NULL,
+                FOREIGN KEY (study_id) REFERENCES studies(id)
+            );
+
+            CREATE INDEX IF NOT EXISTS wf_trials_study_score_idx
+                ON walk_forward_trials(study_id, aggregated_score DESC);
             "#,
         )
         .context("failed to apply schema migration")?;
@@ -228,6 +253,134 @@ impl StudyStorage {
             )
             .optional()?;
         Ok(id)
+    }
+
+    // ─── Walk-Forward (Welle-W1) ─────────────────────────────────────────────
+
+    /// Insert one walk-forward trial result for `study_id`. Sanitizes
+    /// every `TrialMetrics` in `result.splits` of NaN/Inf before JSON
+    /// serialization (same convention as `insert_trial` for the Welle-O1
+    /// table). The aggregated stat columns (`aggregated_score`,
+    /// `mean_oos_pf`, …) are stored as raw `f64` so `NEG_INFINITY`
+    /// survives bit-for-bit and sorts to the bottom of any Top-N query.
+    pub fn insert_walk_forward_trial(
+        &self,
+        study_id: i64,
+        result: &WalkForwardResult,
+        config: &WalkForwardConfig,
+    ) -> Result<()> {
+        let params_json =
+            serde_json::to_string(&result.params).context("serialize TrialParams")?;
+        let sanitized_splits: Vec<WalkForwardSplitResult> = result
+            .splits
+            .iter()
+            .map(|s| WalkForwardSplitResult {
+                split_index: s.split_index,
+                train_metrics: sanitize_metrics(&s.train_metrics),
+                validate_metrics: sanitize_metrics(&s.validate_metrics),
+            })
+            .collect();
+        let splits_json = serde_json::to_string(&sanitized_splits)
+            .context("serialize Vec<WalkForwardSplitResult>")?;
+        let config_json = serde_json::to_string(config).context("serialize WalkForwardConfig")?;
+        let now = Utc::now().to_rfc3339();
+        self.conn
+            .execute(
+                "INSERT INTO walk_forward_trials \
+                 (study_id, trial_id, params_json, aggregated_score, mean_oos_pf, std_oos_pf, \
+                  worst_oos_pf, mean_is_pf, is_oos_decay, config_json, splits_json, created_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                params![
+                    study_id,
+                    result.trial_id,
+                    params_json,
+                    result.aggregated_score,
+                    result.mean_oos_pf,
+                    result.std_oos_pf,
+                    result.worst_oos_pf,
+                    result.mean_is_pf,
+                    result.is_oos_decay,
+                    config_json,
+                    splits_json,
+                    now,
+                ],
+            )
+            .context("failed to insert walk_forward_trial")?;
+        Ok(())
+    }
+
+    /// Return the top-`n` walk-forward trials for `study_id`, ordered by
+    /// descending `aggregated_score`. Disqualified trials (score =
+    /// `NEG_INFINITY`) sort last — same convention as `top_n_trials`.
+    pub fn top_n_walk_forward(
+        &self,
+        study_id: i64,
+        n: usize,
+    ) -> Result<Vec<WalkForwardResult>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT trial_id, params_json, aggregated_score, mean_oos_pf, std_oos_pf, \
+                    worst_oos_pf, mean_is_pf, is_oos_decay, splits_json \
+             FROM walk_forward_trials \
+             WHERE study_id = ?1 \
+             ORDER BY aggregated_score DESC \
+             LIMIT ?2",
+        )?;
+        let rows = stmt
+            .query_map(params![study_id, n as i64], |row| {
+                Ok((
+                    row.get::<_, i64>(0)? as u32,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, f64>(2)?,
+                    row.get::<_, f64>(3)?,
+                    row.get::<_, f64>(4)?,
+                    row.get::<_, f64>(5)?,
+                    row.get::<_, f64>(6)?,
+                    row.get::<_, f64>(7)?,
+                    row.get::<_, String>(8)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let mut out = Vec::with_capacity(rows.len());
+        for (
+            trial_id,
+            params_json,
+            aggregated_score,
+            mean_oos_pf,
+            std_oos_pf,
+            worst_oos_pf,
+            mean_is_pf,
+            is_oos_decay,
+            splits_json,
+        ) in rows
+        {
+            let params: TrialParams =
+                serde_json::from_str(&params_json).context("deserialize TrialParams")?;
+            let splits: Vec<WalkForwardSplitResult> = serde_json::from_str(&splits_json)
+                .context("deserialize Vec<WalkForwardSplitResult>")?;
+            out.push(WalkForwardResult {
+                trial_id,
+                params,
+                splits,
+                aggregated_score,
+                mean_oos_pf,
+                std_oos_pf,
+                worst_oos_pf,
+                mean_is_pf,
+                is_oos_decay,
+            });
+        }
+        Ok(out)
+    }
+
+    /// Return the number of walk-forward trials persisted for `study_id`.
+    pub fn count_walk_forward_trials(&self, study_id: i64) -> Result<u64> {
+        let n: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM walk_forward_trials WHERE study_id = ?1",
+            params![study_id],
+            |row| row.get(0),
+        )?;
+        Ok(n as u64)
     }
 }
 
@@ -412,5 +565,305 @@ mod tests {
         assert_eq!(top.len(), 1);
         assert_eq!(top[0].trial_id, 42);
         assert_eq!(top[0].score, 7.5);
+    }
+
+    // ─── Walk-Forward (Welle-W1) ─────────────────────────────────────────────
+
+    fn sample_split(i: usize, train_pf: f64, validate_pf: f64) -> WalkForwardSplitResult {
+        WalkForwardSplitResult {
+            split_index: i,
+            train_metrics: TrialMetrics {
+                total_trades: 30,
+                total_pnl: 100.0,
+                win_rate: 55.0,
+                sharpe_ratio: 1.0,
+                max_drawdown_pct: 8.0,
+                profit_factor: train_pf,
+                final_equity: 10_100.0,
+            },
+            validate_metrics: TrialMetrics {
+                total_trades: 10,
+                total_pnl: 50.0,
+                win_rate: 50.0,
+                sharpe_ratio: 0.8,
+                max_drawdown_pct: 9.0,
+                profit_factor: validate_pf,
+                final_equity: 10_050.0,
+            },
+        }
+    }
+
+    fn sample_walk_forward(trial_id: u32, aggregated: f64) -> WalkForwardResult {
+        let splits = vec![
+            sample_split(0, 1.5, 1.5),
+            sample_split(1, 1.5, 1.5),
+            sample_split(2, 1.5, 1.5),
+        ];
+        let mut params = TrialParams::new();
+        params.insert("kijun_period", 26.0);
+        WalkForwardResult {
+            trial_id,
+            params,
+            splits,
+            aggregated_score: aggregated,
+            mean_oos_pf: 1.5,
+            std_oos_pf: 0.0,
+            worst_oos_pf: 1.5,
+            mean_is_pf: 1.5,
+            is_oos_decay: 0.0,
+        }
+    }
+
+    fn sample_config() -> WalkForwardConfig {
+        WalkForwardConfig {
+            train_bars: 200,
+            validate_bars: 50,
+            step_bars: 50,
+            stability_penalty: 0.5,
+        }
+    }
+
+    #[test]
+    fn walk_forward_schema_is_created_on_fresh_database() {
+        let storage = StudyStorage::open_in_memory().unwrap();
+        let study_id = storage.create_study("wf_fresh", "ichimoku", "yaml").unwrap();
+        assert_eq!(storage.count_walk_forward_trials(study_id).unwrap(), 0);
+    }
+
+    #[test]
+    fn insert_walk_forward_then_top_n_roundtrips_all_fields() {
+        let storage = StudyStorage::open_in_memory().unwrap();
+        let study_id = storage.create_study("wf_roundtrip", "ichimoku", "yaml").unwrap();
+        let wf = sample_walk_forward(7, 1.42);
+        storage.insert_walk_forward_trial(study_id, &wf, &sample_config()).unwrap();
+
+        let top = storage.top_n_walk_forward(study_id, 5).unwrap();
+        assert_eq!(top.len(), 1);
+        let got = &top[0];
+        assert_eq!(got.trial_id, 7);
+        assert_eq!(got.params, wf.params);
+        assert_eq!(got.aggregated_score, 1.42);
+        assert_eq!(got.mean_oos_pf, 1.5);
+        assert_eq!(got.std_oos_pf, 0.0);
+        assert_eq!(got.worst_oos_pf, 1.5);
+        assert_eq!(got.mean_is_pf, 1.5);
+        assert_eq!(got.is_oos_decay, 0.0);
+        assert_eq!(got.splits.len(), 3);
+        assert_eq!(got.splits[0].split_index, 0);
+        assert_eq!(got.splits[2].split_index, 2);
+    }
+
+    #[test]
+    fn top_n_walk_forward_orders_by_aggregated_score_desc() {
+        let storage = StudyStorage::open_in_memory().unwrap();
+        let study_id = storage.create_study("wf_order", "ichimoku", "yaml").unwrap();
+        let scores = [1.2, 2.5, 0.7, 3.1, 1.9, 2.0, 0.4, 2.7, 1.1, 3.5];
+        for (i, &s) in scores.iter().enumerate() {
+            storage
+                .insert_walk_forward_trial(study_id, &sample_walk_forward(i as u32, s), &sample_config())
+                .unwrap();
+        }
+        let top3 = storage.top_n_walk_forward(study_id, 3).unwrap();
+        assert_eq!(top3.len(), 3);
+        assert_eq!(top3[0].aggregated_score, 3.5);
+        assert_eq!(top3[1].aggregated_score, 3.1);
+        assert_eq!(top3[2].aggregated_score, 2.7);
+    }
+
+    #[test]
+    fn disqualified_walk_forward_trials_sort_last_and_preserve_neg_infinity() {
+        let storage = StudyStorage::open_in_memory().unwrap();
+        let study_id = storage.create_study("wf_dq", "ichimoku", "yaml").unwrap();
+        storage
+            .insert_walk_forward_trial(study_id, &sample_walk_forward(0, f64::NEG_INFINITY), &sample_config())
+            .unwrap();
+        storage
+            .insert_walk_forward_trial(study_id, &sample_walk_forward(1, 2.0), &sample_config())
+            .unwrap();
+        storage
+            .insert_walk_forward_trial(study_id, &sample_walk_forward(2, 1.0), &sample_config())
+            .unwrap();
+
+        let top3 = storage.top_n_walk_forward(study_id, 3).unwrap();
+        assert_eq!(top3[0].aggregated_score, 2.0);
+        assert_eq!(top3[1].aggregated_score, 1.0);
+        assert!(top3[2].aggregated_score.is_infinite() && top3[2].aggregated_score < 0.0);
+    }
+
+    #[test]
+    fn count_walk_forward_trials_returns_inserted_total() {
+        let storage = StudyStorage::open_in_memory().unwrap();
+        let study_id = storage.create_study("wf_count", "ichimoku", "yaml").unwrap();
+        assert_eq!(storage.count_walk_forward_trials(study_id).unwrap(), 0);
+        for i in 0..7u32 {
+            storage
+                .insert_walk_forward_trial(study_id, &sample_walk_forward(i, i as f64), &sample_config())
+                .unwrap();
+        }
+        assert_eq!(storage.count_walk_forward_trials(study_id).unwrap(), 7);
+    }
+
+    #[test]
+    fn insert_walk_forward_sanitizes_nan_split_metrics_before_serialization() {
+        let storage = StudyStorage::open_in_memory().unwrap();
+        let study_id = storage.create_study("wf_nan", "ichimoku", "yaml").unwrap();
+        let mut wf = sample_walk_forward(0, 1.0);
+        wf.splits[1].validate_metrics.profit_factor = f64::NAN;
+        wf.splits[2].train_metrics.sharpe_ratio = f64::INFINITY;
+        // Must not panic / error on insert.
+        storage.insert_walk_forward_trial(study_id, &wf, &sample_config()).unwrap();
+        let top = storage.top_n_walk_forward(study_id, 1).unwrap();
+        // Sanitized → 0.0 in the stored copy.
+        assert_eq!(top[0].splits[1].validate_metrics.profit_factor, 0.0);
+        assert_eq!(top[0].splits[2].train_metrics.sharpe_ratio, 0.0);
+    }
+
+    #[test]
+    fn walk_forward_persists_after_reopen() {
+        let file = NamedTempFile::new().unwrap();
+        let study_id;
+        {
+            let storage = StudyStorage::open(file.path()).unwrap();
+            study_id = storage.create_study("wf_persist", "ichimoku", "yaml").unwrap();
+            storage
+                .insert_walk_forward_trial(study_id, &sample_walk_forward(42, 7.5), &sample_config())
+                .unwrap();
+        }
+        let storage = StudyStorage::open(file.path()).unwrap();
+        let top = storage.top_n_walk_forward(study_id, 5).unwrap();
+        assert_eq!(top.len(), 1);
+        assert_eq!(top[0].trial_id, 42);
+        assert_eq!(top[0].aggregated_score, 7.5);
+    }
+
+    /// Backward-compat: a database created with the Welle-O1/O2 schema
+    /// (studies + trials only) MUST open cleanly under the W1-3 code
+    /// path. The new `walk_forward_trials` table is added via
+    /// `CREATE TABLE IF NOT EXISTS`, so existing tables and rows survive
+    /// untouched.
+    #[test]
+    fn migration_from_pre_walk_forward_schema_preserves_old_trials() {
+        let file = NamedTempFile::new().unwrap();
+        let study_id;
+        {
+            // Simulate a Welle-O2 database by manually creating the
+            // pre-W1 schema (studies + trials only, no walk_forward_trials).
+            let conn = Connection::open(file.path()).unwrap();
+            conn.execute_batch(
+                r#"
+                CREATE TABLE studies (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL UNIQUE,
+                    strategy TEXT NOT NULL,
+                    search_space_yaml TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    commit_hash TEXT
+                );
+                CREATE TABLE trials (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    study_id INTEGER NOT NULL,
+                    trial_id INTEGER NOT NULL,
+                    params_json TEXT NOT NULL,
+                    metrics_json TEXT NOT NULL,
+                    score REAL NOT NULL,
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY (study_id) REFERENCES studies(id)
+                );
+                CREATE INDEX trials_study_score_idx ON trials(study_id, score DESC);
+                "#,
+            )
+            .unwrap();
+            // Insert a fake old-format trial directly via raw SQL so the
+            // round-trip below proves the legacy row is still readable
+            // through the new `top_n_trials` path.
+            let now = Utc::now().to_rfc3339();
+            conn.execute(
+                "INSERT INTO studies (name, strategy, search_space_yaml, created_at) VALUES (?1, ?2, ?3, ?4)",
+                params!["legacy_study", "ichimoku", "yaml", &now],
+            )
+            .unwrap();
+            let id = conn.last_insert_rowid();
+            study_id = id;
+            conn.execute(
+                "INSERT INTO trials (study_id, trial_id, params_json, metrics_json, score, created_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    id,
+                    99,
+                    "{\"values\":{}}",
+                    "{\"total_trades\":42,\"total_pnl\":0.0,\"win_rate\":0.0,\"sharpe_ratio\":0.0,\"max_drawdown_pct\":0.0,\"profit_factor\":1.5,\"final_equity\":10000.0}",
+                    1.5_f64,
+                    &now,
+                ],
+            )
+            .unwrap();
+        }
+
+        // Now open through StudyStorage — this runs the W1-3
+        // `ensure_schema` migration on a real Welle-O2-shape DB.
+        let storage = StudyStorage::open(file.path()).unwrap();
+
+        // Legacy trials row must still be readable.
+        let legacy = storage.top_n_trials(study_id, 5).unwrap();
+        assert_eq!(legacy.len(), 1);
+        assert_eq!(legacy[0].trial_id, 99);
+        assert_eq!(legacy[0].score, 1.5);
+        assert_eq!(legacy[0].metrics.total_trades, 42);
+
+        // New walk_forward_trials table now exists — count returns 0
+        // (no rows yet, but the table is present and queryable).
+        assert_eq!(storage.count_walk_forward_trials(study_id).unwrap(), 0);
+
+        // And new walk-forward rows can be inserted alongside the legacy data.
+        storage
+            .insert_walk_forward_trial(study_id, &sample_walk_forward(1, 2.5), &sample_config())
+            .unwrap();
+        assert_eq!(storage.count_walk_forward_trials(study_id).unwrap(), 1);
+        // Legacy table is untouched by the W1 insert.
+        let still_legacy = storage.top_n_trials(study_id, 5).unwrap();
+        assert_eq!(still_legacy.len(), 1);
+        assert_eq!(still_legacy[0].trial_id, 99);
+    }
+
+    /// Belt-and-braces check against the actual Welle-O2 production
+    /// database: copy the on-disk file to a tempfile, open it through
+    /// the W1-3 code path, and confirm every legacy trial is still
+    /// queryable. The test is `#[ignore]`-d by default so CI without
+    /// the studies file present continues to pass; QA runs it manually
+    /// with `cargo test --release -- --ignored welle_o2`.
+    #[test]
+    #[ignore = "requires 01_Projectplan/optimizer_studies/studies-ichimoku.db"]
+    fn welle_o2_ichimoku_db_remains_readable_after_w1_migration() {
+        use std::fs;
+        use std::path::PathBuf;
+        let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(|p| p.parent())
+            .expect("crate dir has a great-grandparent")
+            .to_path_buf();
+        let source = repo_root.join("01_Projectplan/optimizer_studies/studies-ichimoku.db");
+        if !source.exists() {
+            eprintln!("Welle-O2 studies-ichimoku.db not present at {}; skipping", source.display());
+            return;
+        }
+        let copy = NamedTempFile::new().unwrap();
+        fs::copy(&source, copy.path()).unwrap();
+
+        let storage = StudyStorage::open(copy.path()).expect("open copied Welle-O2 DB");
+        let studies = storage.list_studies().expect("list_studies");
+        assert!(!studies.is_empty(), "Welle-O2 DB must contain at least one study");
+
+        let first = &studies[0];
+        let legacy = storage
+            .top_n_trials(first.id, 10)
+            .expect("top_n_trials must work on legacy schema");
+        assert!(!legacy.is_empty(), "study must contain at least one legacy trial");
+
+        // walk_forward_trials table was added by the migration; it must
+        // exist (count returns 0, not an error).
+        let n_wf = storage
+            .count_walk_forward_trials(first.id)
+            .expect("count_walk_forward_trials must work after migration");
+        assert_eq!(n_wf, 0, "no walk-forward rows should be present yet");
     }
 }
