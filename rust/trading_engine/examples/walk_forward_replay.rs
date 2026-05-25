@@ -489,6 +489,7 @@ fn run_full_replay(args: &CliArgs) -> Result<(i64, usize)> {
         validate_bars: args.validate_bars,
         step_bars: args.step_bars,
         stability_penalty: args.stability_penalty,
+        stability_method: None,
     };
 
     let candles = load_candles(&args.candles_path)?;

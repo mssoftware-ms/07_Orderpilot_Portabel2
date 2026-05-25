@@ -620,6 +620,7 @@ mod tests {
             validate_bars: 50,
             step_bars: 50,
             stability_penalty: 0.5,
+            stability_method: None,
         }
     }
 

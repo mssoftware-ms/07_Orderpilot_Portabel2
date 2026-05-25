@@ -94,6 +94,7 @@ fn wf_config(train: usize, validate: usize, step: usize) -> WalkForwardConfig {
         validate_bars: validate,
         step_bars: step,
         stability_penalty: 0.5,
+        stability_method: None,
     }
 }
 

@@ -37,11 +37,56 @@ use super::runner::run_optimization_trial;
 use super::scoring::StrategyKind;
 use super::{ScoreConstraints, TrialMetrics, TrialParams};
 
+/// Selection of the stability-penalized aggregation formula applied to a
+/// trial's per-split OOS profit-factor vector. Welle W1/W2 shipped only
+/// `MeanStdPenalty`; Welle W3 introduces the two robust alternatives so
+/// the survivor pool is not dictated by a handful of high-PF outliers.
+///
+/// # Variants
+/// - `MeanStdPenalty { penalty }` — legacy: `mean(OOS_PF) − std(OOS_PF) · penalty`
+/// - `MedianIqr { iqr_penalty }`  — robust: `median(OOS_PF) − iqr(OOS_PF) · iqr_penalty`
+/// - `TrimmedMean { trim_pct }`   — robust: trim top + bottom `trim_pct` first,
+///   then `trimmed_mean − trimmed_std · 0.5` (the inner penalty is fixed
+///   because the trimming itself is the primary outlier defense).
+///
+/// All sanitization (NaN / ±Inf → 0.0) happens once inside
+/// `compute_aggregated_score`; each variant therefore only sees finite
+/// inputs.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum StabilityScoreMethod {
+    /// Welle-W1/W2 default. `penalty` weights the OOS standard deviation
+    /// subtracted from the mean; `0.5` reproduces the legacy formula.
+    MeanStdPenalty { penalty: f64 },
+    /// Bailey-de-Prado-robust: rank statistic over the OOS series.
+    /// `iqr_penalty` weights the interquartile range subtracted from the
+    /// median. Linear-interpolation percentiles (numpy / R Type-7).
+    MedianIqr { iqr_penalty: f64 },
+    /// Trim `trim_pct` of the OOS series off each tail (floor on n ·
+    /// trim_pct), then score the remaining centre as `trimmed_mean − 0.5
+    /// · trimmed_std`. `trim_pct = 0.2` removes 20 % top + 20 % bottom.
+    TrimmedMean { trim_pct: f64 },
+}
+
+impl StabilityScoreMethod {
+    /// Welle-W1/W2 legacy default — `mean − std · 0.5`.
+    pub fn legacy_default() -> Self {
+        Self::MeanStdPenalty { penalty: 0.5 }
+    }
+}
+
 /// Configuration for a rolling-window walk-forward run.
 ///
 /// All counts are in candle bars (not calendar days) — the splitter is
 /// timeframe-agnostic; the caller chooses bar counts that map to the
 /// desired calendar window for the timeframe being studied.
+///
+/// # Backward compatibility
+/// `stability_method` was added in Welle W3 with `#[serde(default)]`, so
+/// pre-W3 `config_json` blobs in the Welle-W2 SQLite store
+/// (`walk_forward_trials.config_json`) deserialize cleanly: `None` falls
+/// back to `MeanStdPenalty { penalty: stability_penalty }` via
+/// [`WalkForwardConfig::stability_method`].
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
 pub struct WalkForwardConfig {
     /// Number of bars in each training (in-sample) window.
@@ -51,10 +96,16 @@ pub struct WalkForwardConfig {
     /// Bars advanced between consecutive splits. Set equal to
     /// `validate_bars` for non-overlapping OOS tiling.
     pub step_bars: usize,
-    /// Penalty multiplier applied to the OOS standard deviation when
-    /// computing the aggregated score. `0.5` is the Welle-W1 default
-    /// (stability matters but is not the sole objective).
+    /// Legacy penalty multiplier applied to the OOS standard deviation
+    /// when `stability_method` is `None` (Welle-W1/W2 default `0.5`).
+    /// When `stability_method` is `Some`, this field is *informational
+    /// only* — the chosen method carries its own penalty.
     pub stability_penalty: f64,
+    /// Welle-W3 stability scoring method. `None` reproduces the legacy
+    /// `mean(OOS_PF) − std(OOS_PF) · stability_penalty` formula bit-for-
+    /// bit so existing Welle-W2 results stay reproducible.
+    #[serde(default)]
+    pub stability_method: Option<StabilityScoreMethod>,
 }
 
 impl WalkForwardConfig {
@@ -67,7 +118,17 @@ impl WalkForwardConfig {
             validate_bars: 1464, // ≈ 2 months × 30 days × 24 h
             step_bars: 1464,
             stability_penalty: 0.5,
+            stability_method: None,
         }
+    }
+
+    /// Resolve the effective stability-scoring method: returns the
+    /// explicit `stability_method` when set; otherwise falls back to
+    /// `MeanStdPenalty { penalty: self.stability_penalty }` to honour the
+    /// legacy Welle-W1/W2 contract for any deserialized pre-W3 config.
+    pub fn stability_method(&self) -> StabilityScoreMethod {
+        self.stability_method
+            .unwrap_or(StabilityScoreMethod::MeanStdPenalty { penalty: self.stability_penalty })
     }
 }
 
@@ -194,20 +255,148 @@ fn sanitize_pf(pf: f64) -> f64 {
     }
 }
 
+/// Median over a pre-sorted slice of sanitized finite `f64`. Empty →
+/// `0.0` (caller responsibility to avoid). Sharing the sorted slice
+/// with `compute_iqr_sorted` lets `MedianIqr` scoring sort once.
+fn compute_median_sorted(sorted: &[f64]) -> f64 {
+    let n = sorted.len();
+    if n == 0 {
+        return 0.0;
+    }
+    if n % 2 == 1 {
+        sorted[n / 2]
+    } else {
+        (sorted[n / 2 - 1] + sorted[n / 2]) / 2.0
+    }
+}
+
+/// Linear-interpolation percentile (numpy `linear` / R Type-7). `p` in
+/// `[0.0, 1.0]`. Caller passes a slice of sanitized finite `f64`. Pure
+/// function — takes a pre-sorted slice to allow median + IQR to share
+/// one sort.
+fn percentile_sorted(sorted: &[f64], p: f64) -> f64 {
+    let n = sorted.len();
+    if n == 0 {
+        return 0.0;
+    }
+    if n == 1 {
+        return sorted[0];
+    }
+    let idx = (n - 1) as f64 * p;
+    let lo = idx.floor() as usize;
+    let hi = idx.ceil() as usize;
+    if lo == hi {
+        sorted[lo]
+    } else {
+        let frac = idx - lo as f64;
+        sorted[lo] + (sorted[hi] - sorted[lo]) * frac
+    }
+}
+
+/// Interquartile range — `q75 − q25` on a slice of sanitized finite
+/// `f64`. Pre-sorted slice required (cheap: callers sort once for
+/// median + IQR together).
+fn compute_iqr_sorted(sorted: &[f64]) -> f64 {
+    percentile_sorted(sorted, 0.75) - percentile_sorted(sorted, 0.25)
+}
+
+/// Mean + (population) standard deviation of the centred slice after
+/// trimming `trim_pct` of the values off each tail (floor on
+/// `n · trim_pct`). Never trims more than half the values; degenerate
+/// inputs (`hi <= lo`) return `(0.0, 0.0)`.
+fn compute_trimmed_mean_std(values: &[f64], trim_pct: f64) -> (f64, f64) {
+    let n = values.len();
+    if n == 0 {
+        return (0.0, 0.0);
+    }
+    let mut sorted: Vec<f64> = values.to_vec();
+    sorted.sort_by(|a, b| {
+        a.partial_cmp(b)
+            .expect("compute_trimmed_mean_std requires finite values")
+    });
+    let raw_trim = (n as f64 * trim_pct).floor() as usize;
+    let trim = raw_trim.min(n / 2);
+    let lo = trim;
+    let hi = n - trim;
+    if hi <= lo {
+        return (0.0, 0.0);
+    }
+    let slice = &sorted[lo..hi];
+    let len = slice.len() as f64;
+    let mean = slice.iter().sum::<f64>() / len;
+    let variance = slice.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / len;
+    (mean, variance.sqrt())
+}
+
+/// Inner penalty applied to the trimmed-std term inside the
+/// `TrimmedMean` variant. Hardcoded because the trim already provides
+/// the primary outlier defense — the std subtraction is a secondary
+/// tiebreaker and would be redundant if exposed as a knob.
+const TRIMMED_STD_PENALTY: f64 = 0.5;
+
+/// Compute the aggregated stability-penalized score from the per-split
+/// OOS profit factors under `method`. Pure function — sanitizes
+/// non-finite inputs to `0.0` once, then dispatches.
+///
+/// # Empty input
+/// Returns `f64::NEG_INFINITY` for the empty slice to keep the
+/// sentinel convention consistent with the rest of the optimizer
+/// (disqualified trials sort to the bottom of any Top-N query).
+pub fn compute_aggregated_score(
+    oos_pfs: &[f64],
+    method: &StabilityScoreMethod,
+) -> f64 {
+    if oos_pfs.is_empty() {
+        return f64::NEG_INFINITY;
+    }
+    let sanitized: Vec<f64> = oos_pfs.iter().map(|&pf| sanitize_pf(pf)).collect();
+    match method {
+        StabilityScoreMethod::MeanStdPenalty { penalty } => {
+            let n = sanitized.len() as f64;
+            let mean = sanitized.iter().sum::<f64>() / n;
+            let variance = sanitized.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / n;
+            let std = variance.sqrt();
+            mean - std * penalty
+        }
+        StabilityScoreMethod::MedianIqr { iqr_penalty } => {
+            let mut sorted = sanitized.clone();
+            sorted.sort_by(|a, b| {
+                a.partial_cmp(b)
+                    .expect("sanitized values are finite by construction")
+            });
+            let median = compute_median_sorted(&sorted);
+            let iqr = compute_iqr_sorted(&sorted);
+            median - iqr * iqr_penalty
+        }
+        StabilityScoreMethod::TrimmedMean { trim_pct } => {
+            let (mean_t, std_t) = compute_trimmed_mean_std(&sanitized, *trim_pct);
+            mean_t - std_t * TRIMMED_STD_PENALTY
+        }
+    }
+}
+
 /// Aggregate per-split results into a `WalkForwardResult`. Pure
 /// function — no engine calls, no I/O — so the score formula can be
 /// unit-tested against handcrafted split sequences without paying the
 /// backtest cost.
 ///
+/// # Disqualification sentinel
+/// When every split's raw OOS PF is non-finite the aggregated score is
+/// set to `f64::NEG_INFINITY` regardless of the chosen method —
+/// preserves the Welle-O1 convention used across the optimizer pipeline.
+///
 /// # Panics
 /// Never; `splits` must be non-empty (caller responsibility).
-pub fn aggregate_walk_forward(
+pub fn aggregate_walk_forward_with_method(
     trial_id: u32,
     params: TrialParams,
     splits: Vec<WalkForwardSplitResult>,
-    stability_penalty: f64,
+    method: &StabilityScoreMethod,
 ) -> WalkForwardResult {
-    debug_assert!(!splits.is_empty(), "aggregate_walk_forward requires non-empty splits");
+    debug_assert!(
+        !splits.is_empty(),
+        "aggregate_walk_forward_with_method requires non-empty splits"
+    );
     let n = splits.len() as f64;
 
     let any_finite_oos = splits
@@ -234,7 +423,7 @@ pub fn aggregate_walk_forward(
     let mean_is = is_pfs.iter().sum::<f64>() / n;
 
     let aggregated = if any_finite_oos {
-        mean_oos - std_oos * stability_penalty
+        compute_aggregated_score(&oos_pfs, method)
     } else {
         f64::NEG_INFINITY
     };
@@ -250,6 +439,25 @@ pub fn aggregate_walk_forward(
         mean_is_pf: mean_is,
         is_oos_decay: mean_is - mean_oos,
     }
+}
+
+/// Welle-W1/W2 back-compat wrapper for callers that pre-date the
+/// `StabilityScoreMethod` dispatch. Identical behavior to
+/// `aggregate_walk_forward_with_method(..., &MeanStdPenalty { penalty })`.
+pub fn aggregate_walk_forward(
+    trial_id: u32,
+    params: TrialParams,
+    splits: Vec<WalkForwardSplitResult>,
+    stability_penalty: f64,
+) -> WalkForwardResult {
+    aggregate_walk_forward_with_method(
+        trial_id,
+        params,
+        splits,
+        &StabilityScoreMethod::MeanStdPenalty {
+            penalty: stability_penalty,
+        },
+    )
 }
 
 // ─── Survivor Criteria ───────────────────────────────────────────────────────
@@ -380,11 +588,11 @@ pub fn run_walk_forward_trial(
         });
     }
 
-    Ok(aggregate_walk_forward(
+    Ok(aggregate_walk_forward_with_method(
         trial_id,
         params,
         split_results,
-        config.stability_penalty,
+        &config.stability_method(),
     ))
 }
 
@@ -398,6 +606,7 @@ mod tests {
             validate_bars: validate,
             step_bars: step,
             stability_penalty: 0.5,
+            stability_method: None,
         }
     }
 
@@ -534,6 +743,7 @@ mod tests {
             validate_bars: 50,
             step_bars: 0,
             stability_penalty: 0.5,
+            stability_method: None,
         };
         let splits = generate_splits(&bad, 1000);
         assert!(splits.is_empty());
@@ -687,6 +897,290 @@ mod tests {
         ];
         let result = aggregate_walk_forward(0, TrialParams::new(), splits, 0.5);
         assert!((result.mean_is_pf - 1.5).abs() < 1e-9);
+    }
+
+    // ─── Stability score methods (pure, no backtests) ───────────────────────
+
+    #[test]
+    fn median_iqr_score_on_uniform_data_matches_textbook_formula() {
+        // [1,2,3,4,5] → median=3.0, q25=2.0, q75=4.0, iqr=2.0
+        // score = 3.0 − 2.0 × 0.5 = 2.0
+        let pfs = [1.0, 2.0, 3.0, 4.0, 5.0];
+        let method = StabilityScoreMethod::MedianIqr { iqr_penalty: 0.5 };
+        let score = compute_aggregated_score(&pfs, &method);
+        assert!((score - 2.0).abs() < 1e-9, "score={}", score);
+    }
+
+    #[test]
+    fn median_iqr_score_on_even_length_uses_midpoint_median() {
+        // [1,2,3,4] → median=(2+3)/2=2.5
+        // q25 = idx 0.75 → 1 + (2-1)*0.75 = 1.75
+        // q75 = idx 2.25 → 3 + (4-3)*0.25 = 3.25
+        // iqr = 1.5, score = 2.5 − 1.5×0.5 = 1.75
+        let pfs = [1.0, 2.0, 3.0, 4.0];
+        let method = StabilityScoreMethod::MedianIqr { iqr_penalty: 0.5 };
+        let score = compute_aggregated_score(&pfs, &method);
+        assert!((score - 1.75).abs() < 1e-9, "score={}", score);
+    }
+
+    #[test]
+    fn trimmed_mean_score_removes_tails_then_penalizes_centred_std() {
+        // [0.01, 1.0, 1.5, 2.0, 5.0], trim=0.2 → remove 1 from each tail
+        // remaining [1.0, 1.5, 2.0] → mean=1.5, std=√(0.5/3)≈0.408
+        // score = 1.5 − 0.408 × 0.5 ≈ 1.296
+        let pfs = [0.01, 1.0, 1.5, 2.0, 5.0];
+        let method = StabilityScoreMethod::TrimmedMean { trim_pct: 0.2 };
+        let score = compute_aggregated_score(&pfs, &method);
+        let expected_mean = 1.5_f64;
+        let expected_std = (0.5_f64 / 3.0).sqrt();
+        let expected = expected_mean - expected_std * TRIMMED_STD_PENALTY;
+        assert!(
+            (score - expected).abs() < 1e-9,
+            "score={}, expected={}",
+            score,
+            expected,
+        );
+    }
+
+    #[test]
+    fn trimmed_mean_with_pct_below_per_sample_floor_keeps_all_values() {
+        // n=4, trim_pct=0.2 → floor(0.8)=0 → keep all 4
+        // mean=2.5, var=((-1.5)²+(-0.5)²+0.5²+1.5²)/4 = 1.25, std=√1.25
+        // score = 2.5 − √1.25 × 0.5
+        let pfs = [1.0, 2.0, 3.0, 4.0];
+        let method = StabilityScoreMethod::TrimmedMean { trim_pct: 0.2 };
+        let score = compute_aggregated_score(&pfs, &method);
+        let expected = 2.5 - (1.25_f64).sqrt() * TRIMMED_STD_PENALTY;
+        assert!(
+            (score - expected).abs() < 1e-9,
+            "score={}, expected={}",
+            score,
+            expected,
+        );
+    }
+
+    #[test]
+    fn mean_std_penalty_score_matches_legacy_aggregate_walk_forward() {
+        // Backward-compat anchor: compute_aggregated_score under
+        // MeanStdPenalty must produce the same number that
+        // aggregate_walk_forward produced in Welle W1/W2.
+        let pfs = [1.5, 2.0, 1.0, 1.5];
+        let method = StabilityScoreMethod::MeanStdPenalty { penalty: 0.5 };
+        let new_score = compute_aggregated_score(&pfs, &method);
+
+        // Reference: hand-roll the legacy formula
+        let n = pfs.len() as f64;
+        let mean = pfs.iter().sum::<f64>() / n;
+        let var = pfs.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / n;
+        let legacy = mean - var.sqrt() * 0.5;
+        assert!(
+            (new_score - legacy).abs() < 1e-12,
+            "new={}, legacy={}",
+            new_score,
+            legacy,
+        );
+    }
+
+    #[test]
+    fn compute_aggregated_score_sanitizes_nan_inputs_before_dispatch() {
+        // [NaN, 2.0, 2.0, 2.0] → sanitized [0, 2, 2, 2]
+        // mean=1.5, var=(2.25+3·0.25)/4 = 0.75 → std=√0.75
+        // score (MeanStdPenalty 0.5) = 1.5 − √0.75 × 0.5 ≈ 1.067
+        let pfs = [f64::NAN, 2.0, 2.0, 2.0];
+        let method = StabilityScoreMethod::MeanStdPenalty { penalty: 0.5 };
+        let score = compute_aggregated_score(&pfs, &method);
+        let expected = 1.5 - (0.75_f64).sqrt() * 0.5;
+        assert!(
+            (score - expected).abs() < 1e-9,
+            "score={}, expected={}",
+            score,
+            expected,
+        );
+    }
+
+    #[test]
+    fn compute_aggregated_score_sanitizes_inf_inputs_for_median_iqr() {
+        // [Inf, 1.0, 2.0, 3.0, 4.0] → sanitized [0, 1, 2, 3, 4]
+        // sorted: [0,1,2,3,4] → median=2.0
+        // q25 = idx 1.0 → 1.0, q75 = idx 3.0 → 3.0, iqr=2.0
+        // score = 2.0 − 2.0 × 0.5 = 1.0
+        let pfs = [f64::INFINITY, 1.0, 2.0, 3.0, 4.0];
+        let method = StabilityScoreMethod::MedianIqr { iqr_penalty: 0.5 };
+        let score = compute_aggregated_score(&pfs, &method);
+        assert!((score - 1.0).abs() < 1e-9, "score={}", score);
+    }
+
+    #[test]
+    fn compute_aggregated_score_on_empty_returns_neg_infinity() {
+        let pfs: [f64; 0] = [];
+        let method = StabilityScoreMethod::MeanStdPenalty { penalty: 0.5 };
+        let score = compute_aggregated_score(&pfs, &method);
+        assert!(score.is_infinite() && score < 0.0);
+    }
+
+    #[test]
+    fn stability_method_serde_roundtrips_each_variant() {
+        for m in [
+            StabilityScoreMethod::MeanStdPenalty { penalty: 0.5 },
+            StabilityScoreMethod::MedianIqr { iqr_penalty: 0.25 },
+            StabilityScoreMethod::TrimmedMean { trim_pct: 0.2 },
+        ] {
+            let json = serde_json::to_string(&m).unwrap();
+            let back: StabilityScoreMethod = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, m, "roundtrip failed for {:?}", m);
+        }
+    }
+
+    #[test]
+    fn walk_forward_config_default_method_falls_back_to_mean_std_penalty() {
+        let cfg = WalkForwardConfig {
+            train_bars: 100,
+            validate_bars: 50,
+            step_bars: 50,
+            stability_penalty: 0.42,
+            stability_method: None,
+        };
+        match cfg.stability_method() {
+            StabilityScoreMethod::MeanStdPenalty { penalty } => {
+                assert!(
+                    (penalty - 0.42).abs() < 1e-12,
+                    "penalty must echo stability_penalty when method is None, got {}",
+                    penalty,
+                );
+            }
+            other => panic!("expected MeanStdPenalty fallback, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn walk_forward_config_uses_explicit_method_when_set() {
+        let cfg = WalkForwardConfig {
+            train_bars: 100,
+            validate_bars: 50,
+            step_bars: 50,
+            stability_penalty: 0.5,
+            stability_method: Some(StabilityScoreMethod::MedianIqr { iqr_penalty: 0.3 }),
+        };
+        match cfg.stability_method() {
+            StabilityScoreMethod::MedianIqr { iqr_penalty } => {
+                assert!((iqr_penalty - 0.3).abs() < 1e-12);
+            }
+            other => panic!("expected MedianIqr, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn walk_forward_config_deserialises_pre_w3_json_without_method_key() {
+        // Pre-W3 config_json blobs persisted by Welle W2 omit
+        // `stability_method` entirely; the field must default to None
+        // so survivor scoring stays reproducible on existing DBs.
+        let legacy_json = r#"{
+            "train_bars": 4392,
+            "validate_bars": 1464,
+            "step_bars": 1464,
+            "stability_penalty": 0.5
+        }"#;
+        let parsed: WalkForwardConfig = serde_json::from_str(legacy_json).unwrap();
+        assert_eq!(parsed.stability_method, None);
+        assert!(matches!(
+            parsed.stability_method(),
+            StabilityScoreMethod::MeanStdPenalty { penalty } if (penalty - 0.5).abs() < 1e-12,
+        ));
+    }
+
+    #[test]
+    fn walk_forward_config_roundtrips_when_method_is_set() {
+        let cfg = WalkForwardConfig {
+            train_bars: 4392,
+            validate_bars: 2196,
+            step_bars: 2196,
+            stability_penalty: 0.5,
+            stability_method: Some(StabilityScoreMethod::TrimmedMean { trim_pct: 0.2 }),
+        };
+        let json = serde_json::to_string(&cfg).unwrap();
+        let back: WalkForwardConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, cfg);
+    }
+
+    #[test]
+    fn aggregate_walk_forward_legacy_wrapper_matches_method_path_for_mean_std() {
+        // The Welle-W1/W2 callsites pass `stability_penalty: f64` and
+        // expect bit-identical aggregated scores. The shim must produce
+        // the same number as the new method-based path.
+        let splits = vec![
+            split(0, 1.5, 2.0),
+            split(1, 1.5, 1.0),
+            split(2, 1.5, 1.5),
+        ];
+        let legacy = aggregate_walk_forward(0, TrialParams::new(), splits.clone(), 0.5);
+        let via_method = aggregate_walk_forward_with_method(
+            0,
+            TrialParams::new(),
+            splits,
+            &StabilityScoreMethod::MeanStdPenalty { penalty: 0.5 },
+        );
+        assert_eq!(legacy.aggregated_score, via_method.aggregated_score);
+        assert_eq!(legacy.mean_oos_pf, via_method.mean_oos_pf);
+        assert_eq!(legacy.std_oos_pf, via_method.std_oos_pf);
+        assert_eq!(legacy.worst_oos_pf, via_method.worst_oos_pf);
+        assert_eq!(legacy.mean_is_pf, via_method.mean_is_pf);
+        assert_eq!(legacy.is_oos_decay, via_method.is_oos_decay);
+    }
+
+    #[test]
+    fn aggregate_walk_forward_with_method_routes_to_median_iqr() {
+        // OOS PFs: [1,2,3,4,5] → median=3, iqr=2 → 3 − 2×0.5 = 2.0
+        let splits = vec![
+            split(0, 1.5, 1.0),
+            split(1, 1.5, 2.0),
+            split(2, 1.5, 3.0),
+            split(3, 1.5, 4.0),
+            split(4, 1.5, 5.0),
+        ];
+        let res = aggregate_walk_forward_with_method(
+            0,
+            TrialParams::new(),
+            splits,
+            &StabilityScoreMethod::MedianIqr { iqr_penalty: 0.5 },
+        );
+        assert!(
+            (res.aggregated_score - 2.0).abs() < 1e-9,
+            "aggregated={}, expected 2.0 under MedianIqr",
+            res.aggregated_score,
+        );
+        // Sanity: the mean / std fields stay populated from the raw OOS
+        // data, independent of the scoring method.
+        assert!((res.mean_oos_pf - 3.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn aggregate_walk_forward_with_method_preserves_neg_inf_sentinel_for_all_nan_oos() {
+        // Disqualification sentinel: every OOS PF non-finite ⇒ score
+        // must be NEG_INFINITY regardless of the chosen method. Method
+        // gets sanitised inputs (zeros) and would otherwise return 0.0.
+        let splits = vec![
+            split(0, 1.5, f64::NAN),
+            split(1, 1.5, f64::INFINITY),
+            split(2, 1.5, f64::NEG_INFINITY),
+        ];
+        for method in [
+            StabilityScoreMethod::MeanStdPenalty { penalty: 0.5 },
+            StabilityScoreMethod::MedianIqr { iqr_penalty: 0.5 },
+            StabilityScoreMethod::TrimmedMean { trim_pct: 0.2 },
+        ] {
+            let res = aggregate_walk_forward_with_method(
+                0,
+                TrialParams::new(),
+                splits.clone(),
+                &method,
+            );
+            assert!(
+                res.aggregated_score.is_infinite() && res.aggregated_score < 0.0,
+                "method {:?} must keep NEG_INFINITY sentinel, got {}",
+                method,
+                res.aggregated_score,
+            );
+        }
     }
 
     // ─── Survivor Criteria (pure, no backtests) ──────────────────────────────
