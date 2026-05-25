@@ -493,6 +493,32 @@ Die übrigen Sub-Aufgaben aus der ursprünglichen QA-Empfehlung (Optimizer-Lab v
 
 ---
 
+**Welle O1 + O2 — Phase-3-MVP Optimizer-Sweep (2026-05-24..2026-05-25, abgeschlossen):**
+
+Welle O1 baute den Random-Search-Optimizer auf (Domain-Types, YAML-Search-Spaces, Composite-Score mit Disqualifikations-Gates, SQLite-Persistenz, In-Process-Mini-Sweep-Acceptance). Welle O2 trieb den Production-Sweep gegen reale BTCUSDT-Candles für alle drei Strategien.
+
+**Welle O2 Belege:** `01_Projectplan/specs/optimizer_benchmark_2026-05-24.md` (Compute-Bench), `bb_rsi_sweep_2026-05-24.md`, `ut_bot_sweep_2026-05-24.md`, `ichimoku_sweep_2026-05-24.md`, sowie `optimizer_o2_consolidation_2026-05-24.md` (Cross-Strategy). Studies-DBs unter `01_Projectplan/optimizer_studies/studies-{strategy}.db` (committed, single-user-Repo, < 15 MB total).
+
+**Cross-Process Determinismus-Fix (commit 4a2e131):** Pre-Production-Sweep enttarnte einen `SearchSpace.parameters: HashMap<String, ParameterSpec>` Bug: HashMap-Iteration-Order wird per Prozess per `RandomState` randomisiert, sodass zwei separate `cargo run --release --example production_sweep` Aufrufe am gleichen Seed unterschiedliche Top-N-Rankings produzierten. Fix: HashMap → BTreeMap für SearchSpace + TrialParams. Regression-Test `regression_optimizer_determinism.rs` pins die Cross-Process-Bit-Equality.
+
+**Welle-O2-Sweep-Outcome pro Strategie (n_trials/qualified_count/Top-1-PF/Pfad):**
+
+| Strategie | n_trials | qualified | Top-1 PF | XLSX-PF-Band | Pfad |
+|---|---:|---:|---:|:---:|:---:|
+| BB+RSI | 1000 | 0 (0.0 %) | n/a | [1.58, 2.18] | **C confirmed** |
+| UT Bot | 500 | 2 (0.4 %) | 0.92 | [2.01, 2.61] | **C confirmed** (bimodal) |
+| Ichimoku | 1000 | 109 (10.9 %) | **2.008** | [2.14, 2.74] | **B-Kandidat** (Delta 0.13) |
+
+Aktualisierter Phase-2-Outcome (jetzt nach Welle O2): **B (Pfad-B-Kandidat Ichimoku + Pfad-C-Insights BB+RSI/UT-Bot)**. Ichimoku verdient Phase 3.1 (Walk-Forward + TPE/Bayes); BB+RSI und UT-Bot brauchen erst Phase-3.0.5-Strukturanpassungen.
+
+**Phase-3.1-Startparameter (aus Welle-O2-Konsolidierung):**
+1. **Ichimoku-Refinement-Loop** (höchste Priorität): Walk-Forward auf 109 Trials → Bayes/TPE-Optimization um Top-1 → PBO/DSR-Gate → Live-Default-Pick.
+2. **BB+RSI-Strukturanpassung:** Timeframe-Mismatch klären (XLSX 80-120 Trades passt zu 1h, nicht 4h?); falls 4h korrekt, Search-Space erweitern (ADX optional, bb_period ab 50, rsi_period bis 14).
+3. **UT-Bot-Fee-Realismus-Prüfung:** Fee-to-ATR-Validation (möglich Fee-dominiert auf 5m); falls ja, Maker-only-Variant einführen oder Search-Space-Bias auf selektives Regime (key_value ≥ 2.5, adx_threshold ≥ 35).
+4. **XLSX-Spec-Update für WR-Bänder:** Forex-WR 50-60 % ist auf BTC nicht erreichbar; Spec-§13.7-Update auf BTC-Realismus 30-40 % erwägen (statt blind Forex-WR zu projizieren).
+
+---
+
 ## 5. Phase 3 — Optimizer-Loop
 
 ### 5.1 Entscheidungsfrage: Rust-intern vs. Hermes/Auto-Research
