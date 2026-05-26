@@ -31,6 +31,7 @@ pub mod random_search;
 pub mod runner;
 pub mod scoring;
 pub mod storage;
+pub mod tpe;
 pub mod walk_forward;
 pub mod yaml;
 
@@ -38,6 +39,10 @@ pub use random_search::RandomSearchEngine;
 pub use runner::run_optimization_trial;
 pub use scoring::{score_constraints_for_strategy, score_trial, StrategyKind};
 pub use storage::{StudyMeta, StudyStorage};
+pub use tpe::{
+    gaussian_kde_log_pdf, silverman_bandwidth, split_history, TpeEngine, DEFAULT_GAMMA,
+    DEFAULT_N_EI_CANDIDATES, MIN_HISTORY_FOR_TPE,
+};
 pub use walk_forward::{
     aggregate_walk_forward, aggregate_walk_forward_with_method, compute_aggregated_score,
     generate_splits, run_walk_forward_trial, survives, StabilityScoreMethod, SurvivorCriteria,
