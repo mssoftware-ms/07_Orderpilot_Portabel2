@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
+import 'core/logging/app_log.dart';
 import 'features/backtest/backtest_provider.dart';
 import 'ui/themes/app_theme.dart';
 import 'ui/screens/home_screen.dart';
@@ -20,6 +21,7 @@ class TradingApp extends StatelessWidget {
     return MultiProvider(
       providers: [
         ChangeNotifierProvider(create: (_) => BacktestProvider()),
+        ChangeNotifierProvider<AppLogStore>.value(value: AppLog.instance),
       ],
       child: MaterialApp(
         title: 'Trading App',

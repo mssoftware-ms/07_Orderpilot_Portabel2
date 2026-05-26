@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import '../../ui/themes/app_theme.dart';
+import '../widgets/log_panel.dart';
 
 class HomeScreen extends StatelessWidget {
   const HomeScreen({super.key});
@@ -48,6 +49,8 @@ class HomeScreen extends StatelessWidget {
               _buildActionTile(context, Icons.candlestick_chart, 'View Charts', 'Real-time candlestick charts'),
               _buildActionTile(context, Icons.history, 'Run Backtest', 'Test strategies on historical data'),
               _buildActionTile(context, Icons.play_circle_outline, 'Paper Trade', 'Practice with virtual capital'),
+              const SizedBox(height: 24),
+              const LogPanel(),
             ],
           ),
         ),
