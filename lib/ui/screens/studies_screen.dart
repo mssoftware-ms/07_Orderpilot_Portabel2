@@ -16,6 +16,7 @@ import '../../core/logging/app_log.dart';
 import '../../core/models/study.dart';
 import '../../features/studies/studies_provider.dart';
 import '../themes/app_theme.dart';
+import '../widgets/trials_top10_table.dart';
 
 class StudiesScreen extends StatelessWidget {
   const StudiesScreen({super.key});
@@ -249,12 +250,7 @@ class _Top10Placeholder extends StatelessWidget {
               style: TextStyle(color: AppColors.textMuted, fontSize: 12),
             )
           else
-            Text(
-              '${provider.top10.length} finite-score trials '
-              '(table widget lands in Welle O3-B2-4)',
-              style: const TextStyle(
-                  color: AppColors.textSecondary, fontSize: 12),
-            ),
+            TrialsTop10Table(trials: provider.top10),
         ],
       ),
     );
