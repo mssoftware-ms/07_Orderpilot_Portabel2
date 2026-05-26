@@ -20,31 +20,109 @@ import '../../services/optimization_service.dart';
 enum BacktestState { idle, fetchingData, running, success, error }
 enum OptimizationState { idle, fetchingData, running, success, error }
 
+// ─── Strategy kind ──────────────────────────────────────────────────────────
+
+/// Identifies which strategy engine drives a backtest run.
+///
+/// Welle O3-B1: the UI selects a [StrategyKind] and the provider routes the
+/// isolate call to the matching `BacktestService.runXxx` static. The legacy
+/// `BacktestConfig.strategy` String field stays as a human-readable label
+/// — [displayLabel] is the authoritative source for that label.
+enum StrategyKind {
+  bbRsi('BB+RSI Mean Reversion'),
+  utBot('UT Bot'),
+  ichimoku('Ichimoku Cloud');
+
+  const StrategyKind(this.displayLabel);
+
+  final String displayLabel;
+}
+
+// ─── Factory helpers ────────────────────────────────────────────────────────
+
+/// Default BB+RSI parameters — Welle-R3 spec defaults.
+BbRsiParams defaultBbRsiParams() => const BbRsiParams();
+
+/// Default UT-Bot parameters — Welle-R3 spec defaults.
+UtBotParams defaultUtBotParams() => const UtBotParams();
+
+/// Default Ichimoku parameters — Welle-R3 spec defaults.
+IchimokuParams defaultIchimokuParams() => const IchimokuParams();
+
+/// Returns the default params instance for [kind].
+Object defaultParamsFor(StrategyKind kind) {
+  switch (kind) {
+    case StrategyKind.bbRsi:
+      return defaultBbRsiParams();
+    case StrategyKind.utBot:
+      return defaultUtBotParams();
+    case StrategyKind.ichimoku:
+      return defaultIchimokuParams();
+  }
+}
+
+/// Asserts [params] matches [kind] — used in [BacktestConfig] copyWith /
+/// constructor to keep the dynamic `strategyParams` field disciplined.
+bool _paramsMatchKind(StrategyKind kind, Object params) {
+  switch (kind) {
+    case StrategyKind.bbRsi:
+      return params is BbRsiParams;
+    case StrategyKind.utBot:
+      return params is UtBotParams;
+    case StrategyKind.ichimoku:
+      return params is IchimokuParams;
+  }
+}
+
 // ─── Configuration model ────────────────────────────────────────────────────
 
 class BacktestConfig {
+  /// Human-readable strategy label. Mirrors [strategyKind.displayLabel]; kept
+  /// as a separate field for backward compatibility with UI text that reads
+  /// `config.strategy` directly.
   final String strategy;
+
+  /// Logic-driving strategy kind. The provider routes the engine call based
+  /// on this enum; [strategyParams] must match (asserted).
+  final StrategyKind strategyKind;
+
   final String symbol;
   final String timeframe;
   final DateTime startDate;
   final DateTime endDate;
   final double initialBalance;
   final double feeRate;
-  final BbRsiParams strategyParams;
+
+  /// Strategy-specific parameter struct — concrete type is one of
+  /// [BbRsiParams], [UtBotParams], [IchimokuParams] and must match
+  /// [strategyKind]. Typed `dynamic` so the UI / provider can carry any
+  /// of the three without a sealed-class refactor; the type discipline
+  /// is enforced in the constructor and [copyWith] via an assert.
+  final dynamic strategyParams;
 
   BacktestConfig({
-    this.strategy = 'BB+RSI Mean Reversion',
+    this.strategyKind = StrategyKind.bbRsi,
+    String? strategy,
     this.symbol = 'BTCUSDT',
     this.timeframe = '1h',
     DateTime? startDate,
     DateTime? endDate,
     this.initialBalance = AppConstants.defaultInitialCapital,
     this.feeRate = AppConstants.defaultFeeRate,
-    this.strategyParams = const BbRsiParams(),
+    Object? strategyParams,
   })  : startDate = startDate ?? DateTime.now().subtract(const Duration(days: 90)),
-        endDate = endDate ?? DateTime.now();
+        endDate = endDate ?? DateTime.now(),
+        strategy = strategy ?? strategyKind.displayLabel,
+        strategyParams = strategyParams ?? defaultParamsFor(strategyKind) {
+    assert(
+      _paramsMatchKind(strategyKind, this.strategyParams as Object),
+      'strategyParams (${this.strategyParams.runtimeType}) does not match '
+      'strategyKind ($strategyKind)',
+    );
+  }
 
   BacktestConfig copyWith({
+    StrategyKind? strategyKind,
     String? strategy,
     String? symbol,
     String? timeframe,
@@ -52,9 +130,10 @@ class BacktestConfig {
     DateTime? endDate,
     double? initialBalance,
     double? feeRate,
-    BbRsiParams? strategyParams,
+    Object? strategyParams,
   }) {
     return BacktestConfig(
+      strategyKind: strategyKind ?? this.strategyKind,
       strategy: strategy ?? this.strategy,
       symbol: symbol ?? this.symbol,
       timeframe: timeframe ?? this.timeframe,
@@ -62,7 +141,7 @@ class BacktestConfig {
       endDate: endDate ?? this.endDate,
       initialBalance: initialBalance ?? this.initialBalance,
       feeRate: feeRate ?? this.feeRate,
-      strategyParams: strategyParams ?? this.strategyParams,
+      strategyParams: strategyParams ?? this.strategyParams as Object,
     );
   }
 }
@@ -120,6 +199,20 @@ class BacktestProvider extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// Switch to a different strategy kind and load its default params. Resets
+  /// the "using optimized params" indicator because optimized params are
+  /// BB+RSI-only today (see [applyOptimizedParams]).
+  void setStrategyKind(StrategyKind kind) {
+    if (_config.strategyKind == kind) return;
+    _config = _config.copyWith(
+      strategyKind: kind,
+      strategy: kind.displayLabel,
+      strategyParams: defaultParamsFor(kind),
+    );
+    _usingOptimizedParams = false;
+    notifyListeners();
+  }
+
   void updateSymbol(String symbol) {
     _config = _config.copyWith(symbol: symbol);
     _usingOptimizedParams = false;
@@ -151,22 +244,38 @@ class BacktestProvider extends ChangeNotifier {
     notifyListeners();
   }
 
-  void updateStrategyParams(BbRsiParams params) {
+  /// Update strategy-specific params. [params] must match the active
+  /// [StrategyKind] (asserted by [BacktestConfig.copyWith]).
+  void updateStrategyParams(Object params) {
+    assert(
+      _paramsMatchKind(_config.strategyKind, params),
+      'updateStrategyParams: ${params.runtimeType} does not match '
+      'strategyKind ${_config.strategyKind}',
+    );
     _config = _config.copyWith(strategyParams: params);
     _usingOptimizedParams = false;
     notifyListeners();
   }
 
-  /// Apply specific optimized params from a trial result.
+  /// Apply specific optimized params from a trial result. BB+RSI-only today
+  /// — silently no-ops on non-BB+RSI strategies (Welle O3-B1 OOS).
   void applyOptimizedParams(BbRsiParams params) {
+    if (_config.strategyKind != StrategyKind.bbRsi) {
+      debugPrint(
+          '[BacktestProvider] applyOptimizedParams ignored: '
+          'strategyKind=${_config.strategyKind} (BB+RSI-only path)');
+      return;
+    }
     _config = _config.copyWith(strategyParams: params);
     _usingOptimizedParams = true;
     notifyListeners();
   }
 
-  /// Reset strategy params to defaults.
+  /// Reset strategy params to defaults for the active strategy.
   void resetParamsToDefaults() {
-    _config = _config.copyWith(strategyParams: const BbRsiParams());
+    _config = _config.copyWith(
+      strategyParams: defaultParamsFor(_config.strategyKind),
+    );
     _usingOptimizedParams = false;
     notifyListeners();
   }
@@ -174,6 +283,9 @@ class BacktestProvider extends ChangeNotifier {
   // ─── Auto-load optimized params ─────────────────────────────────────────
 
   Future<void> _tryLoadOptimizedParams() async {
+    // BB+RSI-only storage path. Other strategies don't have an optimizer
+    // yet — skip silently to keep the UI calm.
+    if (_config.strategyKind != StrategyKind.bbRsi) return;
     try {
       final params = await _paramStorage.loadOptimizedParams(
         _config.symbol,
@@ -227,10 +339,11 @@ class BacktestProvider extends ChangeNotifier {
       }
 
       final result = await compute(_runBacktestIsolate, _BacktestArgs(
+        strategyKind: _config.strategyKind,
         candles: candles,
         initialBalance: _config.initialBalance,
         feeRate: _config.feeRate,
-        params: _config.strategyParams,
+        params: _config.strategyParams as Object,
       ));
 
       _result = result;
@@ -249,7 +362,16 @@ class BacktestProvider extends ChangeNotifier {
   // ─── Parameter optimization ─────────────────────────────────────────────
 
   /// Run grid-search optimization over all BB+RSI parameter combinations.
+  /// BB+RSI-only — Welle O3-B1 OOS, multi-strategy optimization is a later
+  /// wave. Refuses to start when [StrategyKind.bbRsi] is not active.
   Future<void> optimizeParameters() async {
+    if (_config.strategyKind != StrategyKind.bbRsi) {
+      _optState = OptimizationState.error;
+      _optError = 'Optimization is BB+RSI-only in this build';
+      _optStatusMessage = _optError!;
+      notifyListeners();
+      return;
+    }
     _optState = OptimizationState.fetchingData;
     _optError = null;
     _optStatusMessage = 'Fetching candle data for optimization...';
@@ -409,12 +531,14 @@ class BacktestProvider extends ChangeNotifier {
 // ─── Isolate helpers ────────────────────────────────────────────────────────
 
 class _BacktestArgs {
+  final StrategyKind strategyKind;
   final List<CandleData> candles;
   final double initialBalance;
   final double feeRate;
-  final BbRsiParams params;
+  final Object params;
 
   const _BacktestArgs({
+    required this.strategyKind,
     required this.candles,
     required this.initialBalance,
     required this.feeRate,
@@ -423,10 +547,27 @@ class _BacktestArgs {
 }
 
 BacktestResult _runBacktestIsolate(_BacktestArgs args) {
-  return BacktestService.runBbRsi(
-    candles: args.candles,
-    initialBalance: args.initialBalance,
-    feeRate: args.feeRate,
-    params: args.params,
-  );
+  switch (args.strategyKind) {
+    case StrategyKind.bbRsi:
+      return BacktestService.runBbRsi(
+        candles: args.candles,
+        initialBalance: args.initialBalance,
+        feeRate: args.feeRate,
+        params: args.params as BbRsiParams,
+      );
+    case StrategyKind.utBot:
+      return BacktestService.runUtBot(
+        candles: args.candles,
+        initialBalance: args.initialBalance,
+        feeRate: args.feeRate,
+        params: args.params as UtBotParams,
+      );
+    case StrategyKind.ichimoku:
+      return BacktestService.runIchimoku(
+        candles: args.candles,
+        initialBalance: args.initialBalance,
+        feeRate: args.feeRate,
+        params: args.params as IchimokuParams,
+      );
+  }
 }
