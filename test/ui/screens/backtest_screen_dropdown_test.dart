@@ -62,28 +62,31 @@ void main() {
     expect(find.text('RSI Period'), findsOneWidget);
   });
 
-  testWidgets('Selecting UT-Bot mounts the UtBotParamSection stub',
+  testWidgets('Selecting UT-Bot mounts the UtBotParamSection',
       (tester) async {
     await _pumpBacktestScreen(tester);
     await _expandAdvancedParams(tester);
 
     await _selectStrategy(tester, StrategyKind.utBot);
 
-    expect(find.textContaining('UT-Bot parameter inputs ship in'),
-        findsOneWidget);
+    // UT-Bot-specific knob labels (Welle O3-B1-3).
+    expect(find.text('Key Value'), findsOneWidget);
+    expect(find.text('ATR Period'), findsOneWidget);
+    expect(find.text('SMI Length'), findsOneWidget);
     // BB+RSI sliders gone.
     expect(find.text('BB Period'), findsNothing);
   });
 
-  testWidgets('Selecting Ichimoku mounts the IchimokuParamSection stub',
+  testWidgets('Selecting Ichimoku mounts the IchimokuParamSection',
       (tester) async {
     await _pumpBacktestScreen(tester);
     await _expandAdvancedParams(tester);
 
     await _selectStrategy(tester, StrategyKind.ichimoku);
 
-    expect(find.textContaining('Ichimoku parameter inputs ship in'),
-        findsOneWidget);
+    expect(find.text('Tenkan'), findsOneWidget);
+    expect(find.text('Kijun'), findsOneWidget);
+    expect(find.text('Senkou B'), findsOneWidget);
     expect(find.text('BB Period'), findsNothing);
   });
 
