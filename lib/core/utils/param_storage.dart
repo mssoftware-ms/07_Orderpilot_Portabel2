@@ -9,6 +9,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import '../../services/backtest_service.dart';
+import '../logging/app_log.dart';
 
 /// Manages persistent storage of optimized strategy parameters.
 class OptimizedParamsStorage {
@@ -110,7 +111,9 @@ class OptimizedParamsStorage {
           Platform.environment['USERPROFILE'] ??
           Directory.systemTemp.path;
       return '$homeDir/.trading_app';
-    } catch (_) {
+    } catch (e, st) {
+      AppLog.warn('ParamStorage',
+          'Could not resolve home directory; falling back to temp: $e', e, st);
       return '${Directory.systemTemp.path}/trading_app';
     }
   }
@@ -124,8 +127,9 @@ class OptimizedParamsStorage {
           return jsonDecode(content) as Map<String, dynamic>;
         }
       }
-    } catch (_) {
-      // Corrupted file – return empty
+    } catch (e, st) {
+      AppLog.warn('ParamStorage',
+          'Corrupted or unreadable params file, returning empty: $e', e, st);
     }
     return {};
   }

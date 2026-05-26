@@ -14,6 +14,7 @@ import 'dart:io' show File, Platform;
 
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
+import '../core/logging/app_log.dart';
 import '../core/models/candle.dart';
 import '../core/models/trade.dart';
 import '../src/bridge/api.dart' as rust;
@@ -230,9 +231,11 @@ class RustBridge {
       _initialized = true;
       // ignore: avoid_print
       print('[RustBridge] Native engine active: $pong');
-    } catch (e) {
+    } catch (e, st) {
       _initialized = true;
       _nativeAvailable = false;
+      AppLog.warn('RustBridge',
+          'Native engine not available, falling back to Dart: $e', e, st);
       // ignore: avoid_print
       print('[RustBridge] Native engine not available, '
           'falling back to Dart: $e');

@@ -12,6 +12,7 @@ import 'package:intl/intl.dart';
 import 'package:provider/provider.dart';
 
 import '../../core/constants/app_constants.dart';
+import '../../core/logging/app_log.dart';
 import '../../features/backtest/backtest_provider.dart';
 import '../../services/backtest_service.dart';
 import '../../services/optimization_service.dart';
@@ -87,7 +88,9 @@ class BacktestScreen extends StatelessWidget {
                       SnackBar(content: Text('Saved: $path')),
                     );
                   }
-                } catch (e) {
+                } catch (e, st) {
+                  AppLog.error('BacktestExport',
+                      'Trade CSV export failed: $e', e, st);
                   if (context.mounted) {
                     ScaffoldMessenger.of(context).showSnackBar(
                       SnackBar(content: Text('Export error: $e')),
@@ -111,7 +114,9 @@ class BacktestScreen extends StatelessWidget {
                       SnackBar(content: Text('Saved: $path')),
                     );
                   }
-                } catch (e) {
+                } catch (e, st) {
+                  AppLog.error('BacktestExport',
+                      'Equity CSV export failed: $e', e, st);
                   if (context.mounted) {
                     ScaffoldMessenger.of(context).showSnackBar(
                       SnackBar(content: Text('Export error: $e')),

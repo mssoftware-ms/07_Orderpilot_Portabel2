@@ -29,6 +29,7 @@ import 'dart:io';
 import 'package:http/http.dart' as http;
 
 import '../core/constants/app_constants.dart';
+import '../core/logging/app_log.dart';
 import '../core/models/candle.dart';
 
 // ─── Exceptions ─────────────────────────────────────────────────────────────
@@ -63,28 +64,33 @@ class BinanceInvalidParamException extends BinanceApiException {
 
 /// Simple logger for BinanceApiClient.
 ///
-/// Set [BinanceApiClient.enableLogging] to `true` for debug output.
+/// Set [BinanceApiClient.enableLogging] to `true` for debug console output.
+/// Warnings and errors are always forwarded to [AppLog] so they surface in
+/// the dashboard's System Log panel, independent of [enabled].
 class _Log {
+  static const String _tag = 'BinanceApi';
   static bool enabled = false;
 
   static void info(String msg) {
     if (enabled) {
       // ignore: avoid_print
-      print('[BinanceApi] $msg');
+      print('[$_tag] $msg');
     }
   }
 
   static void warn(String msg) {
+    AppLog.warn(_tag, msg);
     if (enabled) {
       // ignore: avoid_print
-      print('[BinanceApi] ⚠ $msg');
+      print('[$_tag] ⚠ $msg');
     }
   }
 
   static void error(String msg) {
+    AppLog.error(_tag, msg);
     // Always print errors regardless of logging flag
     // ignore: avoid_print
-    print('[BinanceApi] ❌ $msg');
+    print('[$_tag] ❌ $msg');
   }
 }
 
@@ -319,9 +325,10 @@ class BinanceApiClient {
     final candles = data.map((e) {
       try {
         return CandleData.fromBinanceKline(e as List<dynamic>);
-      } catch (e) {
+      } catch (err, st) {
+        AppLog.error('BinanceApi', 'Failed to parse candle data: $err', err, st);
         throw BinanceApiException(
-            0, 'Failed to parse candle data: $e', jsonEncode(e));
+            0, 'Failed to parse candle data: $err', jsonEncode(e));
       }
     }).toList();
 
@@ -517,7 +524,8 @@ class BinanceApiClient {
     try {
       final json = jsonDecode(body) as Map<String, dynamic>;
       return json['msg'] as String? ?? body;
-    } catch (_) {
+    } catch (e) {
+      AppLog.warn('BinanceApi', 'Non-JSON error body, using raw body: $e');
       return body;
     }
   }

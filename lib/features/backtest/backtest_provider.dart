@@ -9,6 +9,7 @@ import 'package:flutter/foundation.dart';
 import 'package:intl/intl.dart';
 
 import '../../core/constants/app_constants.dart';
+import '../../core/logging/app_log.dart';
 import '../../core/models/candle.dart';
 import '../../core/utils/param_storage.dart';
 import '../../services/backtest_service.dart';
@@ -296,8 +297,10 @@ class BacktestProvider extends ChangeNotifier {
         _usingOptimizedParams = true;
         notifyListeners();
       }
-    } catch (_) {
-      // Silently ignore storage errors
+    } catch (e, st) {
+      AppLog.warn('BacktestProvider',
+          'Failed to load optimized params for ${_config.symbol} ${_config.timeframe}: $e',
+          e, st);
     }
   }
 
@@ -351,7 +354,8 @@ class BacktestProvider extends ChangeNotifier {
       _statusMessage =
           'Backtest complete: ${result.trades.length} trades on $_candlesFetched candles';
       notifyListeners();
-    } catch (e) {
+    } catch (e, st) {
+      AppLog.error('BacktestProvider', 'Backtest run failed: $e', e, st);
       _state = BacktestState.error;
       _errorMessage = e.toString();
       _statusMessage = 'Error: $e';
@@ -438,7 +442,8 @@ class BacktestProvider extends ChangeNotifier {
       }
 
       notifyListeners();
-    } catch (e) {
+    } catch (e, st) {
+      AppLog.error('BacktestProvider', 'Optimization failed: $e', e, st);
       _optState = OptimizationState.error;
       _optError = e.toString();
       _optStatusMessage = 'Optimization error: $e';
