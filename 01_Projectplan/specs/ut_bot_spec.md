@@ -281,5 +281,27 @@ Vollständige Resultat-Tabelle, bit-exakte Run-Snapshots und Driver-Analyse: `01
 ### 13.6 Phase-3-Konsequenz
 
 - **Phase-2-Tag-Kriterium:** UT Bot v1 bleibt als Add-in-Manifest-Eintrag (`addins::ut_bot::UtBotStrategy`) registriert. Strategy-Code, Dart-Fallback und FFI-Bindings sind produktionsreif (Engine-Korrektheit per §13.4 grün, FFI-Parity per §13.4 Welle-U2-5-Resolution grün). Kein Default-Wechsel commitet.
-- **Phase-3 Backlog (mittlere Priorität):** „UT Bot v1 ETH-Multi-TF-Sweep (ETHUSDT 5m/15m/1h + BTCUSDT 4h-Vergleich), Ziel PF ≥ 1.5 bei trades ≥ 50". Erwartung niedriger Erfolgswahrscheinlichkeit als der vergleichbare BB+RSI-4h-Backlog-Eintrag — bei BB+RSI lieferte 1h → 4h einen positiven Sweet-Spot (Diagnose 2026-05-23 C1), bei UT Bot zeigt 5m → 15m → 1h einen monotonen Performance-Abfall.
+- **Phase-3 Backlog (mittlere Priorität):** „UT Bot v1 ETH-Multi-TF-Sweep (ETHUSDT 5m/15m/1h + BTCUSDT 4h-Vergleich), Ziel PF ≥ 1.5 bei trades ≥ 50". Erwartung niedriger Erfolgswahrscheinlichkeit als der vergleichbare BB+RSI-4h-Backlog-Eintrag — bei BB+RSI lieferte 1h → 4h einen positiven Sweet-Spot (Diagnose 2026-05-23 C1), bei UT Bot zeigt 5m → 15m → 1h einen monotonen Performance-Abfall. **Nach Welle A2 (§13.7) auf niedrige Priorität herabgestuft.**
 - **Phase-3 Backlog (niedrige Priorität):** „SMI Uday-spezifische Variante (§12.4) recherchieren und gegen Blau-1993-Standard backtesten". Recherche-Aufwand ~1h; kann nur Implementations-Detail-Fixes liefern, ohne die grundlegende Confluence-Inkompatibilität auf Krypto-5min anzugreifen.
+
+### 13.7 Welle-A2 Fee-Realismus-Validierung (Phase 3.2, 2026-05-26)
+
+**Verdikt:** **Outcome b — Strategy-Logik strukturell limitiert, nicht fee-limitiert.** Pfad C strikt konfirmiert über das gesamte Fee-Spektrum.
+
+Welle-O2 (Taker 0.06 %) lieferte Top-1 Trial 489 mit PF=0.92, profit=−1.65 % auf 52 Trades. Hypothese: Bitunix-Taker-Fee = 52 × 0.12 % = 6.24 pp Fee-Drag dominiert die Verlust-Magnitude. Welle-A2-Validation re-sweept identischen Search-Space + Seed mit `fee_rate=0.0` (Sanity-Check, 500 Trials, 2.7 h Compute auf BTCUSDT 5m 2024-01-01 → 2024-03-08).
+
+Result Zero-Fee: identischer Top-1 Trial 489 (deterministisch), PF=1.271, profit=+4.64 %. Δ-Profit (+6.29 pp) matched predicted Fee-Drag (+6.24 pp) → Engine-Fee-Accounting validiert. ABER: qualifizierter Trial-Count bleibt **2/500 (0.4 %) konstant**; XLSX-Band-Hit-Count bleibt **1/5 konstant** (nur MaxDD); WR=19.23 % bleibt konstant.
+
+**Strategy-strukturelle Begründung:** Bei `tp_rr_ratio = 3.20` ist die break-even-Win-Rate `1/(1+R) = 23.8 %`. Top-1 WR=19.23 % liegt **4.6 pp unter Break-Even selbst ohne Fees**. Die Edge ist gross-positiv (PF=1.27) nur, weil Trailing-Stop + partial-TP-Effekte effective-R höher als nominal-`tp_rr` machen. Diese dünne Edge ist nicht fee-sensitiv genug, um Bands-Hit-Count zu verschieben.
+
+**Maker-Variant (nicht ausgeführt):** Closed-form predicted aus §1 des Vergleichs-Docs: Maker round-trip 0.04 % × 52 Trades = 2.08 pp drag → predicted Top-1 maker-profit ≈ +2.56 %, PF ≈ 1.10. Weit unter XLSX-PF-Band [2.01, 2.61]. A2-Maker-Sweep ist **prediktiv-redundant**; Outcome b falsifiziert die Fee-Driver-Hypothese unabhängig vom Fee-Tier.
+
+**Reconciliation mit §13.5:** Die „Confluence-Inkompatibilität auf Krypto-5min"-These (EMA200-SMI-Confluence + 24/7-Mikrostruktur) bleibt die einzige verbleibende Erklärung der ~30 pp WR-Lücke. Fee war die naheliegende externe Erklärung; nach Welle A2 kann sie aus dem Erklärungs-Raum ausgeschlossen werden. §13.5-These verschärft sich empirisch.
+
+**Welle-R3-C2-Reconciliation:** Welle-R3 C2 (adx_thr=35) lieferte 8 Trades PF=2.34 — die High-PF-Selectivity ist Markt-Phasen-getrieben, nicht Strategy-edge-getrieben. Welle-A2 belegt: die Strategy hat keine selbst-induzierte Edge auf 24/7-Krypto-Volatilität.
+
+**Belege:** [`ut_bot_fee_realism_2026-05-26.md`](./ut_bot_fee_realism_2026-05-26.md), [`ut_bot_zerofee_sweep_2026-05-26.md`](./ut_bot_zerofee_sweep_2026-05-26.md).
+
+**Phase-3-Backlog-Update:** Der mittel-priorisierte ETH-Multi-TF-Sweep-Eintrag (§13.6) wird auf **niedrige Priorität** herabgestuft. Welle A2 reduziert die Erwartungs-Wahrscheinlichkeit zusätzlich: wenn Fee 100 % aus dem Verlust-Driver-Set entfernt wird und der Strategy-Edge trotzdem nur 4 pp positiv ist, sind weitere TF/Asset-Variationen Sample-Space-Lottery ohne strukturelle Begründung.
+
+**Keine weiteren UT-Bot-Sub-Wellen empfohlen.** Phase 3.2 Welle-A2-Tail closed.

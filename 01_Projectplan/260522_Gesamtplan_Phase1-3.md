@@ -548,10 +548,44 @@ Kein Production-Default-Kandidat identifizierbar. Die TPE-Top-Trials erreichen `
 - Reproducibility-Pins: cross-process Determinismus, regression-Tests gegen Stale-Binary-Drift
 
 **Phase-3.2-Empfehlung (Backlog):**
-1. **BB+RSI + UT-Bot Phase-3.0.5-Strukturanpassung** (TF-Check 4h vs 1h, Fee-Realismus, Maker-Variant): Bestand-Empfehlung aus Welle-O2-Konsolidierung. NICHT durch Welle-W1–W4 obsolet.
+1. **BB+RSI + UT-Bot Phase-3.0.5-Strukturanpassung** (TF-Check 4h vs 1h, Fee-Realismus, Maker-Variant): Bestand-Empfehlung aus Welle-O2-Konsolidierung. NICHT durch Welle-W1–W4 obsolet. **Welle A1 (BB+RSI 1h) und Welle A2 (UT-Bot Fee-Realismus) abgeschlossen — siehe Welle-A1+A2-Block unten.**
 2. **Spec §13.7-Update für BTC-WR-Realismus** (statt Forex-Bänder 50-60 % auf BTC 30-40 %): parallel zur Strukturanpassung.
 3. **Alternative Strategy-Discovery aus XLSX-Ranking**: Optional, sobald BB+RSI/UT-Bot-Strukturanpassung Pool erweitert.
 4. **App-UI-Integration der Pipeline-Outputs** (Welle O3 deferred): die Walk-Forward + TPE + PBO/DSR-Outputs sind production-grade Engineering-Assets — UI muss diese verlässlich für jede zukünftige Strategie anzeigen können.
+
+---
+
+**Welle A1 + A2 — Phase 3.2 Strukturanpassung (2026-05-26, abgeschlossen):**
+
+Welle A1 testete die BB+RSI TF-Mismatch-Hypothese (Welle-O2 4h erzeugte 0/1000 qualifizierte Trials — möglicherweise weil das XLSX-Trade-Band [80, 120] auf 4h Candle-Volumen-strukturell unerreichbar ist). Welle A2 testete die UT-Bot Fee-Driver-Hypothese (Welle-O2 5m taker 0.06 % erzeugte Top-1 mit −15.27 % PnL, Fee-Drag ~100 % der Verlust-Magnitude).
+
+**Belege:** `bb_rsi_1h_sweep_2026-05-26.md`, `bb_rsi_1h_path_classification_2026-05-26.md` (Welle A1); `ut_bot_zerofee_sweep_2026-05-26.md`, `ut_bot_fee_realism_2026-05-26.md` (Welle A2). Spec-Updates: `bb_rsi_spec.md` §13.8, `ut_bot_spec.md` §13.7. Production-Sweep-Erweiterung: `production_sweep` CLI nimmt jetzt `variant` als 4. Positional-Arg (`bb_rsi:[main|1h]`, `ut_bot:[main|zerofee|maker]`, `ichimoku:[main]`). Studies-DBs `studies-bb_rsi_1h.db` (Welle A1) und `studies-ut_bot_zerofee.db` (Welle A2) committed unter `01_Projectplan/optimizer_studies/`.
+
+**Welle-A1+A2-Outcome pro Strategie:**
+
+| Strategie | Welle | n_trials | qualified | Top-1 PF | Top-1 Bands | Verdikt |
+|---|---|---:|---:|---:|:---:|:---:|
+| BB+RSI 1h | A1 | 1000 | 13 (1.3 %) | 1.545 | 1/5 | **Pfad C mit Verbesserung** |
+| UT Bot zerofee | A2 | 500 | 2 (0.4 %) | 1.271 | 1/5 | **Pfad C strikt** (Outcome b) |
+
+**Welle-A1-Insight (BB+RSI 1h):** Trade-Volume-Skalierung ×4 Candles → ×6.4 max-Trades; Top-1 ist edge-positiv (PF=1.545, Sharpe +1.78, profit +22.46 %) aber Trade-Count 42 bleibt unter XLSX-Lower [80]. Edge-Volumen-Trade-off ist strikt monoton: höhere ADX-Threshold → weniger Trades, höherer PF. Optionale Sub-Wellen A1.1 (ADX optional) + A1.2 (ADX-Threshold-Lowering) als Backlog-Items dokumentiert, NICHT priorisiert.
+
+**Welle-A2-Insight (UT-Bot Fee-Realismus):** Zero-Fee-Variation produziert identischen Top-1 Trial (deterministisch); Δ-Profit (+6.29 pp) matched predicted Fee-Drag (+6.24 pp) → Engine-Fee-Accounting validiert. ABER: qualifizierter Trial-Count bleibt 2/500 (0.4 %) konstant; Bands-Hit-Count bleibt 1/5 konstant; WR=19.23 % konstant. Bei `tp_rr_ratio=3.20` ist break-even-WR=23.8 % — Top-1 ist **strukturell sub-break-even selbst ohne Fees**. Maker-Sweep (closed-form predicted PF=1.10, profit=+2.56 %) **nicht ausgeführt** weil prediktiv-redundant. §13.5-Mikrostruktur-Hypothese verschärft sich (Fee aus Erklärungs-Set entfernt).
+
+**Phase-3.2-Tail-Empfehlung:**
+1. **Tag setzen** für Phase 3.2 close: `v0.3.2-phase-3.2-strukturanpassung-closed` (oder ohne Tag, Repo-Single-User).
+2. **Optionale Backlog-Items** (Phase-3-Optimizer-Tail-Wave, niedrige Priorität): BB+RSI Welle A1.1/A1.2; alternative Strategy-Discovery aus XLSX-Ranking.
+3. **NICHT empfohlen:** UT-Bot weitere Sub-Wellen (A2.1 Maker, A2.2 ETH-5m, A2.3 Search-Space-Bias) — alle drei haben prediktiv-niedrige Erfolgswahrscheinlichkeit oder duplizieren bestehende Welle-U3/R3-Insights.
+
+**Cross-Strategy-Bilanz nach Welle A1+A2:**
+
+| Strategie | Initial-Welle-O2 | Phase-3.2-Verfeinerung | Phase-3.2-End-Status |
+|---|---|---|---|
+| BB+RSI | Pfad C (1 qualified, 4h Volume-limitiert) | Welle A1 (1h) → 13 qualified, PF=1.545 | Pfad C mit Verbesserung (Lab-Kandidat) |
+| UT Bot | Pfad C (2 qualified, bimodal) | Welle A2 (zerofee) → 2 qualified, PF=1.271 | Pfad C strikt (Strategy-limitiert) |
+| Ichimoku | Pfad B-Kandidat (109 qualified, PF=2.008) | Welle W1–W4 → PBO=1.0, DSR=0.21 | Pfad C unter Multi-Testing-Korrektur |
+
+**Phase-3-Strategie-Pool-Status:** 0 Production-Default-Kandidaten. Alle drei Strategien sind Lab-Kandidaten unter unterschiedlichen Failure-Modes (BB+RSI: Edge ohne Volumen; UT-Bot: kein Edge; Ichimoku: Statistical-Multi-Testing-Failure). Phase-3-Decision-Gate für Live-Trading bleibt offen; Phase-3.2-Backlog-Item 3 (Alternative Strategy-Discovery aus XLSX-Ranking) wird zur höchsten Priorität.
 
 ---
 
