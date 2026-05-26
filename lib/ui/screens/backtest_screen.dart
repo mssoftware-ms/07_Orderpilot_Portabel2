@@ -16,10 +16,13 @@ import '../../features/backtest/backtest_provider.dart';
 import '../../services/backtest_service.dart';
 import '../../services/optimization_service.dart';
 import '../themes/app_theme.dart';
+import '../widgets/bb_rsi_param_section.dart';
 import '../widgets/equity_curve_chart.dart';
+import '../widgets/ichimoku_param_section.dart';
 import '../widgets/metric_card.dart';
-import '../widgets/optimization_results_dialog.dart';
+import '../widgets/param_slider.dart';
 import '../widgets/trade_log_list.dart';
+import '../widgets/ut_bot_param_section.dart';
 
 class BacktestScreen extends StatelessWidget {
   const BacktestScreen({super.key});
@@ -207,7 +210,6 @@ class _ConfigPanelState extends State<_ConfigPanel> {
   @override
   Widget build(BuildContext context) {
     final cfg = _p.config;
-    final params = cfg.strategyParams;
 
     return Container(
       padding: const EdgeInsets.all(16),
@@ -234,29 +236,48 @@ class _ConfigPanelState extends State<_ConfigPanel> {
           ),
           const SizedBox(height: 16),
 
-          // Strategy (fixed for now)
-          _SectionLabel('Strategy'),
+          // Strategy dropdown (Welle O3-B1)
+          SectionLabel('Strategy'),
           Container(
-            width: double.infinity,
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+            padding: const EdgeInsets.symmetric(horizontal: 12),
             decoration: BoxDecoration(
               color: AppColors.surfaceElevated,
               borderRadius: BorderRadius.circular(8),
               border: Border.all(color: AppColors.border),
             ),
-            child: Row(
-              children: [
-                Icon(Icons.auto_graph, color: AppColors.accentPurple, size: 16),
-                const SizedBox(width: 8),
-                const Text('BB+RSI Mean Reversion',
-                    style: TextStyle(color: AppColors.textPrimary, fontSize: 13)),
-              ],
+            child: DropdownButtonHideUnderline(
+              child: DropdownButton<StrategyKind>(
+                key: const Key('backtest-strategy-dropdown'),
+                value: cfg.strategyKind,
+                isExpanded: true,
+                dropdownColor: AppColors.surfaceElevated,
+                style: const TextStyle(
+                    color: AppColors.textPrimary, fontSize: 13),
+                items: StrategyKind.values
+                    .map((k) => DropdownMenuItem<StrategyKind>(
+                          value: k,
+                          child: Row(
+                            children: [
+                              const Icon(Icons.auto_graph,
+                                  color: AppColors.accentPurple, size: 16),
+                              const SizedBox(width: 8),
+                              Text(k.displayLabel),
+                            ],
+                          ),
+                        ))
+                    .toList(),
+                onChanged: _p.isBusy
+                    ? null
+                    : (k) {
+                        if (k != null) _p.setStrategyKind(k);
+                      },
+              ),
             ),
           ),
           const SizedBox(height: 14),
 
           // Symbol
-          _SectionLabel('Symbol'),
+          SectionLabel('Symbol'),
           _buildDropdown<String>(
             value: cfg.symbol,
             items: AppConstants.supportedSymbols,
@@ -265,7 +286,7 @@ class _ConfigPanelState extends State<_ConfigPanel> {
           const SizedBox(height: 14),
 
           // Timeframe chips
-          _SectionLabel('Timeframe'),
+          SectionLabel('Timeframe'),
           Wrap(
             spacing: 6,
             runSpacing: 6,
@@ -294,7 +315,7 @@ class _ConfigPanelState extends State<_ConfigPanel> {
           const SizedBox(height: 14),
 
           // Date Range
-          _SectionLabel('Date Range'),
+          SectionLabel('Date Range'),
           _DateRangeSelector(
             start: cfg.startDate,
             end: cfg.endDate,
@@ -310,7 +331,7 @@ class _ConfigPanelState extends State<_ConfigPanel> {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    _SectionLabel('Balance (\$)'),
+                    SectionLabel('Balance (\$)'),
                     _buildTextField(_balanceCtrl, onSubmit: (v) {
                       final val = double.tryParse(v);
                       if (val != null && val > 0) _p.updateBalance(val);
@@ -323,7 +344,7 @@ class _ConfigPanelState extends State<_ConfigPanel> {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    _SectionLabel('Fee (%)'),
+                    SectionLabel('Fee (%)'),
                     _buildTextField(_feeCtrl, onSubmit: (v) {
                       final val = double.tryParse(v);
                       if (val != null && val >= 0) _p.updateFeeRate(val / 100);
@@ -360,193 +381,14 @@ class _ConfigPanelState extends State<_ConfigPanel> {
           if (_showAdvanced) ...[
             const SizedBox(height: 12),
 
-            // Optimized params indicator
-            if (_p.usingOptimizedParams) ...[
-              Container(
-                width: double.infinity,
-                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-                margin: const EdgeInsets.only(bottom: 10),
-                decoration: BoxDecoration(
-                  color: AppColors.accentCyan.withAlpha(15),
-                  borderRadius: BorderRadius.circular(6),
-                  border: Border.all(color: AppColors.accentCyan.withAlpha(50)),
-                ),
-                child: Row(
-                  children: [
-                    const Icon(Icons.auto_awesome, size: 14, color: AppColors.accentCyan),
-                    const SizedBox(width: 6),
-                    const Expanded(
-                      child: Text(
-                        'Using optimized parameters',
-                        style: TextStyle(
-                          color: AppColors.accentCyan,
-                          fontSize: 11,
-                          fontWeight: FontWeight.w500,
-                        ),
-                      ),
-                    ),
-                    InkWell(
-                      onTap: _p.isBusy ? null : _p.resetParamsToDefaults,
-                      child: const Text(
-                        'Reset',
-                        style: TextStyle(
-                          color: AppColors.textMuted,
-                          fontSize: 10,
-                          decoration: TextDecoration.underline,
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ],
-
-            _ParamSlider(
-              label: 'BB Period',
-              value: params.bbPeriod.toDouble(),
-              min: 10,
-              max: 50,
-              divisions: 40,
-              format: (v) => v.toInt().toString(),
-              onChanged: _p.isBusy ? null : (v) {
-                _p.updateStrategyParams(BbRsiParams(
-                  bbPeriod: v.toInt(),
-                  bbStdDev: params.bbStdDev,
-                  rsiPeriod: params.rsiPeriod,
-                  rsiOversold: params.rsiOversold,
-                  rsiOverbought: params.rsiOverbought,
-                ));
-              },
-            ),
-            _ParamSlider(
-              label: 'BB Std Dev',
-              value: params.bbStdDev,
-              min: 1.0,
-              max: 3.0,
-              divisions: 20,
-              format: (v) => v.toStringAsFixed(1),
-              onChanged: _p.isBusy ? null : (v) {
-                _p.updateStrategyParams(BbRsiParams(
-                  bbPeriod: params.bbPeriod,
-                  bbStdDev: v,
-                  rsiPeriod: params.rsiPeriod,
-                  rsiOversold: params.rsiOversold,
-                  rsiOverbought: params.rsiOverbought,
-                ));
-              },
-            ),
-            _ParamSlider(
-              label: 'RSI Period',
-              value: params.rsiPeriod.toDouble(),
-              min: 7,
-              max: 30,
-              divisions: 23,
-              format: (v) => v.toInt().toString(),
-              onChanged: _p.isBusy ? null : (v) {
-                _p.updateStrategyParams(BbRsiParams(
-                  bbPeriod: params.bbPeriod,
-                  bbStdDev: params.bbStdDev,
-                  rsiPeriod: v.toInt(),
-                  rsiOversold: params.rsiOversold,
-                  rsiOverbought: params.rsiOverbought,
-                ));
-              },
-            ),
-            _ParamSlider(
-              label: 'RSI Oversold',
-              value: params.rsiOversold,
-              min: 20,
-              max: 40,
-              divisions: 20,
-              format: (v) => v.toInt().toString(),
-              onChanged: _p.isBusy ? null : (v) {
-                _p.updateStrategyParams(BbRsiParams(
-                  bbPeriod: params.bbPeriod,
-                  bbStdDev: params.bbStdDev,
-                  rsiPeriod: params.rsiPeriod,
-                  rsiOversold: v,
-                  rsiOverbought: params.rsiOverbought,
-                ));
-              },
-            ),
-            _ParamSlider(
-              label: 'RSI Overbought',
-              value: params.rsiOverbought,
-              min: 60,
-              max: 80,
-              divisions: 20,
-              format: (v) => v.toInt().toString(),
-              onChanged: _p.isBusy ? null : (v) {
-                _p.updateStrategyParams(BbRsiParams(
-                  bbPeriod: params.bbPeriod,
-                  bbStdDev: params.bbStdDev,
-                  rsiPeriod: params.rsiPeriod,
-                  rsiOversold: params.rsiOversold,
-                  rsiOverbought: v,
-                ));
-              },
-            ),
-            const SizedBox(height: 10),
-
-            // Optimize Parameters button — FROZEN (Plan §3.3)
-            SizedBox(
-              width: double.infinity,
-              height: 36,
-              child: Tooltip(
-                message:
-                    'Optimizer wartet auf Phase 2-Abschluss '
-                    '(siehe 260522_Gesamtplan_Phase1-3.md §3.3)',
-                child: OutlinedButton.icon(
-                  onPressed: null,
-                  icon: const Icon(Icons.lock_outline, size: 16),
-                  label: const Text(
-                    'Optimize Parameters (frozen)',
-                    style: TextStyle(fontSize: 12),
-                  ),
-                  style: OutlinedButton.styleFrom(
-                    foregroundColor: AppColors.accentPurple,
-                    side: const BorderSide(color: AppColors.accentPurple),
-                    shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(8)),
-                  ),
-                ),
-              ),
-            ),
-
-            // View last optimization results
-            if (_p.hasOptResult) ...[
-              const SizedBox(height: 6),
-              Center(
-                child: TextButton(
-                  onPressed: () => _showOptResults(context),
-                  child: const Text(
-                    'View optimization results',
-                    style: TextStyle(
-                      color: AppColors.accentPurple,
-                      fontSize: 11,
-                      decoration: TextDecoration.underline,
-                    ),
-                  ),
-                ),
-              ),
-            ],
-
-            // Reset to defaults
-            if (!_p.usingOptimizedParams) ...[
-              const SizedBox(height: 2),
-              Center(
-                child: TextButton(
-                  onPressed: _p.isBusy ? null : _p.resetParamsToDefaults,
-                  child: const Text(
-                    'Reset to defaults',
-                    style: TextStyle(
-                      color: AppColors.textMuted,
-                      fontSize: 10,
-                    ),
-                  ),
-                ),
-              ),
-            ],
+            // Strategy-specific param section. Welle O3-B1: BB+RSI is the
+            // only one with real inputs today; UT-Bot + Ichimoku render
+            // stub cards that get replaced in Welle O3-B1-3.
+            switch (cfg.strategyKind) {
+              StrategyKind.bbRsi => BbRsiParamSection(provider: _p),
+              StrategyKind.utBot => UtBotParamSection(provider: _p),
+              StrategyKind.ichimoku => IchimokuParamSection(provider: _p),
+            },
           ],
 
           const SizedBox(height: 20),
@@ -612,71 +454,6 @@ class _ConfigPanelState extends State<_ConfigPanel> {
     );
   }
 
-  // FROZEN per Gesamtplan §3.3 — keep code path, unwired from UI until Phase 2.
-  // ignore: unused_element
-  Future<void> _onOptimize(BuildContext context) async {
-    // Show confirmation with estimated time
-    final totalCombs = DefaultRanges.totalCombinations;
-    final confirmed = await showDialog<bool>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        backgroundColor: AppColors.surfaceCard,
-        title: const Text('Optimize Parameters'),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(
-              'This will test $totalCombs parameter combinations '
-              'on ${_p.config.symbol} ${_p.config.timeframe} data.',
-              style: const TextStyle(color: AppColors.textSecondary, fontSize: 13),
-            ),
-            const SizedBox(height: 12),
-            const Text(
-              'Estimated time: 1–5 minutes depending on data size.',
-              style: TextStyle(color: AppColors.textMuted, fontSize: 12),
-            ),
-          ],
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx, false),
-            child: const Text('Cancel'),
-          ),
-          ElevatedButton(
-            onPressed: () => Navigator.pop(ctx, true),
-            child: const Text('Start Optimization'),
-          ),
-        ],
-      ),
-    );
-
-    if (confirmed != true || !context.mounted) return;
-
-    // Start optimization
-    _p.optimizeParameters().then((_) {
-      if (_p.optState == OptimizationState.success &&
-          _p.optResult != null &&
-          _p.optResult!.topResults.isNotEmpty &&
-          context.mounted) {
-        OptimizationResultsDialog.show(
-          context,
-          result: _p.optResult!,
-          onApply: _p.applyOptimizedParams,
-        );
-      }
-    });
-  }
-
-  void _showOptResults(BuildContext context) {
-    if (_p.optResult == null) return;
-    OptimizationResultsDialog.show(
-      context,
-      result: _p.optResult!,
-      onApply: _p.applyOptimizedParams,
-    );
-  }
-
   Widget _buildDropdown<T>({
     required T value,
     required List<T> items,
@@ -735,98 +512,9 @@ class _ConfigPanelState extends State<_ConfigPanel> {
   }
 }
 
-// ─── Section Label ──────────────────────────────────────────────────────────
-
-class _SectionLabel extends StatelessWidget {
-  final String text;
-  const _SectionLabel(this.text);
-
-  @override
-  Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 6),
-      child: Text(
-        text,
-        style: const TextStyle(
-          color: AppColors.textSecondary,
-          fontSize: 11,
-          fontWeight: FontWeight.w600,
-          letterSpacing: 0.5,
-        ),
-      ),
-    );
-  }
-}
-
-// ─── Param Slider ───────────────────────────────────────────────────────────
-
-class _ParamSlider extends StatelessWidget {
-  final String label;
-  final double value;
-  final double min;
-  final double max;
-  final int divisions;
-  final String Function(double) format;
-  final ValueChanged<double>? onChanged;
-
-  const _ParamSlider({
-    required this.label,
-    required this.value,
-    required this.min,
-    required this.max,
-    required this.divisions,
-    required this.format,
-    this.onChanged,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 4),
-      child: Row(
-        children: [
-          SizedBox(
-            width: 90,
-            child: Text(label,
-                style: const TextStyle(
-                    color: AppColors.textSecondary, fontSize: 11)),
-          ),
-          Expanded(
-            child: SliderTheme(
-              data: SliderTheme.of(context).copyWith(
-                trackHeight: 3,
-                thumbShape:
-                    const RoundSliderThumbShape(enabledThumbRadius: 6),
-                activeTrackColor: AppColors.accentCyan,
-                inactiveTrackColor: AppColors.border,
-                thumbColor: AppColors.accentCyan,
-                overlayColor: AppColors.accentCyan.withAlpha(30),
-              ),
-              child: Slider(
-                value: value,
-                min: min,
-                max: max,
-                divisions: divisions,
-                onChanged: onChanged,
-              ),
-            ),
-          ),
-          SizedBox(
-            width: 36,
-            child: Text(
-              format(value),
-              style: const TextStyle(
-                  color: AppColors.accentCyan,
-                  fontSize: 12,
-                  fontWeight: FontWeight.bold),
-              textAlign: TextAlign.right,
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
+// (Welle O3-B1: _SectionLabel + _ParamSlider extracted to
+// lib/ui/widgets/param_slider.dart so the new strategy-specific param
+// sections can share them.)
 
 // ─── Date Range Selector ────────────────────────────────────────────────────
 
