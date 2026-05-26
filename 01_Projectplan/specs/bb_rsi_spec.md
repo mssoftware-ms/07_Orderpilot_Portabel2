@@ -244,3 +244,24 @@ Variante 3 wurde im Video auf **NQ (Nasdaq-100-Futures) 1h** entwickelt. NQ hat 
 - Unit-Tests pro Entry-/Exit-Bedingung grün — inkl. neuer Tests aus Welle 1 + 2 (RSI-Cross, Swing-SL, R:R-1:3-TP, BE-Trail-Logik, Risk-Sizing)
 - Dart↔Rust-Parität 1e-9 nach jedem Welle-1 + Welle-2 + Diagnose-Commit
 - Phase-1-Reference-Backtest (BTCUSDT 1h 2024-H1) bleibt strukturell grün (Reproduzierbarkeit 3×, Parität, `totalTrades > 0`). Die numerischen Werte sind durch Phase 2 verschoben (siehe Welle-1/Welle-2/Diagnose-Briefe) — das ist by-design, nicht Regression.
+
+### 13.8 Phase-3.2 Welle A1 — TF-Mismatch-Validierung 1h (2026-05-26)
+
+Welle-O2 4h-Sweep ([`bb_rsi_sweep_2026-05-24.md`](./bb_rsi_sweep_2026-05-24.md)) produzierte 0/1000 qualifizierte Trials (max 10 Trades pro Trial). Welle A1 re-sweepte auf 1h mit erweitertem Search-Space (`bb_period 50..300`, `rsi_period 2..14`) um die TF-Mismatch-Hypothese zu validieren.
+
+Voller Sweep: [`bb_rsi_1h_sweep_2026-05-26.md`](./bb_rsi_1h_sweep_2026-05-26.md).
+Vollständige Klassifikation: [`bb_rsi_1h_path_classification_2026-05-26.md`](./bb_rsi_1h_path_classification_2026-05-26.md).
+
+**Ergebnis:** **Pfad C (mit signifikanter Verbesserung vs 4h).**
+- 13 / 1000 Trials qualifiziert (vs 0 / 1000 auf 4h)
+- Max 64 Trades observed (vs 10 auf 4h, ×6.4)
+- Top-1: PF 1.545, Sharpe +1.78, 42 Trades, WR 30.95 %, MaxDD 15.41 %, Profit +22.46 %
+- Top-1 hits 1/5 XLSX-Bands (MaxDD only). PF 1.545 ist 0.035 unter XLSX-Lower [1.58] — fast hit. Trades 42 noch 38 unter XLSX-Lower [80].
+
+**Verfeinerung zu §13.5 NQ-vs-BTC-Microstructure:** Auf BTC 1h existiert eine strikt monotone Edge-Volumen-Trade-off: ADX-on lowering → mehr Trades, niedrigere PF. Die XLSX-Band [80, 120] Trades + PF [1.58, 2.18] liegen im Param-Raum nicht gleichzeitig erreichbar auf BTC 1h mit Welle-R4 always-on ADX-Filter. Phase-1-Reference (no ADX) trifft Trade-Band [80,120] bei 91 Trades, aber edge-negativ.
+
+**§13.6 Konsequenz bleibt unverändert:** BB+RSI v3 bleibt im Add-in-Manifest mit verbesserten-Defaults, Phase-3-Optimizer-Backlog niedriger Priorität. Welle A1 reklassifiziert qualitativ von „strukturell unprofitable auf 4h" zu „edge-positive Lab-Kandidat mit XLSX-Trade-Band außer Reichweite auf 1h" — eine Konkretisierung, nicht ein Statuswechsel.
+
+**Optionale Sub-Wellen für Phase-3-Optimizer-Backlog:**
+- Welle A1.1: `adx_filter_enabled: Bool` im Search-Space (statt fixiert 1.0) — testet ob no-ADX-Configs die XLSX-Band hitten können
+- Welle A1.2: `adx_threshold ∈ [15, 35]` (statt [25, 45]) — empirischer Knick-Punkt der Edge-Volumen-Trade-off
