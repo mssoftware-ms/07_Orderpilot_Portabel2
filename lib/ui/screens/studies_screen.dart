@@ -16,6 +16,7 @@ import '../../core/logging/app_log.dart';
 import '../../core/models/study.dart';
 import '../../features/studies/studies_provider.dart';
 import '../themes/app_theme.dart';
+import '../widgets/param_convergence_plot.dart';
 import '../widgets/trials_top10_table.dart';
 
 class StudiesScreen extends StatelessWidget {
@@ -295,11 +296,10 @@ class _ConvergencePlaceholder extends StatelessWidget {
               style: TextStyle(color: AppColors.textMuted, fontSize: 12),
             )
           else
-            Text(
-              '${provider.trials.length} trials loaded '
-              '(scatter plot lands in Welle O3-B2-5)',
-              style: const TextStyle(
-                  color: AppColors.textSecondary, fontSize: 12),
+            ParamConvergencePlot(
+              trials: provider.trials,
+              searchSpaceYaml:
+                  provider.selectedStudy?.searchSpaceYaml ?? '',
             ),
         ],
       ),
