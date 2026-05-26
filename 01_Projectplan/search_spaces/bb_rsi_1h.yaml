@@ -1,0 +1,36 @@
+# BB+RSI search space — Phase-3.2 Welle A1 (1h TF-mismatch hypothesis).
+#
+# Variant of bb_rsi.yaml (Welle-O2) for the 1h timeframe sweep. Welle O2
+# on 4h ran 1000 trials and produced 0 qualified trials — the search
+# space + always-on ADX filter generated max 10 trades per trial,
+# while the XLSX target band [80, 120] expects ~10x more. Welle A1
+# tests the hypothesis that the XLSX target was specified against a 1h
+# (or sub-4h) timeframe.
+#
+# Range adjustments vs bb_rsi.yaml:
+# - bb_period 50..300 (vs 100..300): widens lower bound so faster BB
+#   variants are not pre-cut from the search.
+# - rsi_period 2..14 (vs 2..7): includes the classic RSI(14) default
+#   so non-scalper RSI configurations are reachable.
+# All other ranges identical to Welle-O2 to keep apples-to-apples
+# comparison with the 4h sweep when interpreting band hits.
+#
+# Fixed parameters: kept at Phase-2 spec / Welle-R4 always-on adx
+# filter — the sweep is about discovering optima for swept axes, not
+# re-litigating the always-on-ADX decision.
+strategy_name: bb_rsi
+parameters:
+  bb_period:             { type: Int,   min: 50,   max: 300 }
+  bb_stddev:             { type: Float, min: 0.2,  max: 1.0 }
+  rsi_period:            { type: Int,   min: 2,    max: 14 }
+  rsi_oversold:          { type: Float, min: 15.0, max: 30.0 }
+  rsi_overbought:        { type: Float, min: 70.0, max: 85.0 }
+  swing_lookback_bars:   { type: Int,   min: 10,   max: 30 }
+  tp_rr_ratio:           { type: Float, min: 1.5,  max: 4.0 }
+  risk_per_trade:        { type: Float, min: 0.01, max: 0.03 }
+  adx_threshold:         { type: Float, min: 25.0, max: 45.0 }
+  adx_use_di_confluence: { type: Bool }
+fixed:
+  bb_ma_type:         1.0   # EMA basis per Phase-2 spec (D-08)
+  adx_filter_enabled: 1.0   # always-on per Welle-R4
+  adx_period:         14.0

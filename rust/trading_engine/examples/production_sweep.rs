@@ -1,25 +1,29 @@
-//! Production parameter sweep for one strategy (Welle-O2).
+//! Production parameter sweep for one strategy.
 //!
 //! CLI:
 //!     cargo run --release --example production_sweep -- \
-//!         <strategy> <n_trials> [seed]
+//!         <strategy> <n_trials> [seed] [tf_variant]
 //!
-//!     strategy ∈ { bb_rsi, ut_bot, ichimoku }
-//!     n_trials = positive integer (per Welle-O2 brief: 500 or 1000)
-//!     seed     = u64, default 42
+//!     strategy   ∈ { bb_rsi, ut_bot, ichimoku }
+//!     n_trials   = positive integer (per Welle-O2 brief: 500 or 1000)
+//!     seed       = u64, default 42
+//!     tf_variant ∈ { main, 1h } (default: main). Welle A1 uses
+//!                  `bb_rsi 1000 42 1h` to validate the TF-mismatch
+//!                  hypothesis from the Welle-O2 bb_rsi 4h sweep.
 //!
-//! Outputs (all under `01_Projectplan/`):
-//!     optimizer_studies/studies-<strategy>.db   — SQLite study + trials
-//!     optimizer_studies/top10-<strategy>.csv    — Top-10 export (human read)
-//!     specs/<strategy>_sweep_2026-05-24.md      — Sweep report MD
+//! Outputs (all under `01_Projectplan/`, variant suffix `_{variant}`
+//! when not `main`):
+//!     optimizer_studies/studies-<strategy>[_variant].db
+//!     optimizer_studies/top10-<strategy>[_variant].csv
+//!     specs/<strategy>[_variant]_sweep_<SWEEP_DATE>.md
 //!
 //! Each invocation creates a FRESH study row inside the DB (study name
-//! includes `n_trials`, `seed`, and the date). Re-running with the same
-//! args therefore errors on UNIQUE name conflict — re-run with a new
-//! seed or rename the DB to overwrite.
+//! includes `variant`, `n_trials`, `seed`, and the date). Re-running
+//! with the same args therefore errors on UNIQUE name conflict —
+//! re-run with a new seed or rename the DB to overwrite.
 //!
-//! The study DB sticks under `01_Projectplan/` because it is the Welle-
-//! O2 source-of-truth for Top-N reproducibility (committed alongside
+//! The study DB sticks under `01_Projectplan/` because it is the
+//! source-of-truth for Top-N reproducibility (committed alongside
 //! the report MD). Total size stays < 10 MB per sweep (5 KB / trial).
 
 use std::fs::{create_dir_all, File};
@@ -43,10 +47,12 @@ const INITIAL_BALANCE: f64 = 10_000.0;
 const FEE_RATE: f64 = 0.0006; // Bitunix VIP0 taker
 const SLIPPAGE_BPS: f64 = 0.0;
 const DEFAULT_SEED: u64 = 42;
-const SWEEP_DATE: &str = "2026-05-24";
+const DEFAULT_VARIANT: &str = "main";
+// Bumped per sweep date (study_name + output filenames embed this).
+const SWEEP_DATE: &str = "2026-05-26";
 
-/// Per-strategy data file, search-space YAML, timeframe and XLSX target
-/// bands (from `01_Projectplan/Trading Strategie Analyse.xlsx` + spec §13).
+/// Per-strategy data file, search-space YAML, timeframe, XLSX target
+/// bands, and per-variant labels for the report MD header.
 struct StrategyConfig {
     kind: StrategyKind,
     data_file: &'static str,
@@ -55,6 +61,15 @@ struct StrategyConfig {
     asset_label: &'static str,
     timeframe_label: &'static str,
     range_label: &'static str,
+    /// Variant identifier (e.g. `main`, `1h`). Drives output filename
+    /// suffixes and study_name uniqueness so multiple variants of the
+    /// same strategy can coexist in the same DB / specs/ directory.
+    variant: &'static str,
+    /// Phase + wave label injected into the report MD (`Phase: ...`).
+    phase_label: &'static str,
+    /// Wave label injected into the report MD title (`# ... Production
+    /// Sweep (<sweep_label>)`).
+    sweep_label: &'static str,
     // XLSX-Band-Check thresholds:
     trades_band: (u32, u32),
     win_rate_band_pct: (f64, f64),
@@ -63,9 +78,9 @@ struct StrategyConfig {
     profit_pct_band: (f64, f64),
 }
 
-fn config_for(kind: StrategyKind) -> StrategyConfig {
-    match kind {
-        StrategyKind::BbRsi => StrategyConfig {
+fn config_for(kind: StrategyKind, variant: &str) -> Result<StrategyConfig> {
+    match (kind, variant) {
+        (StrategyKind::BbRsi, "main") => Ok(StrategyConfig {
             kind,
             data_file: "01_Projectplan/optimizer_data/BTCUSDT_4h_2024-01-01_2024-07-01.json",
             yaml_file: "01_Projectplan/search_spaces/bb_rsi.yaml",
@@ -73,13 +88,33 @@ fn config_for(kind: StrategyKind) -> StrategyConfig {
             asset_label: "BTCUSDT",
             timeframe_label: "4h",
             range_label: "2024-01-01 → 2024-07-01",
+            variant: "main",
+            phase_label: "3 — Welle O2",
+            sweep_label: "Welle O2",
             trades_band: (80, 120),
             win_rate_band_pct: (33.0, 43.0),
             profit_factor_band: (1.58, 2.18),
             max_drawdown_cap_pct: 19.0,
             profit_pct_band: (83.0, 133.0),
-        },
-        StrategyKind::UtBot => StrategyConfig {
+        }),
+        (StrategyKind::BbRsi, "1h") => Ok(StrategyConfig {
+            kind,
+            data_file: "01_Projectplan/optimizer_data/BTCUSDT_1h_2024-01-01_2024-07-01.json",
+            yaml_file: "01_Projectplan/search_spaces/bb_rsi_1h.yaml",
+            timeframe: Timeframe::H1,
+            asset_label: "BTCUSDT",
+            timeframe_label: "1h",
+            range_label: "2024-01-01 → 2024-07-01",
+            variant: "1h",
+            phase_label: "3.2 — Welle A1",
+            sweep_label: "Welle A1 (TF-mismatch hypothesis)",
+            trades_band: (80, 120),
+            win_rate_band_pct: (33.0, 43.0),
+            profit_factor_band: (1.58, 2.18),
+            max_drawdown_cap_pct: 19.0,
+            profit_pct_band: (83.0, 133.0),
+        }),
+        (StrategyKind::UtBot, "main") => Ok(StrategyConfig {
             kind,
             data_file: "01_Projectplan/optimizer_data/BTCUSDT_5m_2024-01-01_2024-03-08.json",
             yaml_file: "01_Projectplan/search_spaces/ut_bot.yaml",
@@ -87,13 +122,16 @@ fn config_for(kind: StrategyKind) -> StrategyConfig {
             asset_label: "BTCUSDT",
             timeframe_label: "5m",
             range_label: "2024-01-01 → 2024-03-08",
+            variant: "main",
+            phase_label: "3 — Welle O2",
+            sweep_label: "Welle O2",
             trades_band: (80, 120),
             win_rate_band_pct: (48.0, 58.0),
             profit_factor_band: (2.01, 2.61),
             max_drawdown_cap_pct: 17.0,
             profit_pct_band: (98.0, 148.0),
-        },
-        StrategyKind::Ichimoku => StrategyConfig {
+        }),
+        (StrategyKind::Ichimoku, "main") => Ok(StrategyConfig {
             kind,
             data_file: "01_Projectplan/optimizer_data/BTCUSDT_1h_2023-04-01_2025-05-02.json",
             yaml_file: "01_Projectplan/search_spaces/ichimoku.yaml",
@@ -101,12 +139,30 @@ fn config_for(kind: StrategyKind) -> StrategyConfig {
             asset_label: "BTCUSDT",
             timeframe_label: "1h",
             range_label: "2023-04-01 → 2025-05-02",
+            variant: "main",
+            phase_label: "3 — Welle O2",
+            sweep_label: "Welle O2",
             trades_band: (75, 125),
             win_rate_band_pct: (50.0, 60.0),
             profit_factor_band: (2.14, 2.74),
             max_drawdown_cap_pct: 15.0,
             profit_pct_band: (95.0, 145.0),
-        },
+        }),
+        (k, v) => bail!(
+            "unknown variant '{}' for strategy '{}' (supported: bb_rsi:[main|1h], ut_bot:[main], ichimoku:[main])",
+            v,
+            k.as_str()
+        ),
+    }
+}
+
+/// Filename suffix derived from variant. `main` stays empty for
+/// backwards compatibility with existing Welle-O2 file naming.
+fn variant_marker(variant: &str) -> String {
+    if variant == DEFAULT_VARIANT {
+        String::new()
+    } else {
+        format!("_{}", variant)
     }
 }
 
@@ -314,11 +370,12 @@ fn write_report_md(
 
     let mut md = String::new();
     md.push_str(&format!(
-        "# {} Production Sweep (Welle O2)\n\n",
-        cfg.kind.as_str()
+        "# {} Production Sweep ({})\n\n",
+        cfg.kind.as_str(),
+        cfg.sweep_label
     ));
     md.push_str(&format!("**Datum:** {}  \n", SWEEP_DATE));
-    md.push_str("**Phase:** 3 — Welle O2  \n");
+    md.push_str(&format!("**Phase:** {}  \n", cfg.phase_label));
     md.push_str(&format!(
         "**Asset/TF:** {} / {}  \n",
         cfg.asset_label, cfg.timeframe_label
@@ -449,10 +506,11 @@ fn write_report_md(
 
     md.push_str("---\n\n");
     md.push_str(&format!(
-        "_Generated by `cargo run --release --example production_sweep -- {} {} {}` at {}._\n",
+        "_Generated by `cargo run --release --example production_sweep -- {} {} {} {}` at {}._\n",
         cfg.kind.as_str(),
         n_trials,
         seed,
+        cfg.variant,
         Utc::now().to_rfc3339(),
     ));
 
@@ -468,7 +526,7 @@ fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 3 {
         bail!(
-            "usage: production_sweep <strategy> <n_trials> [seed]\n  strategy ∈ {{ bb_rsi, ut_bot, ichimoku }}"
+            "usage: production_sweep <strategy> <n_trials> [seed] [tf_variant]\n  strategy ∈ {{ bb_rsi, ut_bot, ichimoku }}\n  tf_variant ∈ {{ main, 1h }} (default: main)"
         );
     }
     let strategy = parse_strategy(&args[1])?;
@@ -478,11 +536,17 @@ fn main() -> Result<()> {
     } else {
         DEFAULT_SEED
     };
+    let variant: &str = if args.len() >= 5 {
+        args[4].as_str()
+    } else {
+        DEFAULT_VARIANT
+    };
     if n_trials < 10 {
         bail!("n_trials < 10 is not a meaningful sweep");
     }
 
-    let cfg = config_for(strategy);
+    let cfg = config_for(strategy, variant)?;
+    let marker = variant_marker(cfg.variant);
     let root = repo_root();
 
     // ─── Load candles + space ───────────────────────────────────────────
@@ -499,12 +563,13 @@ fn main() -> Result<()> {
     // ─── Open SQLite DB ────────────────────────────────────────────────
     let studies_dir = root.join("01_Projectplan/optimizer_studies");
     create_dir_all(&studies_dir).context("mkdir optimizer_studies")?;
-    let db_path = studies_dir.join(format!("studies-{}.db", strategy.as_str()));
+    let db_path = studies_dir.join(format!("studies-{}{}.db", strategy.as_str(), marker));
     let mut storage = StudyStorage::open(&db_path)?;
 
     let study_name = format!(
-        "production_{}_n{}_seed{}_{}",
+        "production_{}{}_n{}_seed{}_{}",
         strategy.as_str(),
+        marker,
         n_trials,
         seed,
         SWEEP_DATE,
@@ -572,14 +637,14 @@ fn main() -> Result<()> {
     }
 
     // ─── Write Top-10 CSV ──────────────────────────────────────────────
-    let csv_path = studies_dir.join(format!("top10-{}.csv", strategy.as_str()));
+    let csv_path = studies_dir.join(format!("top10-{}{}.csv", strategy.as_str(), marker));
     write_top10_csv(&top10, &csv_path)?;
     println!("wrote {}", csv_path.display());
 
     // ─── Write Report MD ───────────────────────────────────────────────
     let report_path = root
         .join("01_Projectplan/specs")
-        .join(format!("{}_sweep_{}.md", strategy.as_str(), SWEEP_DATE));
+        .join(format!("{}{}_sweep_{}.md", strategy.as_str(), marker, SWEEP_DATE));
     write_report_md(
         &report_path,
         &cfg,
