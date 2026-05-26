@@ -1,0 +1,31 @@
+# Ichimoku TPE search space — Phase-3.1 Welle W3.5.
+#
+# Ranges are cut down from the Welle-O2 Ichimoku search space
+# (ichimoku.yaml) using the W3a survivor-cluster analysis from
+# 01_Projectplan/specs/walk_forward_w3a_survivors_2026-05-26.md §5.2.
+# The pre-Welle-O2 range is preserved for tenkan/shift/adx_di — those
+# parameters showed no survivor-cluster preference — and trimmed for
+# kijun / senkou_b / score_threshold / tp_rr / risk / adx_threshold
+# where the 20-survivor pool clustered tightly in the lower half of
+# the range.
+#
+# Compute-budget rationale: the trimmed combined volume is ≈ 30 % of
+# the Welle-O2 search-space size, so 200 TPE trials with a warm-start
+# from the 28-trial W3a-relaxed survivor pool should give a similar
+# effective coverage to the Welle-O2 1000-random sweep — but biased
+# toward the validated cluster.
+strategy_name: ichimoku
+parameters:
+  tenkan_period: { type: Int, min: 7, max: 13 }                # full (no cluster preference)
+  kijun_period: { type: Int, min: 21, max: 39 }                # cut top bin (max=40 → 39)
+  senkou_b_period: { type: Int, min: 40, max: 69 }             # cut top bin (max=70 → 69)
+  shift: { type: Int, min: 20, max: 30 }                       # full
+  score_threshold: { type: Int, min: 40, max: 60 }             # cut top half (max=80 → 60)
+  tp_rr_ratio: { type: Float, min: 1.5, max: 2.6 }             # cut top half (max=4.0 → 2.6)
+  risk_per_trade: { type: Float, min: 0.01, max: 0.024 }       # cut top quarter (max=0.03 → 0.024)
+  adx_threshold: { type: Float, min: 25.0, max: 38.0 }         # cut top quarter (max=45 → 38)
+  adx_use_di_confluence: { type: Bool }                        # full (kept; leans 0 in cluster but not exclusive)
+fixed:
+  session_filter_enabled: 0.0   # 24/7 crypto, no session filter
+  adx_filter_enabled: 1.0       # always-on per Welle-R4
+  adx_period: 14.0
