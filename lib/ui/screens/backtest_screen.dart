@@ -16,6 +16,7 @@ import '../../features/backtest/backtest_provider.dart';
 import '../../services/backtest_service.dart';
 import '../../services/optimization_service.dart';
 import '../themes/app_theme.dart';
+import '../widgets/adx_filter_section.dart';
 import '../widgets/bb_rsi_param_section.dart';
 import '../widgets/equity_curve_chart.dart';
 import '../widgets/ichimoku_param_section.dart';
@@ -381,14 +382,17 @@ class _ConfigPanelState extends State<_ConfigPanel> {
           if (_showAdvanced) ...[
             const SizedBox(height: 12),
 
-            // Strategy-specific param section. Welle O3-B1: BB+RSI is the
-            // only one with real inputs today; UT-Bot + Ichimoku render
-            // stub cards that get replaced in Welle O3-B1-3.
+            // Strategy-specific param section. Welle O3-B1: each kind has
+            // its own widget; the shared ADX filter section renders below
+            // because the quartet lives on every params struct.
             switch (cfg.strategyKind) {
               StrategyKind.bbRsi => BbRsiParamSection(provider: _p),
               StrategyKind.utBot => UtBotParamSection(provider: _p),
               StrategyKind.ichimoku => IchimokuParamSection(provider: _p),
             },
+
+            // Engine-shared ADX regime filter (Welle O3-B1-4).
+            AdxFilterSection(provider: _p),
           ],
 
           const SizedBox(height: 20),
