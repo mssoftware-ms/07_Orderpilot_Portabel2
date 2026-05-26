@@ -1,5 +1,10 @@
+import 'dart:io' show Platform;
+
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
+import 'package:sqflite_common_ffi/sqflite_ffi.dart';
+
 import 'core/logging/app_log.dart';
 import 'features/backtest/backtest_provider.dart';
 import 'ui/themes/app_theme.dart';
@@ -10,6 +15,17 @@ import 'ui/screens/paper_trading_screen.dart';
 import 'ui/screens/strategy_management_screen.dart';
 
 void main() {
+  // Welle O3-B2: sqfliteFfiInit MUST run before runApp and before any
+  // file_picker call so the Studies viewer can open Optuna-style .db
+  // files via the FFI backend on desktop platforms (Linux/macOS/Windows).
+  // On the (non-web) host, swap the global databaseFactory to the FFI
+  // variant. On web, the studies viewer is disabled at build time.
+  WidgetsFlutterBinding.ensureInitialized();
+  if (!kIsWeb &&
+      (Platform.isLinux || Platform.isMacOS || Platform.isWindows)) {
+    sqfliteFfiInit();
+    databaseFactory = databaseFactoryFfi;
+  }
   runApp(const TradingApp());
 }
 

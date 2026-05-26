@@ -24,6 +24,11 @@ dependencies:
 
   # Utilities
   intl: ^0.20.2
+  yaml: ^3.1.2
+
+  # Studies viewer (Welle O3-B2): SQLite FFI + file picker
+  sqflite_common_ffi: ^2.3.0
+  file_picker: ^8.0.0
 
   # Rust Bridge
   flutter_rust_bridge: 2.12.0
