@@ -14,6 +14,7 @@ import 'ui/screens/chart_screen.dart';
 import 'ui/screens/backtest_screen.dart';
 import 'ui/screens/paper_trading_screen.dart';
 import 'ui/screens/strategy_management_screen.dart';
+import 'ui/screens/studies_screen.dart';
 
 void main() {
   // Welle O3-B2: sqfliteFfiInit MUST run before runApp and before any
@@ -68,6 +69,7 @@ class _AppScaffoldState extends State<AppScaffold> {
     HomeScreen(),
     ChartScreen(),
     BacktestScreen(),
+    StudiesScreen(),
     PaperTradingScreen(),
     StrategyManagementScreen(),
   ];
@@ -76,6 +78,7 @@ class _AppScaffoldState extends State<AppScaffold> {
     _NavItem(icon: Icons.dashboard_outlined, selectedIcon: Icons.dashboard, label: 'Home'),
     _NavItem(icon: Icons.candlestick_chart_outlined, selectedIcon: Icons.candlestick_chart, label: 'Chart'),
     _NavItem(icon: Icons.history_outlined, selectedIcon: Icons.history, label: 'Backtest'),
+    _NavItem(icon: Icons.analytics_outlined, selectedIcon: Icons.analytics, label: 'Studies'),
     _NavItem(icon: Icons.play_circle_outline, selectedIcon: Icons.play_circle_filled, label: 'Paper'),
     _NavItem(icon: Icons.extension_outlined, selectedIcon: Icons.extension, label: 'Strategies'),
   ];
