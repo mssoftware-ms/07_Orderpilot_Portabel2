@@ -2,14 +2,21 @@
 //!
 //! CLI:
 //!     cargo run --release --example production_sweep -- \
-//!         <strategy> <n_trials> [seed] [tf_variant]
+//!         <strategy> <n_trials> [seed] [variant]
 //!
 //!     strategy   ∈ { bb_rsi, ut_bot, ichimoku }
 //!     n_trials   = positive integer (per Welle-O2 brief: 500 or 1000)
 //!     seed       = u64, default 42
-//!     tf_variant ∈ { main, 1h } (default: main). Welle A1 uses
-//!                  `bb_rsi 1000 42 1h` to validate the TF-mismatch
-//!                  hypothesis from the Welle-O2 bb_rsi 4h sweep.
+//!     variant    Strategy-specific variant tag (default: main).
+//!                  bb_rsi:   { main, 1h }     — Welle A1 (`bb_rsi 1000 42 1h`)
+//!                            validates the TF-mismatch hypothesis from the
+//!                            Welle-O2 4h sweep.
+//!                  ut_bot:   { main, zerofee, maker } — Welle A2 validates
+//!                            the fee-driver hypothesis. `zerofee` uses
+//!                            fee_rate=0.0 (sanity check); `maker` uses
+//!                            fee_rate=0.0002 (Bitunix VIP0 maker, 4 bps
+//!                            round-trip, production-realistic optimistic).
+//!                  ichimoku: { main }
 //!
 //! Outputs (all under `01_Projectplan/`, variant suffix `_{variant}`
 //! when not `main`):
@@ -44,10 +51,16 @@ use trading_engine::optimizer::{
 // ─── Config ──────────────────────────────────────────────────────────────────
 
 const INITIAL_BALANCE: f64 = 10_000.0;
-const FEE_RATE: f64 = 0.0006; // Bitunix VIP0 taker
 const SLIPPAGE_BPS: f64 = 0.0;
 const DEFAULT_SEED: u64 = 42;
 const DEFAULT_VARIANT: &str = "main";
+// Bitunix VIP0 fee tiers used by named variants:
+//   TAKER  = 0.0006 (market entry + exit, 12 bps round-trip)  — main variants
+//   MAKER  = 0.0002 (limit  entry + exit,  4 bps round-trip)  — `maker` variant
+//   ZERO   = 0.0    (fee-driver validation only)              — `zerofee` variant
+const FEE_TAKER: f64 = 0.0006;
+const FEE_MAKER: f64 = 0.0002;
+const FEE_ZERO: f64 = 0.0;
 // Bumped per sweep date (study_name + output filenames embed this).
 const SWEEP_DATE: &str = "2026-05-26";
 
@@ -70,6 +83,10 @@ struct StrategyConfig {
     /// Wave label injected into the report MD title (`# ... Production
     /// Sweep (<sweep_label>)`).
     sweep_label: &'static str,
+    /// Per-variant Bitunix fee rate per side (taker 0.0006, maker 0.0002,
+    /// zero 0.0). Embedded in `BacktestConfig` and surfaced in the report
+    /// MD engine line.
+    fee_rate: f64,
     // XLSX-Band-Check thresholds:
     trades_band: (u32, u32),
     win_rate_band_pct: (f64, f64),
@@ -91,6 +108,7 @@ fn config_for(kind: StrategyKind, variant: &str) -> Result<StrategyConfig> {
             variant: "main",
             phase_label: "3 — Welle O2",
             sweep_label: "Welle O2",
+            fee_rate: FEE_TAKER,
             trades_band: (80, 120),
             win_rate_band_pct: (33.0, 43.0),
             profit_factor_band: (1.58, 2.18),
@@ -108,6 +126,7 @@ fn config_for(kind: StrategyKind, variant: &str) -> Result<StrategyConfig> {
             variant: "1h",
             phase_label: "3.2 — Welle A1",
             sweep_label: "Welle A1 (TF-mismatch hypothesis)",
+            fee_rate: FEE_TAKER,
             trades_band: (80, 120),
             win_rate_band_pct: (33.0, 43.0),
             profit_factor_band: (1.58, 2.18),
@@ -125,6 +144,54 @@ fn config_for(kind: StrategyKind, variant: &str) -> Result<StrategyConfig> {
             variant: "main",
             phase_label: "3 — Welle O2",
             sweep_label: "Welle O2",
+            fee_rate: FEE_TAKER,
+            trades_band: (80, 120),
+            win_rate_band_pct: (48.0, 58.0),
+            profit_factor_band: (2.01, 2.61),
+            max_drawdown_cap_pct: 17.0,
+            profit_pct_band: (98.0, 148.0),
+        }),
+        // Welle A2-Validation: fee=0.0 sanity check to test the fee-driver
+        // hypothesis from Welle-O2 (UT-Bot taker-fee drag ≈ 100 % of -15.27 %
+        // total PnL). Reuses Welle-O2 search space + candles unchanged; only
+        // BacktestConfig.fee_rate diverges. If qualified count + Top-1 PF
+        // collapse here, fee was not the dominant driver → strategy-logic
+        // problem (Pfad C). If Top-1 PF >> 1.0, escalate to `maker` variant.
+        (StrategyKind::UtBot, "zerofee") => Ok(StrategyConfig {
+            kind,
+            data_file: "01_Projectplan/optimizer_data/BTCUSDT_5m_2024-01-01_2024-03-08.json",
+            yaml_file: "01_Projectplan/search_spaces/ut_bot.yaml",
+            timeframe: Timeframe::M5,
+            asset_label: "BTCUSDT",
+            timeframe_label: "5m",
+            range_label: "2024-01-01 → 2024-03-08",
+            variant: "zerofee",
+            phase_label: "3.2 — Welle A2-Validation",
+            sweep_label: "Welle A2-Validation (0 % fee driver test)",
+            fee_rate: FEE_ZERO,
+            trades_band: (80, 120),
+            win_rate_band_pct: (48.0, 58.0),
+            profit_factor_band: (2.01, 2.61),
+            max_drawdown_cap_pct: 17.0,
+            profit_pct_band: (98.0, 148.0),
+        }),
+        // Welle A2-Maker: production-realistic optimistic with Bitunix VIP0
+        // maker fee (0.02 % × 2 sides = 4 bps round-trip). Assumes all entry
+        // and exit orders fill as maker (limit) orders — a documented Pfad-B
+        // deviation since fill probability isn't modeled. Realistic fill
+        // simulation is Phase-4 backlog.
+        (StrategyKind::UtBot, "maker") => Ok(StrategyConfig {
+            kind,
+            data_file: "01_Projectplan/optimizer_data/BTCUSDT_5m_2024-01-01_2024-03-08.json",
+            yaml_file: "01_Projectplan/search_spaces/ut_bot.yaml",
+            timeframe: Timeframe::M5,
+            asset_label: "BTCUSDT",
+            timeframe_label: "5m",
+            range_label: "2024-01-01 → 2024-03-08",
+            variant: "maker",
+            phase_label: "3.2 — Welle A2-Maker",
+            sweep_label: "Welle A2-Maker (production-realistic optimistic)",
+            fee_rate: FEE_MAKER,
             trades_band: (80, 120),
             win_rate_band_pct: (48.0, 58.0),
             profit_factor_band: (2.01, 2.61),
@@ -142,6 +209,7 @@ fn config_for(kind: StrategyKind, variant: &str) -> Result<StrategyConfig> {
             variant: "main",
             phase_label: "3 — Welle O2",
             sweep_label: "Welle O2",
+            fee_rate: FEE_TAKER,
             trades_band: (75, 125),
             win_rate_band_pct: (50.0, 60.0),
             profit_factor_band: (2.14, 2.74),
@@ -149,7 +217,7 @@ fn config_for(kind: StrategyKind, variant: &str) -> Result<StrategyConfig> {
             profit_pct_band: (95.0, 145.0),
         }),
         (k, v) => bail!(
-            "unknown variant '{}' for strategy '{}' (supported: bb_rsi:[main|1h], ut_bot:[main], ichimoku:[main])",
+            "unknown variant '{}' for strategy '{}' (supported: bb_rsi:[main|1h], ut_bot:[main|zerofee|maker], ichimoku:[main])",
             v,
             k.as_str()
         ),
@@ -388,9 +456,16 @@ fn write_report_md(
         "**Score-Constraints:** max_drawdown_cap_pct = {}, min_trades = {}  \n",
         constraints.max_drawdown_cap_pct, constraints.min_trades
     ));
-    md.push_str(
-        "**Engine:** Bitunix-VIP0 0.06 % Taker-Fee pro Seite, 10.000 USDT Startkapital, F-04 Next-Bar-Open, slippage_bps = 0  \n",
-    );
+    let fee_label = match cfg.fee_rate {
+        x if (x - FEE_TAKER).abs() < 1e-9 => "Bitunix-VIP0 0.06 % Taker-Fee".to_string(),
+        x if (x - FEE_MAKER).abs() < 1e-9 => "Bitunix-VIP0 0.02 % Maker-Fee".to_string(),
+        0.0 => "0 % Fee (Welle A2-Validation, fee-driver sanity check)".to_string(),
+        x => format!("{:.4} % Fee", x * 100.0),
+    };
+    md.push_str(&format!(
+        "**Engine:** {} pro Seite, 10.000 USDT Startkapital, F-04 Next-Bar-Open, slippage_bps = 0  \n",
+        fee_label,
+    ));
     md.push_str(&format!(
         "**Compute:** {:.1}s reine Sweep-Zeit ({:.1} ms/trial)  \n\n",
         elapsed_secs,
@@ -555,7 +630,7 @@ fn main() -> Result<()> {
     let constraints = score_constraints_for_strategy(strategy);
     let config = BacktestConfig {
         initial_balance: INITIAL_BALANCE,
-        fee_rate: FEE_RATE,
+        fee_rate: cfg.fee_rate,
         timeframe: cfg.timeframe,
         slippage_bps: SLIPPAGE_BPS,
     };
