@@ -519,6 +519,42 @@ Aktualisierter Phase-2-Outcome (jetzt nach Welle O2): **B (Pfad-B-Kandidat Ichim
 
 ---
 
+**Welle W1–W4 — Phase 3.1 Walk-Forward Refinement Loop (2026-05-25..2026-05-26, abgeschlossen):**
+
+Die vier Wellen lieferten eine vollständige Statistical-Validation-Pipeline für Ichimoku, mit dem methodisch wichtigen Befund dass **kein Trial die PBO-/DSR-Gates passiert**.
+
+| Welle | Inhalt | Belege |
+|---|---|---|
+| **W1** | Walk-Forward-Splitter (Rolling Window, strategy-agnostisch) + Trial-Runner mit stability-penalized Score + SQLite-Persistence (additive Schema, backward-compatible mit Welle-O2-DBs) + Integration-Tests inkl. Cross-Process-Determinismus-Pin | `optimizer/walk_forward.rs`, `tests/integration_walk_forward.rs` |
+| **W2** | 109-Trial Walk-Forward-Replay der Welle-O2 qualifizierten Ichimoku-Trials (25min Compute) + SurvivorCriteria mit CLI-Override. **Bailey-de-Prado-Effekt empirisch belegt:** Welle-O2-Top-1 (Trial 515) ist Walk-Forward Rang 6 mit `worst_oos_pf=0.021`. 0/109 Survivors unter Default-Criteria; 20/109 unter relaxierten. | `studies-ichimoku-wf.db`, `walk_forward_w2_survivors_2026-05-25.md` |
+| **W3** | MedianIqr-Stability-Score (W3-1/W3-2) + W3a Re-Run mit `train=4392 / validate=2196 / step=2196` (6 statt 9 Splits, 13min Compute) + TpeEngine (Rust-native, Box-Muller KDE, warm_start, 19/19 Tests grün). **Strukturelle Score-Verbesserung:** `std_oos_pf p50` 19.19 → 1.60 (-92 %); `worst_oos_pf p75` 0.222 → 0.431 (+94 %); Default-Survivors 0 → 2. | `studies-ichimoku-wf-w3a.db`, `walk_forward_w3a_survivors_2026-05-26.md`, `optimizer/tpe.rs` |
+| **W3.5** | TPE × Walk-Forward Production-Run: 200 TPE-Trials warm-started aus 28-Trial-Relaxed-Pool (33m16s Compute, 10s/trial, +35 % vs W3a wegen TPE-Suggest+History-Sweeps). **Warm-Start ~13× Multiplier validiert:** 80/200 (40 %) Pfad-A-Reach `mean_oos_pf ≥ 2.14` vs 3 % in W3a. Top-1: TPE Trial 101 mit `agg=1.5842`, `mean=2.024` (XLSX-Schwelle 2.14, Lücke 0.12). Cap-Drücker: `kijun=39` und `tp_rr_ratio=2.6` gegen Search-Space-Rand. | `studies-ichimoku-tpe.db`, `tpe_top_ichimoku.csv`, `tpe_w3_5_survivors_2026-05-26.md` |
+| **W4** | PBO + DSR Statistical Gates (Bailey-López-de-Prado 2014) auf Union-Pool aus TPE-Pfad-A-Reach + W3a-Top-5 + W3a-Default-Survivors = 86 Trials. **Pool-PBO = 1.0000** (alle 20 CSCV-Combos zeigen IS-Top-Trial unter OOS-Median). **Top-1 DSR = 0.207** (Z* = -0.82) — `E[max sharpe \| N=86, H0] = 2.477` übersteigt Best-Trial-Sharpe 1.87, statistische Korrektur für Multi-Testing-Bias verlangt höhere Sharpe-Werte als die Pool produziert. | `stat_gates_union_pool.csv`, `stat_gates_results.db`, `stat_gates_w4_results_2026-05-26.md` |
+
+**Phase-3.1-Outcome final: Walk-Forward-validation als Ergebnis (Pfad C bestätigt unter Statistical-Multi-Testing-Korrektur)**
+
+Kein Production-Default-Kandidat identifizierbar. Die TPE-Top-Trials erreichen `mean_oos_pf ≈ 2.0` aber `worst_oos_pf < 0.6` (bindende Default-Survivor-Constraint). Selbst unter relaxten Criteria zeigt PBO=1.0 maximales Overfitting-Signal. Die statistische Schwäche kommt primär aus dem Verhältnis (86 Trials vs 6 OOS-Splits) — Multi-Testing-Sample-Size-Problem, kein Parameter-Cap-Problem. Welle W4.5 (Cap-Erweiterung) würde primär die TPE-Region verschieben; PBO-Diagnose würde sich kaum ändern.
+
+**Phase-3.1-Tag `v0.5.0-walk-forward-validated` Setzung-Konvention:**
+- Tag dokumentiert die **vollständige Statistical-Validation-Pipeline als Engineering-Asset**, nicht einen Production-Default
+- Ichimoku bleibt Phase-3-Optimizer-Lab-Kandidat (analog BB+RSI/UT-Bot), nicht produktiver Default
+- Bemerkenswert: Top-2 DSR-Trials sind beide aus W3a (688, 266) — Parametersätze AUSSERHALB des TPE-Suchraums (`adx_threshold=43.06` > TPE-Cap=38). Welle-W3.5-Cap-Hypothese in W4 bestätigt, aber PBO-Diagnose macht Cap-Erweiterung obsolet.
+
+**Engineering-Assets aus Welle W1–W4 (wiederverwendbar für jede zukünftige Strategie):**
+- `optimizer/walk_forward.rs` (Rolling-Window-Splitter + Trial-Runner + 3 Stability-Score-Methoden)
+- `optimizer/tpe.rs` (Rust-native TPE mit Box-Muller KDE, warm_start, Builder-Pattern)
+- `optimizer/stat_gates.rs` (PBO via CSCV + DSR via Bailey-2014 closed-form)
+- 4 CLI-Examples: `walk_forward_replay`, `tpe_walk_forward_run`, `stat_gates_run` + Bestand `production_sweep`/`sweep_benchmark`
+- Reproducibility-Pins: cross-process Determinismus, regression-Tests gegen Stale-Binary-Drift
+
+**Phase-3.2-Empfehlung (Backlog):**
+1. **BB+RSI + UT-Bot Phase-3.0.5-Strukturanpassung** (TF-Check 4h vs 1h, Fee-Realismus, Maker-Variant): Bestand-Empfehlung aus Welle-O2-Konsolidierung. NICHT durch Welle-W1–W4 obsolet.
+2. **Spec §13.7-Update für BTC-WR-Realismus** (statt Forex-Bänder 50-60 % auf BTC 30-40 %): parallel zur Strukturanpassung.
+3. **Alternative Strategy-Discovery aus XLSX-Ranking**: Optional, sobald BB+RSI/UT-Bot-Strukturanpassung Pool erweitert.
+4. **App-UI-Integration der Pipeline-Outputs** (Welle O3 deferred): die Walk-Forward + TPE + PBO/DSR-Outputs sind production-grade Engineering-Assets — UI muss diese verlässlich für jede zukünftige Strategie anzeigen können.
+
+---
+
 ## 5. Phase 3 — Optimizer-Loop
 
 ### 5.1 Entscheidungsfrage: Rust-intern vs. Hermes/Auto-Research
