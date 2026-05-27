@@ -172,6 +172,37 @@ class RiskManager extends ChangeNotifier {
     await saveConfig(_config.copyWith(killSwitchActive: false));
   }
 
+  // ─── Live-Trading toggle (Welle B4.4) ───────────────────────────────────
+
+  /// True iff the persisted `liveTradingEnabled` flag is set. Convenience
+  /// for UI gating — equivalent to `config.liveTradingEnabled`.
+  bool get liveTradingEnabled => _config.liveTradingEnabled;
+
+  /// Flip the live-trading toggle ON, persist, and broadcast. The
+  /// kill-switch retains precedence: calling `enableLiveTrading` while
+  /// the kill-switch is active is a logged no-op, never a state flip.
+  /// Idempotent — calling twice with the toggle already on is a no-op.
+  Future<void> enableLiveTrading() async {
+    if (_config.killSwitchActive) {
+      AppLog.warn(_tag,
+          'enableLiveTrading ignored — kill switch is active');
+      return;
+    }
+    if (_config.liveTradingEnabled) return; // idempotent
+    AppLog.warn(_tag, 'Live trading enabled');
+    await saveConfig(_config.copyWith(liveTradingEnabled: true));
+  }
+
+  /// Flip the live-trading toggle OFF, persist, broadcast. Always
+  /// permitted — the safety path. The `reason` is surfaced in the
+  /// `AppLog.warn` entry so a post-mortem can distinguish a manual
+  /// disable from an eligibility-loss auto-disable.
+  Future<void> disableLiveTrading({String reason = 'manual'}) async {
+    if (!_config.liveTradingEnabled) return; // idempotent
+    AppLog.warn(_tag, 'Live trading disabled: $reason');
+    await saveConfig(_config.copyWith(liveTradingEnabled: false));
+  }
+
   // ─── Internals ──────────────────────────────────────────────────────────
 
   /// Drawdown vs. session peak — peak is the max of (initialBalance, any

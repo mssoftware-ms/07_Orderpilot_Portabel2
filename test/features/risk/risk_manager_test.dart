@@ -344,4 +344,118 @@ void main() {
       expect(notifications, 1);
     });
   });
+
+  group('live trading toggle — Welle B4.4', () {
+    test('default state is off and exposes via liveTradingEnabled getter',
+        () async {
+      final manager = RiskManager();
+      await manager.loadConfig();
+      expect(manager.liveTradingEnabled, isFalse);
+      expect(manager.config.liveTradingEnabled, isFalse);
+    });
+
+    test('enableLiveTrading flips state, persists across instances, logs warn',
+        () async {
+      final manager = RiskManager();
+      await manager.loadConfig();
+      await manager.enableLiveTrading();
+      expect(manager.liveTradingEnabled, isTrue);
+
+      final fresh = RiskManager();
+      await fresh.loadConfig();
+      expect(fresh.liveTradingEnabled, isTrue,
+          reason: 'persisted across instances — restart re-arms');
+
+      final warns = AppLog.instance.entries.where((e) =>
+          e.level == LogLevel.warning &&
+          e.tag == 'RiskManager' &&
+          e.message.contains('Live trading enabled'));
+      expect(warns, isNotEmpty);
+    });
+
+    test('enableLiveTrading is idempotent — no duplicate notify', () async {
+      final manager = RiskManager();
+      await manager.loadConfig();
+      await manager.enableLiveTrading();
+      var notifications = 0;
+      manager.addListener(() => notifications++);
+      await manager.enableLiveTrading();
+      expect(notifications, 0,
+          reason: 'second call is a no-op, must not broadcast');
+    });
+
+    test(
+        'enableLiveTrading is a logged no-op when the kill switch is active',
+        () async {
+      final manager = RiskManager();
+      await manager.loadConfig();
+      await manager.activateKillSwitch(reason: 'manual');
+      AppLog.instance.clear();
+      await manager.enableLiveTrading();
+      expect(manager.liveTradingEnabled, isFalse,
+          reason: 'kill switch must veto an enable attempt');
+
+      final warns = AppLog.instance.entries.where((e) =>
+          e.level == LogLevel.warning &&
+          e.tag == 'RiskManager' &&
+          e.message.contains('kill switch is active'));
+      expect(warns, isNotEmpty,
+          reason: 'the veto must surface in the log so the user sees it');
+    });
+
+    test('disableLiveTrading flips back off and includes the reason in the log',
+        () async {
+      final manager = RiskManager();
+      await manager.loadConfig();
+      await manager.enableLiveTrading();
+      AppLog.instance.clear();
+      await manager.disableLiveTrading(reason: 'Eligibility lost');
+      expect(manager.liveTradingEnabled, isFalse);
+
+      final warns = AppLog.instance.entries.where((e) =>
+          e.level == LogLevel.warning &&
+          e.tag == 'RiskManager' &&
+          e.message.contains('Live trading disabled') &&
+          e.message.contains('Eligibility lost'));
+      expect(warns, isNotEmpty,
+          reason: 'reason must be surfaced so post-mortems can distinguish '
+              'manual disable from auto-disable');
+    });
+
+    test('disableLiveTrading default reason is "manual"', () async {
+      final manager = RiskManager();
+      await manager.loadConfig();
+      await manager.enableLiveTrading();
+      AppLog.instance.clear();
+      await manager.disableLiveTrading();
+
+      final warns = AppLog.instance.entries.where((e) =>
+          e.level == LogLevel.warning &&
+          e.tag == 'RiskManager' &&
+          e.message.contains('Live trading disabled') &&
+          e.message.contains('manual'));
+      expect(warns, isNotEmpty);
+    });
+
+    test('disableLiveTrading is idempotent when already off', () async {
+      final manager = RiskManager();
+      await manager.loadConfig();
+      var notifications = 0;
+      manager.addListener(() => notifications++);
+      await manager.disableLiveTrading(reason: 'noop');
+      expect(notifications, 0);
+      expect(manager.liveTradingEnabled, isFalse);
+    });
+
+    test('disableLiveTrading clears state even when the kill switch is on',
+        () async {
+      // Safety path: even an active kill switch must not block a disable.
+      final manager = RiskManager();
+      await manager.loadConfig();
+      await manager.enableLiveTrading();
+      await manager.activateKillSwitch(reason: 'breach');
+      await manager.disableLiveTrading(reason: 'Eligibility lost');
+      expect(manager.liveTradingEnabled, isFalse);
+    });
+  });
 }

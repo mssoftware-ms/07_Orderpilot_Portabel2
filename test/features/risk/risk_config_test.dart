@@ -9,13 +9,15 @@ void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
   group('RiskConfig.defaults', () {
-    test('matches the pre-task brief: 5/3/10/5/false', () {
+    test('matches the pre-task brief: 5/3/10/5/false/false', () {
       final cfg = RiskConfig.defaults();
       expect(cfg.maxPositionRiskPct, 5.0);
       expect(cfg.maxDailyLossPct, 3.0);
       expect(cfg.maxDrawdownPct, 10.0);
       expect(cfg.maxConsecutiveLosses, 5);
       expect(cfg.killSwitchActive, isFalse);
+      expect(cfg.liveTradingEnabled, isFalse,
+          reason: 'live trading must default OFF — never auto-enable');
     });
   });
 
@@ -27,9 +29,26 @@ void main() {
         maxDrawdownPct: 12.0,
         maxConsecutiveLosses: 7,
         killSwitchActive: true,
+        liveTradingEnabled: true,
       );
       final roundtripped = RiskConfig.fromMap(cfg.toMap());
       expect(roundtripped, cfg);
+      expect(roundtripped.liveTradingEnabled, isTrue);
+    });
+
+    test('legacy persisted blob without liveTradingEnabled defaults to false',
+        () {
+      // Pre-B4.4 configs were written without the new key — the loader
+      // must gracefully treat the missing field as false rather than
+      // throwing or surfacing a non-null state.
+      final cfg = RiskConfig.fromMap(<String, dynamic>{
+        'maxPositionRiskPct': 5.0,
+        'maxDailyLossPct': 3.0,
+        'maxDrawdownPct': 10.0,
+        'maxConsecutiveLosses': 5,
+        'killSwitchActive': false,
+      });
+      expect(cfg.liveTradingEnabled, isFalse);
     });
 
     test('tolerates int-typed numerics (JSON decoder rounding)', () {
@@ -68,6 +87,47 @@ void main() {
       expect(updated.maxDailyLossPct, base.maxDailyLossPct);
       expect(updated.maxDrawdownPct, base.maxDrawdownPct);
       expect(updated.maxConsecutiveLosses, base.maxConsecutiveLosses);
+      expect(updated.liveTradingEnabled, base.liveTradingEnabled);
+    });
+
+    test('copyWith(liveTradingEnabled: true) preserves every other field', () {
+      const base = RiskConfig(
+        maxPositionRiskPct: 4.0,
+        maxDailyLossPct: 2.0,
+        maxDrawdownPct: 8.0,
+        maxConsecutiveLosses: 6,
+        killSwitchActive: true,
+      );
+      final updated = base.copyWith(liveTradingEnabled: true);
+      expect(updated.liveTradingEnabled, isTrue);
+      expect(updated.maxPositionRiskPct, base.maxPositionRiskPct);
+      expect(updated.maxDailyLossPct, base.maxDailyLossPct);
+      expect(updated.maxDrawdownPct, base.maxDrawdownPct);
+      expect(updated.maxConsecutiveLosses, base.maxConsecutiveLosses);
+      expect(updated.killSwitchActive, base.killSwitchActive);
+    });
+  });
+
+  group('RiskConfig equality + hash', () {
+    test('liveTradingEnabled participates in equality', () {
+      const a = RiskConfig(
+        maxPositionRiskPct: 5.0,
+        maxDailyLossPct: 3.0,
+        maxDrawdownPct: 10.0,
+        maxConsecutiveLosses: 5,
+        killSwitchActive: false,
+        liveTradingEnabled: false,
+      );
+      const b = RiskConfig(
+        maxPositionRiskPct: 5.0,
+        maxDailyLossPct: 3.0,
+        maxDrawdownPct: 10.0,
+        maxConsecutiveLosses: 5,
+        killSwitchActive: false,
+        liveTradingEnabled: true,
+      );
+      expect(a, isNot(b));
+      expect(a.hashCode, isNot(b.hashCode));
     });
   });
 
@@ -90,11 +150,14 @@ void main() {
         maxDrawdownPct: 15.0,
         maxConsecutiveLosses: 4,
         killSwitchActive: true,
+        liveTradingEnabled: true,
       );
       await cfg.persistTo(prefs);
 
       final loaded = RiskConfig.loadFrom(prefs);
       expect(loaded, cfg);
+      expect(loaded.liveTradingEnabled, isTrue,
+          reason: 'live-trading bit must survive across app restarts');
     });
 
     test('loadFrom degrades to defaults on corrupt JSON', () async {

@@ -48,23 +48,35 @@ class RiskConfig {
   /// `RiskManager.resetKillSwitch`. Persists across app restarts.
   final bool killSwitchActive;
 
+  /// When `true`, the Account-Screen Live-Trading toggle is in the ON
+  /// position. Persists across app restarts so an active live session
+  /// re-arms on next launch — but the post-load eligibility evaluation
+  /// flips it back off the moment any gate is missing (kill-switch
+  /// tripped, exchange disconnected, caps cleared). Set via
+  /// `RiskManager.enableLiveTrading` / `disableLiveTrading`; the
+  /// kill-switch retains precedence and an enable while the switch is
+  /// tripped is a logged no-op, never a state flip.
+  final bool liveTradingEnabled;
+
   const RiskConfig({
     required this.maxPositionRiskPct,
     required this.maxDailyLossPct,
     required this.maxDrawdownPct,
     required this.maxConsecutiveLosses,
     required this.killSwitchActive,
+    this.liveTradingEnabled = false,
   });
 
   /// Conservative defaults matched to the pre-task brief: position risk 5 %,
   /// daily loss 3 %, drawdown 10 %, consecutive losses 5, kill-switch
-  /// inactive. Used when no config has been persisted yet.
+  /// inactive, live-trading off. Used when no config has been persisted yet.
   factory RiskConfig.defaults() => const RiskConfig(
         maxPositionRiskPct: 5.0,
         maxDailyLossPct: 3.0,
         maxDrawdownPct: 10.0,
         maxConsecutiveLosses: 5,
         killSwitchActive: false,
+        liveTradingEnabled: false,
       );
 
   /// Strict-read roundtrip — every numeric field is coerced via `num.toDouble`
@@ -78,6 +90,7 @@ class RiskConfig {
         maxDrawdownPct: (map['maxDrawdownPct'] as num?)?.toDouble() ?? 10.0,
         maxConsecutiveLosses: (map['maxConsecutiveLosses'] as num?)?.toInt() ?? 5,
         killSwitchActive: (map['killSwitchActive'] as bool?) ?? false,
+        liveTradingEnabled: (map['liveTradingEnabled'] as bool?) ?? false,
       );
 
   Map<String, dynamic> toMap() => {
@@ -86,6 +99,7 @@ class RiskConfig {
         'maxDrawdownPct': maxDrawdownPct,
         'maxConsecutiveLosses': maxConsecutiveLosses,
         'killSwitchActive': killSwitchActive,
+        'liveTradingEnabled': liveTradingEnabled,
       };
 
   RiskConfig copyWith({
@@ -94,6 +108,7 @@ class RiskConfig {
     double? maxDrawdownPct,
     int? maxConsecutiveLosses,
     bool? killSwitchActive,
+    bool? liveTradingEnabled,
   }) =>
       RiskConfig(
         maxPositionRiskPct: maxPositionRiskPct ?? this.maxPositionRiskPct,
@@ -101,6 +116,7 @@ class RiskConfig {
         maxDrawdownPct: maxDrawdownPct ?? this.maxDrawdownPct,
         maxConsecutiveLosses: maxConsecutiveLosses ?? this.maxConsecutiveLosses,
         killSwitchActive: killSwitchActive ?? this.killSwitchActive,
+        liveTradingEnabled: liveTradingEnabled ?? this.liveTradingEnabled,
       );
 
   /// Persist this config under [kRiskConfigPrefsKey]. Uses the SharedPreferences
@@ -137,7 +153,8 @@ class RiskConfig {
           maxDailyLossPct == other.maxDailyLossPct &&
           maxDrawdownPct == other.maxDrawdownPct &&
           maxConsecutiveLosses == other.maxConsecutiveLosses &&
-          killSwitchActive == other.killSwitchActive;
+          killSwitchActive == other.killSwitchActive &&
+          liveTradingEnabled == other.liveTradingEnabled;
 
   @override
   int get hashCode => Object.hash(
@@ -146,6 +163,7 @@ class RiskConfig {
         maxDrawdownPct,
         maxConsecutiveLosses,
         killSwitchActive,
+        liveTradingEnabled,
       );
 
   @override
@@ -154,5 +172,6 @@ class RiskConfig {
       'daily=$maxDailyLossPct%, '
       'dd=$maxDrawdownPct%, '
       'consec=$maxConsecutiveLosses, '
-      'kill=$killSwitchActive)';
+      'kill=$killSwitchActive, '
+      'live=$liveTradingEnabled)';
 }
