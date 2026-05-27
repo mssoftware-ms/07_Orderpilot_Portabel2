@@ -12,6 +12,7 @@ import 'features/exchange/bitunix_connection_provider.dart';
 import 'features/paper/paper_trading_provider.dart';
 import 'features/studies/studies_provider.dart';
 import 'ui/themes/app_theme.dart';
+import 'ui/screens/account_screen.dart';
 import 'ui/screens/home_screen.dart';
 import 'ui/screens/chart_screen.dart';
 import 'ui/screens/backtest_screen.dart';
@@ -74,6 +75,7 @@ class AppScaffold extends StatelessWidget {
     StudiesScreen(),
     PaperTradingScreen(),
     StrategyManagementScreen(),
+    AccountScreen(),
   ];
 
   static const _navItems = <_NavItem>[
@@ -83,6 +85,7 @@ class AppScaffold extends StatelessWidget {
     _NavItem(icon: Icons.analytics_outlined, selectedIcon: Icons.analytics, label: 'Studies'),
     _NavItem(icon: Icons.play_circle_outline, selectedIcon: Icons.play_circle_filled, label: 'Paper'),
     _NavItem(icon: Icons.extension_outlined, selectedIcon: Icons.extension, label: 'Strategies'),
+    _NavItem(icon: Icons.account_balance_wallet_outlined, selectedIcon: Icons.account_balance_wallet, label: 'Account'),
   ];
 
   static const double _wideBreakpoint = 720;

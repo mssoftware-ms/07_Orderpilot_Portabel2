@@ -20,6 +20,7 @@ enum AppTab {
   studies,
   paperTrading,
   strategies,
+  account,
 }
 
 class AppNavigation extends ChangeNotifier {
