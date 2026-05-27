@@ -103,6 +103,32 @@ class _ExplodingEngineProvider extends PaperTradingProvider {
   }
 }
 
+/// Scripted KlineBackfillFn — records every invocation and returns
+/// either a pre-canned candle list or throws [error]. Used by the
+/// Welle B4.2-4 gap-recovery tests.
+class _FakeBackfill {
+  final List<({String symbol, String interval, int startMs, int endMs})> calls =
+      [];
+  List<CandleData> response = const [];
+  Object? error;
+
+  Future<List<CandleData>> call({
+    required String symbol,
+    required String interval,
+    required int startMs,
+    required int endMs,
+  }) async {
+    calls.add((
+      symbol: symbol,
+      interval: interval,
+      startMs: startMs,
+      endMs: endMs,
+    ));
+    if (error != null) throw error!;
+    return response;
+  }
+}
+
 // ─── Fixture helpers ───────────────────────────────────────────────────
 
 /// Same deterministic LCG as `dart_rust_ut_bot_parity_test`. 400-bar
@@ -662,6 +688,283 @@ void main() {
 
       expect(provider.session!.orderTrail.length, kOrderTrailCap,
           reason: 'order trail must be ring-buffered at kOrderTrailCap');
+    });
+  });
+
+  group('PaperTradingProvider — Welle B4.2-4 REST gap recovery', () {
+    /// Build a minimal buffer of `count` candles ending at `lastTs` with
+    /// a 60 s spacing — gives the gap-recovery a non-empty anchor and a
+    /// `startMs` strictly before `now`.
+    Future<void> primeBuffer(
+      PaperTradingProvider provider,
+      FakeBinanceKlineStream fake,
+      int count, {
+      required int lastTs,
+    }) async {
+      const intervalMs = 60 * 1000;
+      for (int i = count - 1; i >= 0; i--) {
+        final ts = lastTs - i * intervalMs;
+        final closePrice = 100.0 + (i % 7);
+        fake.emitKline(KlineUpdate(
+          openTime: ts,
+          closeTime: ts + intervalMs - 1,
+          symbol: 'BTCUSDT',
+          interval: '1m',
+          open: closePrice - 0.3,
+          high: closePrice + 1.2,
+          low: closePrice - 1.2,
+          close: closePrice,
+          volume: 1000 + i.toDouble(),
+          isClosed: true,
+        ));
+      }
+      await Future<void>.delayed(Duration.zero);
+    }
+
+    test('reconnect with 3 backfill candles grows buffer and emits count',
+        () async {
+      final fake = FakeBinanceKlineStream();
+      final backfill = _FakeBackfill();
+      // Anchor the buffer's last timestamp far enough in the past that
+      // startMs is guaranteed to be strictly less than now() for the
+      // test's wall-clock.
+      final lastTs =
+          DateTime.now().millisecondsSinceEpoch - 10 * 60 * 1000; // 10 min ago
+      backfill.response = [
+        for (int i = 1; i <= 3; i++)
+          CandleData(
+            timestamp: lastTs + i * 60 * 1000,
+            open: 101,
+            high: 102,
+            low: 100,
+            close: 101.5,
+            volume: 1000.0 + i,
+          ),
+      ];
+      final provider = PaperTradingProvider(
+        streamFactory: () => fake,
+        backfillFn: backfill.call,
+      );
+      addTearDown(provider.dispose);
+
+      await provider.start(config: _fastConfig());
+      await Future<void>.delayed(Duration.zero);
+      await primeBuffer(provider, fake, 5, lastTs: lastTs);
+      final bufBefore = provider.session!.candleBuffer.length;
+
+      fake.emitStatus(KlineConnectionStatus.reconnecting);
+      await Future<void>.delayed(Duration.zero);
+      fake.emitStatus(KlineConnectionStatus.running);
+      // _attemptGapRecovery is fire-and-forget — drain microtasks until
+      // the future settles.
+      for (int i = 0; i < 10; i++) {
+        await Future<void>.delayed(Duration.zero);
+      }
+
+      expect(backfill.calls, hasLength(1));
+      expect(backfill.calls.single.symbol, 'BTCUSDT');
+      expect(backfill.calls.single.startMs, lastTs + 1);
+      expect(provider.session!.candleBuffer.length, bufBefore + 3);
+      final trail = provider.session!.orderTrail;
+      final reconnectMsg = trail
+          .lastWhere((e) => e.kind == OrderEventKind.wsReconnect)
+          .message;
+      expect(reconnectMsg, contains('backfilled 3 candle'));
+    });
+
+    test('REST failure logs warn, keeps session running, emits failure trail',
+        () async {
+      AppLog.instance.clear();
+      final fake = FakeBinanceKlineStream();
+      final backfill = _FakeBackfill()..error = StateError('boom');
+      final lastTs =
+          DateTime.now().millisecondsSinceEpoch - 5 * 60 * 1000;
+      final provider = PaperTradingProvider(
+        streamFactory: () => fake,
+        backfillFn: backfill.call,
+      );
+      addTearDown(provider.dispose);
+
+      await provider.start(config: _fastConfig());
+      await Future<void>.delayed(Duration.zero);
+      await primeBuffer(provider, fake, 3, lastTs: lastTs);
+
+      fake.emitStatus(KlineConnectionStatus.reconnecting);
+      await Future<void>.delayed(Duration.zero);
+      fake.emitStatus(KlineConnectionStatus.running);
+      for (int i = 0; i < 10; i++) {
+        await Future<void>.delayed(Duration.zero);
+      }
+
+      expect(provider.status, PaperSessionStatus.running);
+      final warns = AppLog.instance.entries
+          .where((e) => e.level == LogLevel.warning && e.tag == 'PaperTrading');
+      expect(warns.any((e) => e.message.contains('gap-recovery failed')),
+          isTrue);
+      final trail = provider.session!.orderTrail;
+      final reconnectMsg = trail
+          .lastWhere((e) => e.kind == OrderEventKind.wsReconnect)
+          .message;
+      expect(reconnectMsg, contains('backfill failed'));
+    });
+
+    test('empty backfill response emits "no missed candles" trail',
+        () async {
+      final fake = FakeBinanceKlineStream();
+      final backfill = _FakeBackfill()..response = const [];
+      final lastTs =
+          DateTime.now().millisecondsSinceEpoch - 5 * 60 * 1000;
+      final provider = PaperTradingProvider(
+        streamFactory: () => fake,
+        backfillFn: backfill.call,
+      );
+      addTearDown(provider.dispose);
+
+      await provider.start(config: _fastConfig());
+      await Future<void>.delayed(Duration.zero);
+      await primeBuffer(provider, fake, 3, lastTs: lastTs);
+      final bufBefore = provider.session!.candleBuffer.length;
+
+      fake.emitStatus(KlineConnectionStatus.reconnecting);
+      await Future<void>.delayed(Duration.zero);
+      fake.emitStatus(KlineConnectionStatus.running);
+      for (int i = 0; i < 10; i++) {
+        await Future<void>.delayed(Duration.zero);
+      }
+
+      expect(provider.session!.candleBuffer.length, bufBefore);
+      final reconnectMsg = provider.session!.orderTrail
+          .lastWhere((e) => e.kind == OrderEventKind.wsReconnect)
+          .message;
+      expect(reconnectMsg, contains('no missed candles'));
+    });
+
+    test('dedupes backfill candles that are already in the buffer',
+        () async {
+      final fake = FakeBinanceKlineStream();
+      final backfill = _FakeBackfill();
+      final lastTs =
+          DateTime.now().millisecondsSinceEpoch - 5 * 60 * 1000;
+      // The REST response replays the last two existing candles plus
+      // adds one truly new one. Dedupe must drop the two duplicates.
+      backfill.response = [
+        CandleData(
+          timestamp: lastTs - 60 * 1000,
+          open: 100, high: 101, low: 99, close: 100.5, volume: 100,
+        ),
+        CandleData(
+          timestamp: lastTs,
+          open: 100, high: 101, low: 99, close: 100.5, volume: 100,
+        ),
+        CandleData(
+          timestamp: lastTs + 60 * 1000,
+          open: 101, high: 102, low: 100, close: 101.5, volume: 100,
+        ),
+      ];
+      final provider = PaperTradingProvider(
+        streamFactory: () => fake,
+        backfillFn: backfill.call,
+      );
+      addTearDown(provider.dispose);
+
+      await provider.start(config: _fastConfig());
+      await Future<void>.delayed(Duration.zero);
+      await primeBuffer(provider, fake, 3, lastTs: lastTs);
+      final bufBefore = provider.session!.candleBuffer.length;
+
+      fake.emitStatus(KlineConnectionStatus.reconnecting);
+      await Future<void>.delayed(Duration.zero);
+      fake.emitStatus(KlineConnectionStatus.running);
+      for (int i = 0; i < 10; i++) {
+        await Future<void>.delayed(Duration.zero);
+      }
+
+      expect(provider.session!.candleBuffer.length, bufBefore + 1,
+          reason: 'only the truly new candle survives the dedupe pass');
+      final reconnectMsg = provider.session!.orderTrail
+          .lastWhere((e) => e.kind == OrderEventKind.wsReconnect)
+          .message;
+      expect(reconnectMsg, contains('backfilled 1 candle'));
+    });
+
+    test('startMs >= now (instant reconnect) skips the REST call',
+        () async {
+      final fake = FakeBinanceKlineStream();
+      final backfill = _FakeBackfill();
+      // Anchor the buffer's last timestamp at "now" — pre-check trips,
+      // no REST round-trip happens.
+      final lastTs = DateTime.now().millisecondsSinceEpoch + 5 * 60 * 1000;
+      final provider = PaperTradingProvider(
+        streamFactory: () => fake,
+        backfillFn: backfill.call,
+      );
+      addTearDown(provider.dispose);
+
+      await provider.start(config: _fastConfig());
+      await Future<void>.delayed(Duration.zero);
+      await primeBuffer(provider, fake, 1, lastTs: lastTs);
+
+      fake.emitStatus(KlineConnectionStatus.reconnecting);
+      await Future<void>.delayed(Duration.zero);
+      fake.emitStatus(KlineConnectionStatus.running);
+      for (int i = 0; i < 10; i++) {
+        await Future<void>.delayed(Duration.zero);
+      }
+
+      expect(backfill.calls, isEmpty,
+          reason: 'pre-check must prevent the REST call when there is no '
+              'gap to fill (startMs >= now)');
+      final reconnectMsg = provider.session!.orderTrail
+          .lastWhere((e) => e.kind == OrderEventKind.wsReconnect)
+          .message;
+      expect(reconnectMsg, contains('no gap'));
+    });
+
+    test('second reconnect within cooldown window skips REST', () async {
+      final fake = FakeBinanceKlineStream();
+      final backfill = _FakeBackfill();
+      final lastTs =
+          DateTime.now().millisecondsSinceEpoch - 5 * 60 * 1000;
+      backfill.response = [
+        CandleData(
+          timestamp: lastTs + 60 * 1000,
+          open: 101, high: 102, low: 100, close: 101.5, volume: 100,
+        ),
+      ];
+      final provider = PaperTradingProvider(
+        streamFactory: () => fake,
+        backfillFn: backfill.call,
+      );
+      addTearDown(provider.dispose);
+
+      await provider.start(config: _fastConfig());
+      await Future<void>.delayed(Duration.zero);
+      await primeBuffer(provider, fake, 3, lastTs: lastTs);
+
+      // First reconnect → backfill fires.
+      fake.emitStatus(KlineConnectionStatus.reconnecting);
+      await Future<void>.delayed(Duration.zero);
+      fake.emitStatus(KlineConnectionStatus.running);
+      for (int i = 0; i < 10; i++) {
+        await Future<void>.delayed(Duration.zero);
+      }
+      expect(backfill.calls, hasLength(1));
+
+      // Second reconnect right after → cooldown trips.
+      fake.emitStatus(KlineConnectionStatus.reconnecting);
+      await Future<void>.delayed(Duration.zero);
+      fake.emitStatus(KlineConnectionStatus.running);
+      for (int i = 0; i < 10; i++) {
+        await Future<void>.delayed(Duration.zero);
+      }
+      expect(backfill.calls, hasLength(1),
+          reason: 'cooldown gates the second backfill within 30 s');
+
+      final cooldownEvent = provider.session!.orderTrail.where(
+          (e) =>
+              e.kind == OrderEventKind.wsReconnect &&
+              e.message.contains('cooldown'));
+      expect(cooldownEvent, isNotEmpty);
     });
   });
 

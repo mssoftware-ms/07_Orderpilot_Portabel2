@@ -20,9 +20,11 @@ import 'package:flutter/foundation.dart';
 
 import '../../core/constants/app_constants.dart';
 import '../../core/logging/app_log.dart';
+import '../../core/models/candle.dart';
 import '../../core/models/timeframe.dart';
 import '../../features/backtest/backtest_provider.dart';
 import '../../services/backtest_service.dart';
+import '../../services/binance_api_client.dart';
 import '../../services/binance_websocket.dart';
 import 'order_event.dart';
 import 'paper_position.dart';
@@ -31,6 +33,18 @@ import 'paper_session.dart';
 /// Test-injectable factory for the WS client. Default constructs a
 /// fresh [BinanceKlineStream] per `start()`.
 typedef BinanceKlineStreamFactory = BinanceKlineStream Function();
+
+/// REST gap-recovery hook (Welle B4.2-4). Returns the candles in the
+/// `[startMs, endMs)` window for the given `symbol` / `interval` so the
+/// provider can splice the missing range into the buffer after a WS
+/// reconnect. Tests inject a fake that scripts the response without
+/// hitting Binance.
+typedef KlineBackfillFn = Future<List<CandleData>> Function({
+  required String symbol,
+  required String interval,
+  required int startMs,
+  required int endMs,
+});
 
 /// Cap on the rolling-window engine replay buffer. 500 closed 1-minute
 /// candles ≈ 8 h — enough for any default-period strategy in this
@@ -49,6 +63,12 @@ const String _tag = 'PaperTrading';
 /// the WS endpoint is structurally unavailable (e.g. wrong symbol,
 /// blocked port, DNS poisoned).
 const int kPaperMaxReconnectAttempts = 5;
+
+/// Minimum spacing (ms) between REST gap-recovery calls (Welle B4.2-4).
+/// Back-to-back WS reconnects within this window skip the REST round-trip
+/// and lean on the next tick instead — protects against a reconnect
+/// storm slamming the Binance REST endpoint.
+const int kBackfillCooldownMs = 30000;
 
 /// Subset of Binance's kline-interval whitelist that this app accepts
 /// in step-1. Mirrors the (kline)-doc list at
@@ -70,13 +90,21 @@ const Set<String> kPaperSupportedTimeframes = {
 };
 
 class PaperTradingProvider extends ChangeNotifier {
-  PaperTradingProvider({BinanceKlineStreamFactory? streamFactory})
-      : _streamFactory = streamFactory ??
+  PaperTradingProvider({
+    BinanceKlineStreamFactory? streamFactory,
+    KlineBackfillFn? backfillFn,
+  })  : _streamFactory = streamFactory ??
             (() => BinanceKlineStream(
                   maxReconnectAttempts: kPaperMaxReconnectAttempts,
-                ));
+                )),
+        _backfillFn = backfillFn ?? _defaultBackfill;
 
   final BinanceKlineStreamFactory _streamFactory;
+  final KlineBackfillFn _backfillFn;
+
+  /// Unix ms of the last successful REST gap-recovery — used to gate
+  /// back-to-back reconnects against [kBackfillCooldownMs].
+  int? _lastBackfillMs;
 
   PaperSessionStatus _status = PaperSessionStatus.idle;
   PaperSession? _session;
@@ -410,17 +438,15 @@ class PaperTradingProvider extends ChangeNotifier {
       case KlineConnectionStatus.connecting:
         _setStatus(PaperSessionStatus.connecting);
       case KlineConnectionStatus.running:
-        // Reconnecting → running transition emits a wsReconnect event so
-        // the user can see the gap on the order trail. B4.2-4 will
-        // extend the message with the REST backfill count.
-        if (wasReconnecting) {
-          final session = _session;
-          if (session != null) {
-            _appendOrderEvent(session, OrderEventKind.wsReconnect,
-                'WS reconnected');
-          }
-        }
         _setStatus(PaperSessionStatus.running);
+        // After a reconnect, fire-and-forget the REST gap recovery
+        // (Welle B4.2-4). The wsReconnect order event is emitted inside
+        // [_attemptGapRecovery] so the message can carry the backfill
+        // count (or failure / cooldown reason). New ticks racing the
+        // backfill are tolerated by the sort+dedupe pass on append.
+        if (wasReconnecting) {
+          unawaited(_attemptGapRecovery());
+        }
       case KlineConnectionStatus.reconnecting:
         _setStatus(PaperSessionStatus.reconnecting);
       case KlineConnectionStatus.error:
@@ -432,6 +458,101 @@ class PaperTradingProvider extends ChangeNotifier {
         // Pre-connect snapshot; ignore.
         break;
     }
+  }
+
+  /// Try to splice the missing candles in `[lastTickMs + 1, now)` back
+  /// into the rolling buffer after a WS reconnect (Welle B4.2-4).
+  ///
+  /// Always emits a wsReconnect order event describing the outcome
+  /// (backfilled N, no gap, no missed candles, cooldown skipped, or
+  /// failure). Engine replay runs only when new candles actually
+  /// arrived. REST failures degrade silently so a transient REST
+  /// outage during a reconnect storm never tips the live session into
+  /// the error state.
+  Future<void> _attemptGapRecovery() async {
+    final session = _session;
+    if (session == null) return;
+
+    final now = DateTime.now().millisecondsSinceEpoch;
+    if (_lastBackfillMs != null &&
+        now - _lastBackfillMs! < kBackfillCooldownMs) {
+      _appendOrderEvent(session, OrderEventKind.wsReconnect,
+          'WS reconnected (backfill on cooldown)');
+      notifyListeners();
+      return;
+    }
+
+    if (session.candleBuffer.isEmpty) {
+      // No anchor for a startMs — wait for the next tick instead.
+      _appendOrderEvent(session, OrderEventKind.wsReconnect,
+          'WS reconnected (no anchor)');
+      notifyListeners();
+      return;
+    }
+
+    final lastTickMs = session.candleBuffer.last.timestamp;
+    final startMs = lastTickMs + 1;
+    if (startMs >= now) {
+      // The reconnect was effectively instantaneous — no gap to fill.
+      _appendOrderEvent(session, OrderEventKind.wsReconnect,
+          'WS reconnected (no gap)');
+      notifyListeners();
+      return;
+    }
+
+    List<CandleData> backfilled;
+    try {
+      backfilled = await _backfillFn(
+        symbol: session.config.symbol,
+        interval: session.config.timeframe,
+        startMs: startMs,
+        endMs: now,
+      );
+    } catch (e, st) {
+      AppLog.warn(_tag, 'REST gap-recovery failed: $e', e, st);
+      _appendOrderEvent(session, OrderEventKind.wsReconnect,
+          'WS reconnected (backfill failed)');
+      notifyListeners();
+      return;
+    }
+    _lastBackfillMs = now;
+
+    // Dedupe against existing buffer + sort + cap-trim.
+    final seen = session.candleBuffer.map((c) => c.timestamp).toSet();
+    final unique = backfilled.where((c) => seen.add(c.timestamp)).toList();
+    if (unique.isNotEmpty) {
+      session.candleBuffer.addAll(unique);
+      session.candleBuffer
+          .sort((a, b) => a.timestamp.compareTo(b.timestamp));
+      while (session.candleBuffer.length > kPaperBufferCap) {
+        session.candleBuffer.removeAt(0);
+      }
+      session.tickCount += unique.length;
+    }
+
+    if (unique.isEmpty) {
+      _appendOrderEvent(session, OrderEventKind.wsReconnect,
+          'WS reconnected (no missed candles)');
+      notifyListeners();
+      return;
+    }
+
+    final n = unique.length;
+    _appendOrderEvent(session, OrderEventKind.wsReconnect,
+        'WS reconnected, backfilled $n candle${n == 1 ? '' : 's'}');
+    AppLog.warn(_tag, 'Backfilled $n candles after WS reconnect');
+
+    // Replay-tick: re-run the engine on the merged buffer so equity
+    // curve / open position / closed trades catch up before the next
+    // live WS tick arrives.
+    try {
+      final result = runEngineForBuffer(session);
+      _absorbResult(session, result);
+    } catch (e, st) {
+      AppLog.error(_tag,
+          'Engine replay failed during backfill: $e', e, st);
+    }
+    notifyListeners();
   }
 
   // ─── Internals ──────────────────────────────────────────────────────
@@ -476,6 +597,64 @@ class PaperTradingProvider extends ChangeNotifier {
           'Allowed: ${kPaperSupportedTimeframes.join(", ")}';
     }
     return null;
+  }
+}
+
+/// Default REST gap-recovery — fetches the `[startMs, endMs)` window via
+/// a one-shot [BinanceApiClient]. Used when no override is injected via
+/// [KlineBackfillFn] in the provider constructor (production path).
+Future<List<CandleData>> _defaultBackfill({
+  required String symbol,
+  required String interval,
+  required int startMs,
+  required int endMs,
+}) async {
+  final client = BinanceApiClient();
+  try {
+    final intervalMs = _intervalLabelToMs(interval);
+    final span = endMs - startMs;
+    final estimate = span <= 0 ? 1 : (span ~/ intervalMs) + 1;
+    final limit = estimate.clamp(1, 1000);
+    return await client.fetchHistoricalKlines(
+      symbol: symbol,
+      interval: interval,
+      startTime: startMs,
+      endTime: endMs,
+      limit: limit,
+    );
+  } finally {
+    client.dispose();
+  }
+}
+
+/// Map a Binance interval label to its width in milliseconds.
+/// Falls back to 1 m (60 000 ms) for unknown labels so the backfill
+/// limit estimate stays positive — `kPaperSupportedTimeframes` already
+/// guards against fully unknown values at config-validation time.
+int _intervalLabelToMs(String interval) {
+  switch (interval) {
+    case '1m':
+      return 60 * 1000;
+    case '3m':
+      return 3 * 60 * 1000;
+    case '5m':
+      return 5 * 60 * 1000;
+    case '15m':
+      return 15 * 60 * 1000;
+    case '30m':
+      return 30 * 60 * 1000;
+    case '1h':
+      return 60 * 60 * 1000;
+    case '2h':
+      return 2 * 60 * 60 * 1000;
+    case '4h':
+      return 4 * 60 * 60 * 1000;
+    case '1d':
+      return 24 * 60 * 60 * 1000;
+    case '1w':
+      return 7 * 24 * 60 * 60 * 1000;
+    default:
+      return 60 * 1000;
   }
 }
 
