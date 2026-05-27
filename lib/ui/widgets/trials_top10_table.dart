@@ -90,10 +90,27 @@ class _TrialsTop10TableState extends State<TrialsTop10Table> {
     showModalBottomSheet<void>(
       context: context,
       backgroundColor: AppColors.surfaceCard,
+      // Welle O3-B2.1-2: isScrollControlled + useSafeArea fixes the
+      // Windows-taskbar overlap that hid the bottom-most params/metrics.
+      // The maxWidth cap stops the sheet from spanning a 27" monitor —
+      // 720 px matches the content layout (160 px label column + 560 px
+      // value column with comfortable padding).
+      isScrollControlled: true,
+      useSafeArea: true,
+      constraints: const BoxConstraints(maxWidth: 720),
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
       ),
-      builder: (_) => _TrialDetailSheet(trial: t),
+      builder: (_) => DraggableScrollableSheet(
+        expand: false,
+        initialChildSize: 0.6,
+        minChildSize: 0.3,
+        maxChildSize: 0.95,
+        builder: (_, scrollController) => _TrialDetailSheet(
+          trial: t,
+          scrollController: scrollController,
+        ),
+      ),
     );
   }
 
@@ -227,89 +244,106 @@ class _TrialsTop10TableState extends State<TrialsTop10Table> {
 
 class _TrialDetailSheet extends StatelessWidget {
   final Trial trial;
-  const _TrialDetailSheet({required this.trial});
+
+  /// Threaded down from [DraggableScrollableSheet.builder]. The inner
+  /// [ListView] MUST use this controller — otherwise drag-to-expand
+  /// gestures stay trapped in the ListView and the sheet refuses to
+  /// resize. Tests assert that dragging the handle moves the sheet up.
+  final ScrollController? scrollController;
+
+  const _TrialDetailSheet({required this.trial, this.scrollController});
 
   @override
   Widget build(BuildContext context) {
     final params = trial.params.entries.toList()
       ..sort((a, b) => a.key.compareTo(b.key));
-    return SafeArea(
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(20, 16, 20, 24),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              children: [
-                Container(
-                  padding: const EdgeInsets.symmetric(
-                      horizontal: 8, vertical: 4),
-                  decoration: BoxDecoration(
-                    color: AppColors.accentCyan.withAlpha(40),
-                    borderRadius: BorderRadius.circular(4),
-                  ),
-                  child: Text(
-                    'Trial ${trial.trialId}',
-                    style: const TextStyle(
-                      color: AppColors.accentCyan,
-                      fontSize: 12,
-                      fontWeight: FontWeight.bold,
-                    ),
-                  ),
-                ),
-                const SizedBox(width: 12),
-                Text(
-                  trial.scoreIsFinite
-                      ? 'Score ${trial.score.toStringAsFixed(4)}'
-                      : 'Score — (no trades)',
-                  style: TextStyle(
-                    color: trial.scoreIsFinite
-                        ? AppColors.textPrimary
-                        : AppColors.textMuted,
-                    fontSize: 13,
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
-              ],
+    // The drag handle lives INSIDE the ListView so a press-drag on the
+    // handle routes through the scrollController-driven Scrollable —
+    // DraggableScrollableSheet only resizes when its inner Scrollable
+    // sees the drag (at scrollOffset == 0, upward drag → sheet grows).
+    // A handle outside the ListView would render but not be draggable.
+    return ListView(
+      controller: scrollController,
+      padding: const EdgeInsets.fromLTRB(20, 0, 20, 16),
+      children: [
+        Center(
+          child: Container(
+            key: const Key('trial-detail-drag-handle'),
+            width: 40,
+            height: 4,
+            margin: const EdgeInsets.symmetric(vertical: 8),
+            decoration: BoxDecoration(
+              color: AppColors.divider,
+              borderRadius: BorderRadius.circular(2),
             ),
-            const SizedBox(height: 16),
-            const Text('Parameters',
-                style: TextStyle(
-                  color: AppColors.textSecondary,
-                  fontSize: 11,
-                  fontWeight: FontWeight.w600,
-                  letterSpacing: 0.5,
-                )),
-            const SizedBox(height: 6),
-            for (final entry in params)
-              _kvRow(entry.key, entry.value.toString()),
-            const SizedBox(height: 14),
-            const Text('Metrics',
-                style: TextStyle(
-                  color: AppColors.textSecondary,
-                  fontSize: 11,
-                  fontWeight: FontWeight.w600,
-                  letterSpacing: 0.5,
-                )),
-            const SizedBox(height: 6),
-            _kvRow('total_trades', '${trial.metrics.totalTrades}'),
-            _kvRow('total_pnl', trial.metrics.totalPnl.toStringAsFixed(4)),
-            _kvRow('win_rate', '${trial.metrics.winRate.toStringAsFixed(2)}%'),
-            _kvRow(
-                'sharpe_ratio', trial.metrics.sharpeRatio.toStringAsFixed(4)),
-            _kvRow('max_drawdown_pct',
-                '${trial.metrics.maxDrawdownPct.toStringAsFixed(2)}%'),
-            _kvRow(
-                'profit_factor',
-                trial.metrics.profitFactor.isFinite
-                    ? trial.metrics.profitFactor.toStringAsFixed(4)
-                    : '∞'),
-            _kvRow(
-                'final_equity', trial.metrics.finalEquity.toStringAsFixed(2)),
+          ),
+        ),
+        Row(
+          children: [
+            Container(
+              padding: const EdgeInsets.symmetric(
+                  horizontal: 8, vertical: 4),
+              decoration: BoxDecoration(
+                color: AppColors.accentCyan.withAlpha(40),
+                borderRadius: BorderRadius.circular(4),
+              ),
+              child: Text(
+                'Trial ${trial.trialId}',
+                style: const TextStyle(
+                  color: AppColors.accentCyan,
+                  fontSize: 12,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+            ),
+            const SizedBox(width: 12),
+            Text(
+              trial.scoreIsFinite
+                  ? 'Score ${trial.score.toStringAsFixed(4)}'
+                  : 'Score — (no trades)',
+              style: TextStyle(
+                color: trial.scoreIsFinite
+                    ? AppColors.textPrimary
+                    : AppColors.textMuted,
+                fontSize: 13,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
           ],
         ),
-      ),
+        const SizedBox(height: 16),
+        const Text('Parameters',
+            style: TextStyle(
+              color: AppColors.textSecondary,
+              fontSize: 11,
+              fontWeight: FontWeight.w600,
+              letterSpacing: 0.5,
+            )),
+        const SizedBox(height: 6),
+        for (final entry in params)
+          _kvRow(entry.key, entry.value.toString()),
+        const SizedBox(height: 14),
+        const Text('Metrics',
+            style: TextStyle(
+              color: AppColors.textSecondary,
+              fontSize: 11,
+              fontWeight: FontWeight.w600,
+              letterSpacing: 0.5,
+            )),
+        const SizedBox(height: 6),
+        _kvRow('total_trades', '${trial.metrics.totalTrades}'),
+        _kvRow('total_pnl', trial.metrics.totalPnl.toStringAsFixed(4)),
+        _kvRow('win_rate', '${trial.metrics.winRate.toStringAsFixed(2)}%'),
+        _kvRow('sharpe_ratio', trial.metrics.sharpeRatio.toStringAsFixed(4)),
+        _kvRow('max_drawdown_pct',
+            '${trial.metrics.maxDrawdownPct.toStringAsFixed(2)}%'),
+        _kvRow(
+            'profit_factor',
+            trial.metrics.profitFactor.isFinite
+                ? trial.metrics.profitFactor.toStringAsFixed(4)
+                : '∞'),
+        _kvRow('final_equity', trial.metrics.finalEquity.toStringAsFixed(2)),
+      ],
     );
   }
 

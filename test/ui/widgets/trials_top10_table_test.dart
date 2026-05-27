@@ -120,4 +120,67 @@ void main() {
 
     expect(find.text('— (no trades)'), findsOneWidget);
   });
+
+  // ─── Welle O3-B2.1-2 — draggable detail sheet ─────────────────────────────
+  //
+  // Windows smoke-test surfaced that the previous fixed-height sheet
+  // (50% of screen, no drag) hid params/metrics under the OS taskbar.
+  // The sheet now wraps a DraggableScrollableSheet so the user can pull
+  // it up to 95% of screen height, with a visible drag-handle affordance
+  // and a SafeArea-aware modal envelope.
+  group('Trial detail sheet — draggable (Welle O3-B2.1-2)', () {
+    Future<void> tapAndOpenSheet(WidgetTester tester) async {
+      final trials = [
+        _trial(
+          id: 1,
+          trialId: 42,
+          score: 1.5,
+          params: const {'bb_period': 250.0, 'rsi_oversold': 25.0},
+        ),
+      ];
+      await _pump(tester, trials);
+      await tester.tap(find.text('42'));
+      await tester.pumpAndSettle();
+    }
+
+    testWidgets('tap on row renders a DraggableScrollableSheet',
+        (tester) async {
+      await tapAndOpenSheet(tester);
+      expect(find.byType(DraggableScrollableSheet), findsOneWidget,
+          reason:
+              'detail sheet must wrap its content in a DraggableScrollableSheet '
+              'so the user can pull it up past the taskbar');
+    });
+
+    testWidgets('drag handle is visible at top of sheet', (tester) async {
+      await tapAndOpenSheet(tester);
+      expect(find.byKey(const Key('trial-detail-drag-handle')),
+          findsOneWidget);
+    });
+
+    testWidgets('dragging the handle upward expands the sheet '
+        '(scrollController threading wired)', (tester) async {
+      await tapAndOpenSheet(tester);
+
+      // Baseline: top edge of the sheet content. The drag handle sits
+      // at the very top of the sheet, so its dy doubles as a proxy for
+      // the sheet's top edge.
+      final handle = find.byKey(const Key('trial-detail-drag-handle'));
+      final topBefore = tester.getTopLeft(handle).dy;
+
+      // Drag the handle upward. With the DSS scrollController threaded
+      // into the inner ListView, this must grow the sheet (top moves up,
+      // dy decreases). Without threading, the gesture would be eaten by
+      // the ListView's own scroll and the sheet would not resize.
+      await tester.drag(handle, const Offset(0, -200));
+      await tester.pumpAndSettle();
+
+      final topAfter = tester.getTopLeft(handle).dy;
+      expect(topAfter, lessThan(topBefore),
+          reason:
+              'sheet top must move up after dragging handle up — '
+              'verifies DraggableScrollableSheet is actually wired '
+              'to the inner scrollable via scrollController threading');
+    });
+  });
 }
