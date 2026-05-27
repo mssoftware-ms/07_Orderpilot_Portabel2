@@ -96,3 +96,15 @@ agentdb.rvf.lock
 
 # ─── Phase-3 optimizer raw candle cache (regenerable via tool/fetch_sweep_data.dart) ─
 01_Projectplan/optimizer_data/
+
+# ─── Secrets (Bitunix API keys, future exchange creds) ────────────────────────
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+secrets.json
+**/secrets.json
+
+# ─── Claude / Scheduled-tasks cache (not for repo) ────────────────────────────
+.claude/scheduled_tasks.lock
