@@ -98,6 +98,45 @@ class _AccountScreenState extends State<AccountScreen> {
     setState(() => _pendingRiskConfig = null);
   }
 
+  Future<void> _onResetKillSwitch() async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => AlertDialog(
+        key: const Key('account_reset_kill_switch_dialog'),
+        backgroundColor: AppColors.surfaceCard,
+        title: const Row(
+          children: [
+            Icon(Icons.lock_open, color: AppColors.warningAmber),
+            SizedBox(width: 8),
+            Text('Reset Kill Switch?'),
+          ],
+        ),
+        content: const Text(
+          'Resetting clears the global trading block. Make sure you have '
+          'reviewed the breach reason before re-enabling trading.\n\n'
+          'Proceed?',
+        ),
+        actions: [
+          TextButton(
+            key: const Key('account_reset_kill_switch_cancel'),
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('Cancel'),
+          ),
+          ElevatedButton.icon(
+            key: const Key('account_reset_kill_switch_confirm'),
+            onPressed: () => Navigator.of(ctx).pop(true),
+            icon: const Icon(Icons.lock_open, size: 16),
+            label: const Text('Reset Kill Switch'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+    if (!mounted) return;
+    await context.read<RiskManager>().resetKillSwitch();
+  }
+
   @override
   Widget build(BuildContext context) {
     return Consumer<BitunixConnectionProvider>(
@@ -728,6 +767,27 @@ class _AccountScreenState extends State<AccountScreen> {
                 ),
               ],
             ),
+            // Welle B4.3-4: Reset button surfaces only when the kill switch
+            // is actively tripped. A ConfirmDialog gates the reset itself,
+            // and the persisted state means a misclick can't silently undo
+            // a manual trip from a sister screen.
+            if (risk.killSwitchActive) ...[
+              const SizedBox(height: 12),
+              Row(
+                children: [
+                  ElevatedButton.icon(
+                    key: const Key('account_reset_kill_switch_button'),
+                    onPressed: _onResetKillSwitch,
+                    icon: const Icon(Icons.lock_open, size: 16),
+                    label: const Text('Reset Kill Switch'),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: AppColors.warningAmber,
+                      foregroundColor: Colors.black,
+                    ),
+                  ),
+                ],
+              ),
+            ],
           ],
         ),
       ),

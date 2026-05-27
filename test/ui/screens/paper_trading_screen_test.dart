@@ -12,9 +12,11 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:provider/provider.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:trading_app/features/backtest/backtest_provider.dart';
 import 'package:trading_app/features/paper/paper_session.dart';
 import 'package:trading_app/features/paper/paper_trading_provider.dart';
+import 'package:trading_app/features/risk/risk_manager.dart';
 import 'package:trading_app/services/backtest_service.dart';
 import 'package:trading_app/services/binance_websocket.dart';
 import 'package:trading_app/ui/screens/paper_trading_screen.dart';
@@ -75,7 +77,13 @@ Future<void> _pump(
   WidgetTester tester, {
   required PaperTradingProvider paper,
   required BacktestProvider backtest,
+  RiskManager? risk,
 }) async {
+  // Welle B4.3-4: PaperTradingScreen.StatusCard now also reads RiskManager
+  // to gate the kill-switch button. Tests prime SharedPreferences via the
+  // setUp hook so loadConfig resolves against the mock store.
+  final riskMgr = risk ?? RiskManager();
+  await riskMgr.loadConfig();
   await tester.binding.setSurfaceSize(const Size(1400, 1000));
   await tester.pumpWidget(
     MaterialApp(
@@ -83,6 +91,7 @@ Future<void> _pump(
         providers: [
           ChangeNotifierProvider<PaperTradingProvider>.value(value: paper),
           ChangeNotifierProvider<BacktestProvider>.value(value: backtest),
+          ChangeNotifierProvider<RiskManager>.value(value: riskMgr),
         ],
         child: const PaperTradingScreen(),
       ),
@@ -92,6 +101,12 @@ Future<void> _pump(
 }
 
 void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
+
+  setUp(() {
+    SharedPreferences.setMockInitialValues({});
+  });
+
   group('PaperTradingScreen — idle state', () {
     testWidgets('shows Start button + empty-state card, no Stop', (tester) async {
       final paper = PaperTradingProvider(streamFactory: () => _FakeStream());

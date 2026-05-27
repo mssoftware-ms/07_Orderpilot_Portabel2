@@ -100,14 +100,14 @@ void main() {
     // The Account-Screen is a long scrollable column — a literal drag would
     // need the Risk-Limits card scrolled into view first, and the gesture
     // pixel arithmetic is fragile against future card-ordering changes.
-    void _pushSlider(WidgetTester tester, Key key, double newValue) {
+    void pushSlider(WidgetTester tester, Key key, double newValue) {
       final slider = tester.widget<Slider>(find.byKey(key));
       slider.onChanged!(newValue);
     }
 
     testWidgets('moving the position-risk slider enables Save', (tester) async {
       final created = await _pump(tester);
-      _pushSlider(tester, const Key('risk_slider_max_position'), 2.5);
+      pushSlider(tester, const Key('risk_slider_max_position'), 2.5);
       await tester.pump();
       final saveBtn = tester.widget<ElevatedButton>(
           find.byKey(const Key('account_save_risk_limits_button')));
@@ -122,7 +122,7 @@ void main() {
 
     testWidgets('Save persists the dragged values', (tester) async {
       final created = await _pump(tester);
-      _pushSlider(tester, const Key('risk_slider_drawdown'), 20);
+      pushSlider(tester, const Key('risk_slider_drawdown'), 20);
       await tester.pump();
       // The card sits below the 600-pixel default test viewport — call the
       // button's onPressed directly to avoid scroll-into-view choreography.
@@ -142,7 +142,7 @@ void main() {
 
     testWidgets('Discard reverts the pending state', (tester) async {
       final created = await _pump(tester);
-      _pushSlider(tester, const Key('risk_slider_daily_loss'), 7);
+      pushSlider(tester, const Key('risk_slider_daily_loss'), 7);
       await tester.pump();
       tester
           .widget<TextButton>(
@@ -158,9 +158,9 @@ void main() {
     testWidgets('setting the slider back to the persisted value clears pending',
         (tester) async {
       await _pump(tester);
-      _pushSlider(tester, const Key('risk_slider_max_position'), 2.5);
+      pushSlider(tester, const Key('risk_slider_max_position'), 2.5);
       await tester.pump();
-      _pushSlider(tester, const Key('risk_slider_max_position'), 5.0);
+      pushSlider(tester, const Key('risk_slider_max_position'), 5.0);
       await tester.pump();
       final saveBtn = tester.widget<ElevatedButton>(
           find.byKey(const Key('account_save_risk_limits_button')));

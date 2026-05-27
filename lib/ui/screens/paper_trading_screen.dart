@@ -17,6 +17,7 @@ import '../../features/paper/order_event.dart';
 import '../../features/paper/paper_position.dart';
 import '../../features/paper/paper_session.dart';
 import '../../features/paper/paper_trading_provider.dart';
+import '../../features/risk/risk_manager.dart';
 import '../../services/backtest_service.dart';
 import '../themes/app_theme.dart';
 
@@ -87,6 +88,7 @@ class _StatusCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final risk = context.watch<RiskManager>();
     final status = provider.status;
     final (label, color, icon) = _statusVisual(status);
     final isStartable = !provider.isActive;
@@ -137,6 +139,44 @@ class _StatusCard extends StatelessWidget {
                     onPressed: provider.stop,
                     icon: const Icon(Icons.stop, size: 18),
                     label: const Text('Stop'),
+                  ),
+                const SizedBox(width: 8),
+                // Welle B4.3-4: kill switch — prominent red button in the
+                // top-right of the status card. Hidden when already active
+                // so the user goes to the Account screen to explicitly
+                // reset (intentional friction so a mis-tap can't undo it
+                // from the same screen that just triggered the stop).
+                if (!risk.killSwitchActive)
+                  ElevatedButton.icon(
+                    key: const Key('paper-kill-switch-button'),
+                    onPressed: () => _onKillSwitch(context, risk),
+                    icon: const Icon(Icons.shield_outlined, size: 18),
+                    label: const Text('Kill Switch'),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: AppColors.bearRed,
+                      foregroundColor: Colors.white,
+                    ),
+                  )
+                else
+                  Container(
+                    key: const Key('paper-kill-switch-active-pill'),
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 10, vertical: 6),
+                    decoration: BoxDecoration(
+                      color: AppColors.bearRed.withValues(alpha: 0.18),
+                      border: Border.all(
+                          color: AppColors.bearRed.withValues(alpha: 0.6)),
+                      borderRadius: BorderRadius.circular(20),
+                    ),
+                    child: const Text(
+                      'KILL SWITCH ACTIVE',
+                      style: TextStyle(
+                        color: AppColors.bearRed,
+                        fontSize: 11,
+                        fontWeight: FontWeight.w700,
+                        letterSpacing: 0.5,
+                      ),
+                    ),
                   ),
               ],
             ),
@@ -207,6 +247,49 @@ class _StatusCard extends StatelessWidget {
         duration: const Duration(seconds: 2),
       ),
     );
+  }
+
+  Future<void> _onKillSwitch(BuildContext context, RiskManager risk) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => AlertDialog(
+        key: const Key('paper-kill-switch-confirm-dialog'),
+        backgroundColor: AppColors.surfaceCard,
+        title: const Row(
+          children: [
+            Icon(Icons.warning_amber_rounded, color: AppColors.bearRed),
+            SizedBox(width: 8),
+            Text('Activate Kill Switch?'),
+          ],
+        ),
+        content: const Text(
+          'This stops the active paper session immediately and blocks new '
+          'sessions until you manually reset the kill switch from the '
+          'Account screen.\n\nProceed?',
+        ),
+        actions: [
+          TextButton(
+            key: const Key('paper-kill-switch-cancel'),
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('Cancel'),
+          ),
+          ElevatedButton.icon(
+            key: const Key('paper-kill-switch-confirm'),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: AppColors.bearRed,
+              foregroundColor: Colors.white,
+            ),
+            onPressed: () => Navigator.of(ctx).pop(true),
+            icon: const Icon(Icons.shield_outlined, size: 16),
+            label: const Text('Activate Kill Switch'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+    await risk.activateKillSwitch(reason: 'manual paper-screen');
+    await provider.stop();
   }
 }
 
