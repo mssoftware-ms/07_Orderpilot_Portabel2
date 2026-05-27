@@ -258,18 +258,62 @@ class BacktestProvider extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// Apply specific optimized params from a trial result. BB+RSI-only today
-  /// — silently no-ops on non-BB+RSI strategies (Welle O3-B1 OOS).
+  /// Apply optimizer-trial params for any strategy kind. Switches the
+  /// active [StrategyKind] when [kind] differs from the current one and
+  /// flips [usingOptimizedParams] true. Unknown keys in [trialParams]
+  /// (i.e. keys that no `XxxParams.trialParamKeys` set claims) are
+  /// surfaced via [AppLog.warn] so schema drift between optimizer runs
+  /// stays visible without breaking the apply.
+  void applyTrialAsParams({
+    required StrategyKind kind,
+    required Map<String, double> trialParams,
+  }) {
+    final knownKeys = switch (kind) {
+      StrategyKind.bbRsi => BbRsiParams.trialParamKeys,
+      StrategyKind.utBot => UtBotParams.trialParamKeys,
+      StrategyKind.ichimoku => IchimokuParams.trialParamKeys,
+    };
+    final unknown =
+        trialParams.keys.where((k) => !knownKeys.contains(k)).toList();
+    if (unknown.isNotEmpty) {
+      AppLog.warn(
+        'BacktestProvider',
+        'applyTrialAsParams: ignoring ${unknown.length} unknown key(s) for '
+        '${kind.name}: $unknown',
+      );
+    }
+
+    final Object built = switch (kind) {
+      StrategyKind.bbRsi => BbRsiParams.fromMap(trialParams),
+      StrategyKind.utBot => UtBotParams.fromMap(trialParams),
+      StrategyKind.ichimoku => IchimokuParams.fromMap(trialParams),
+    };
+
+    _config = _config.copyWith(
+      strategyKind: kind,
+      strategy: kind.displayLabel,
+      strategyParams: built,
+    );
+    _usingOptimizedParams = true;
+    notifyListeners();
+  }
+
+  /// Legacy BB+RSI-only optimized-params apply path. Preserved as a
+  /// deprecated wrapper so Welle-O3-B1 callers (and their tests) keep
+  /// working: it still silently no-ops when the active strategy is not
+  /// BB+RSI, matching the original Welle-O3-B1 contract.
+  @Deprecated('Use applyTrialAsParams(kind, trialParams) — supports all strategies')
   void applyOptimizedParams(BbRsiParams params) {
     if (_config.strategyKind != StrategyKind.bbRsi) {
       debugPrint(
           '[BacktestProvider] applyOptimizedParams ignored: '
-          'strategyKind=${_config.strategyKind} (BB+RSI-only path)');
+          'strategyKind=${_config.strategyKind} (BB+RSI-only legacy path)');
       return;
     }
-    _config = _config.copyWith(strategyParams: params);
-    _usingOptimizedParams = true;
-    notifyListeners();
+    applyTrialAsParams(
+      kind: StrategyKind.bbRsi,
+      trialParams: params.toMap(),
+    );
   }
 
   /// Reset strategy params to defaults for the active strategy.

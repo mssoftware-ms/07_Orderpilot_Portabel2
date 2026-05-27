@@ -157,6 +157,90 @@ class BbRsiParams {
     this.adxPeriod = 14,
     this.adxUseDiConfluence = false,
   });
+
+  /// Snake-case keys used by the optimizer studies (`trials.params_json`).
+  /// Order is deterministic for stable diffs in tests.
+  static const Set<String> trialParamKeys = {
+    'bb_period',
+    'bb_stddev',
+    'bb_ma_type',
+    'rsi_period',
+    'rsi_oversold',
+    'rsi_overbought',
+    'swing_lookback_bars',
+    'tp_rr_ratio',
+    'risk_per_trade',
+    'slippage_bps',
+    'adx_filter_enabled',
+    'adx_threshold',
+    'adx_period',
+    'adx_use_di_confluence',
+  };
+
+  /// Serialize to the `Map<String, double>` shape used by optimizer trials.
+  /// Bools are encoded as 0.0/1.0; enums by their `rustParamValue`.
+  Map<String, double> toMap() => {
+        'bb_period': bbPeriod.toDouble(),
+        'bb_stddev': bbStdDev,
+        'bb_ma_type': bbMaType.rustParamValue,
+        'rsi_period': rsiPeriod.toDouble(),
+        'rsi_oversold': rsiOversold,
+        'rsi_overbought': rsiOverbought,
+        'swing_lookback_bars': swingLookbackBars.toDouble(),
+        'tp_rr_ratio': tpRrRatio,
+        'risk_per_trade': riskPerTrade,
+        'slippage_bps': slippageBps,
+        'adx_filter_enabled': adxFilterEnabled ? 1.0 : 0.0,
+        'adx_threshold': adxThreshold,
+        'adx_period': adxPeriod.toDouble(),
+        'adx_use_di_confluence': adxUseDiConfluence ? 1.0 : 0.0,
+      };
+
+  /// Build params from an optimizer trial map. Missing keys fall back to the
+  /// default value for that field so a mismatched-strategy apply (e.g. a
+  /// BB+RSI card consuming a UT-Bot trial) stays well-defined instead of
+  /// throwing. Int-typed fields cast via `.toInt()` (truncate), not
+  /// `.round()` — optimizer values are already integral.
+  factory BbRsiParams.fromMap(Map<String, double> m) {
+    const d = BbRsiParams();
+    return BbRsiParams(
+      bbPeriod: m['bb_period']?.toInt() ?? d.bbPeriod,
+      bbStdDev: m['bb_stddev'] ?? d.bbStdDev,
+      bbMaType: _bbMaTypeFromDouble(m['bb_ma_type']) ?? d.bbMaType,
+      rsiPeriod: m['rsi_period']?.toInt() ?? d.rsiPeriod,
+      rsiOversold: m['rsi_oversold'] ?? d.rsiOversold,
+      rsiOverbought: m['rsi_overbought'] ?? d.rsiOverbought,
+      swingLookbackBars:
+          m['swing_lookback_bars']?.toInt() ?? d.swingLookbackBars,
+      tpRrRatio: m['tp_rr_ratio'] ?? d.tpRrRatio,
+      riskPerTrade: m['risk_per_trade'] ?? d.riskPerTrade,
+      slippageBps: m['slippage_bps'] ?? d.slippageBps,
+      adxFilterEnabled:
+          _boolFromDouble(m['adx_filter_enabled']) ?? d.adxFilterEnabled,
+      adxThreshold: m['adx_threshold'] ?? d.adxThreshold,
+      adxPeriod: m['adx_period']?.toInt() ?? d.adxPeriod,
+      adxUseDiConfluence:
+          _boolFromDouble(m['adx_use_di_confluence']) ?? d.adxUseDiConfluence,
+    );
+  }
+}
+
+/// Decode a 0.0/1.0 double back into a bool. Returns null when the value
+/// is absent so [BbRsiParams.fromMap] / [UtBotParams.fromMap] /
+/// [IchimokuParams.fromMap] can fall back to the default. Treats any
+/// value other than `0.0` as `true` to match `bool(v)`-style semantics
+/// of the Python optimizer side.
+bool? _boolFromDouble(double? v) {
+  if (v == null) return null;
+  return v != 0.0;
+}
+
+/// Decode the `bb_ma_type` enum from its 0.0/1.0 double encoding.
+/// Returns null when absent so the caller can fall back to the default.
+BbMaType? _bbMaTypeFromDouble(double? v) {
+  if (v == null) return null;
+  // Tolerate floating-point noise around the integer encoding.
+  return v < 0.5 ? BbMaType.sma : BbMaType.ema;
 }
 
 // ─── UT Bot Strategy Parameters ─────────────────────────────────────────────
@@ -220,6 +304,80 @@ class UtBotParams {
     this.adxPeriod = 14,
     this.adxUseDiConfluence = false,
   });
+
+  /// Snake-case keys used by the optimizer studies (`trials.params_json`).
+  static const Set<String> trialParamKeys = {
+    'ema_period',
+    'key_value',
+    'atr_period',
+    'smi_length',
+    'smi_k_smoothing',
+    'smi_d_smoothing',
+    'swing_lookback_bars',
+    'tp_rr_ratio',
+    'risk_per_trade',
+    'session_filter_enabled',
+    'session_start_hour_local',
+    'session_end_hour_local',
+    'slippage_bps',
+    'smi_cross_above_zero',
+    'adx_filter_enabled',
+    'adx_threshold',
+    'adx_period',
+    'adx_use_di_confluence',
+  };
+
+  Map<String, double> toMap() => {
+        'ema_period': emaPeriod.toDouble(),
+        'key_value': keyValue,
+        'atr_period': atrPeriod.toDouble(),
+        'smi_length': smiLength.toDouble(),
+        'smi_k_smoothing': smiKSmoothing.toDouble(),
+        'smi_d_smoothing': smiDSmoothing.toDouble(),
+        'swing_lookback_bars': swingLookbackBars.toDouble(),
+        'tp_rr_ratio': tpRrRatio,
+        'risk_per_trade': riskPerTrade,
+        'session_filter_enabled': sessionFilterEnabled ? 1.0 : 0.0,
+        'session_start_hour_local': sessionStartHourLocal.toDouble(),
+        'session_end_hour_local': sessionEndHourLocal.toDouble(),
+        'slippage_bps': slippageBps,
+        'smi_cross_above_zero': smiCrossAboveZero ? 1.0 : 0.0,
+        'adx_filter_enabled': adxFilterEnabled ? 1.0 : 0.0,
+        'adx_threshold': adxThreshold,
+        'adx_period': adxPeriod.toDouble(),
+        'adx_use_di_confluence': adxUseDiConfluence ? 1.0 : 0.0,
+      };
+
+  factory UtBotParams.fromMap(Map<String, double> m) {
+    const d = UtBotParams();
+    return UtBotParams(
+      emaPeriod: m['ema_period']?.toInt() ?? d.emaPeriod,
+      keyValue: m['key_value'] ?? d.keyValue,
+      atrPeriod: m['atr_period']?.toInt() ?? d.atrPeriod,
+      smiLength: m['smi_length']?.toInt() ?? d.smiLength,
+      smiKSmoothing: m['smi_k_smoothing']?.toInt() ?? d.smiKSmoothing,
+      smiDSmoothing: m['smi_d_smoothing']?.toInt() ?? d.smiDSmoothing,
+      swingLookbackBars:
+          m['swing_lookback_bars']?.toInt() ?? d.swingLookbackBars,
+      tpRrRatio: m['tp_rr_ratio'] ?? d.tpRrRatio,
+      riskPerTrade: m['risk_per_trade'] ?? d.riskPerTrade,
+      sessionFilterEnabled:
+          _boolFromDouble(m['session_filter_enabled']) ?? d.sessionFilterEnabled,
+      sessionStartHourLocal:
+          m['session_start_hour_local']?.toInt() ?? d.sessionStartHourLocal,
+      sessionEndHourLocal:
+          m['session_end_hour_local']?.toInt() ?? d.sessionEndHourLocal,
+      slippageBps: m['slippage_bps'] ?? d.slippageBps,
+      smiCrossAboveZero:
+          _boolFromDouble(m['smi_cross_above_zero']) ?? d.smiCrossAboveZero,
+      adxFilterEnabled:
+          _boolFromDouble(m['adx_filter_enabled']) ?? d.adxFilterEnabled,
+      adxThreshold: m['adx_threshold'] ?? d.adxThreshold,
+      adxPeriod: m['adx_period']?.toInt() ?? d.adxPeriod,
+      adxUseDiConfluence:
+          _boolFromDouble(m['adx_use_di_confluence']) ?? d.adxUseDiConfluence,
+    );
+  }
 }
 
 // ─── Ichimoku Strategy Parameters ───────────────────────────────────────────
@@ -276,6 +434,75 @@ class IchimokuParams {
     this.adxPeriod = 14,
     this.adxUseDiConfluence = false,
   });
+
+  /// Snake-case keys used by the optimizer studies (`trials.params_json`).
+  static const Set<String> trialParamKeys = {
+    'tenkan_period',
+    'kijun_period',
+    'senkou_b_period',
+    'shift',
+    'score_threshold',
+    'tp_rr_ratio',
+    'risk_per_trade',
+    'swing_lookback_bars',
+    'session_filter_enabled',
+    'session_start_hour',
+    'session_end_hour',
+    'tz_offset_hours',
+    'slippage_bps',
+    'adx_filter_enabled',
+    'adx_threshold',
+    'adx_period',
+    'adx_use_di_confluence',
+  };
+
+  Map<String, double> toMap() => {
+        'tenkan_period': tenkanPeriod.toDouble(),
+        'kijun_period': kijunPeriod.toDouble(),
+        'senkou_b_period': senkouBPeriod.toDouble(),
+        'shift': shift.toDouble(),
+        'score_threshold': scoreThreshold.toDouble(),
+        'tp_rr_ratio': tpRrRatio,
+        'risk_per_trade': riskPerTrade,
+        'swing_lookback_bars': swingLookbackBars.toDouble(),
+        'session_filter_enabled': sessionFilterEnabled ? 1.0 : 0.0,
+        'session_start_hour': sessionStartHour.toDouble(),
+        'session_end_hour': sessionEndHour.toDouble(),
+        'tz_offset_hours': tzOffsetHours.toDouble(),
+        'slippage_bps': slippageBps,
+        'adx_filter_enabled': adxFilterEnabled ? 1.0 : 0.0,
+        'adx_threshold': adxThreshold,
+        'adx_period': adxPeriod.toDouble(),
+        'adx_use_di_confluence': adxUseDiConfluence ? 1.0 : 0.0,
+      };
+
+  factory IchimokuParams.fromMap(Map<String, double> m) {
+    const d = IchimokuParams();
+    return IchimokuParams(
+      tenkanPeriod: m['tenkan_period']?.toInt() ?? d.tenkanPeriod,
+      kijunPeriod: m['kijun_period']?.toInt() ?? d.kijunPeriod,
+      senkouBPeriod: m['senkou_b_period']?.toInt() ?? d.senkouBPeriod,
+      shift: m['shift']?.toInt() ?? d.shift,
+      scoreThreshold: m['score_threshold']?.toInt() ?? d.scoreThreshold,
+      tpRrRatio: m['tp_rr_ratio'] ?? d.tpRrRatio,
+      riskPerTrade: m['risk_per_trade'] ?? d.riskPerTrade,
+      swingLookbackBars:
+          m['swing_lookback_bars']?.toInt() ?? d.swingLookbackBars,
+      sessionFilterEnabled:
+          _boolFromDouble(m['session_filter_enabled']) ?? d.sessionFilterEnabled,
+      sessionStartHour:
+          m['session_start_hour']?.toInt() ?? d.sessionStartHour,
+      sessionEndHour: m['session_end_hour']?.toInt() ?? d.sessionEndHour,
+      tzOffsetHours: m['tz_offset_hours']?.toInt() ?? d.tzOffsetHours,
+      slippageBps: m['slippage_bps'] ?? d.slippageBps,
+      adxFilterEnabled:
+          _boolFromDouble(m['adx_filter_enabled']) ?? d.adxFilterEnabled,
+      adxThreshold: m['adx_threshold'] ?? d.adxThreshold,
+      adxPeriod: m['adx_period']?.toInt() ?? d.adxPeriod,
+      adxUseDiConfluence:
+          _boolFromDouble(m['adx_use_di_confluence']) ?? d.adxUseDiConfluence,
+    );
+  }
 }
 
 // ─── Internal position tracking ─────────────────────────────────────────────
