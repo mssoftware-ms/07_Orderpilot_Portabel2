@@ -14,6 +14,33 @@ import '../core/logging/app_log.dart';
 import '../core/models/study.dart';
 import '../core/models/trial.dart';
 
+/// Thrown by [StudiesDb.open] when the picked file is not a usable
+/// Optuna-style studies database — either because it is not a SQLite
+/// file at all (random bytes, ruvector.db with a non-SQLite format,
+/// etc.) or because it is a valid SQLite file with the wrong schema
+/// (no `studies` / `trials` tables — e.g. an unrelated app DB sitting
+/// in the picker's start directory).
+///
+/// The [message] is user-friendly and safe to render verbatim in the
+/// UI error banner; it never contains raw `SqfliteFfiException`
+/// payload. Use [cause] / [stackTrace] for forensic logging only.
+class NotAStudiesDbException implements Exception {
+  final String message;
+  final String path;
+  final Object? cause;
+  final StackTrace? stackTrace;
+
+  const NotAStudiesDbException(
+    this.message, {
+    required this.path,
+    this.cause,
+    this.stackTrace,
+  });
+
+  @override
+  String toString() => 'NotAStudiesDbException: $message';
+}
+
 class StudiesDb {
   Database? _db;
   String? _path;
@@ -21,14 +48,53 @@ class StudiesDb {
   bool get isOpen => _db != null;
   String? get path => _path;
 
+  /// Hint embedded in [NotAStudiesDbException.message] pointing the user
+  /// back to the folder where the optimizer CLI writes its studies DBs.
+  static const String _studiesFolderHint =
+      '01_Projectplan/optimizer_studies/';
+
   Future<void> open(String path) async {
     // Tolerate re-open on a different path.
     await close();
-    _db = await databaseFactory.openDatabase(
-      path,
-      options: OpenDatabaseOptions(readOnly: true, singleInstance: false),
-    );
-    _path = path;
+    Database? db;
+    try {
+      db = await databaseFactory.openDatabase(
+        path,
+        options: OpenDatabaseOptions(readOnly: true, singleInstance: false),
+      );
+      // Schema preflight: the studies viewer needs BOTH `studies` and
+      // `trials`. Doing this against sqlite_master (instead of letting
+      // the first business query throw NOTADB) lets us wrap both
+      // "wrong schema" and "not a SQLite file" into the same typed
+      // exception below — the raw SqfliteFfiException never leaks.
+      final tables = await db.rawQuery(
+        "SELECT name FROM sqlite_master "
+        "WHERE type='table' AND name IN ('studies', 'trials')",
+      );
+      final found = tables.map((r) => r['name'] as String).toSet();
+      if (!found.contains('studies') || !found.contains('trials')) {
+        await db.close();
+        throw NotAStudiesDbException(
+          'This SQLite file does not contain an Optuna studies database '
+          '(missing studies/trials tables). Pick a studies-*.db from '
+          '$_studiesFolderHint instead.',
+          path: path,
+        );
+      }
+      _db = db;
+      _path = path;
+    } on NotAStudiesDbException {
+      rethrow;
+    } on DatabaseException catch (e, st) {
+      await db?.close();
+      throw NotAStudiesDbException(
+        'This file is not a readable SQLite database. Pick a studies-*.db '
+        'from $_studiesFolderHint instead.',
+        path: path,
+        cause: e,
+        stackTrace: st,
+      );
+    }
   }
 
   Future<void> close() async {

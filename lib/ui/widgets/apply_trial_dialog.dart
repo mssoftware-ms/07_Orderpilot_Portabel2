@@ -17,6 +17,8 @@
 /// mismatched applies stay well-defined).
 library;
 
+import 'dart:io';
+
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 
@@ -26,6 +28,14 @@ import '../../features/backtest/backtest_provider.dart';
 import '../../features/studies/studies_provider.dart';
 import '../themes/app_theme.dart';
 import 'trials_top10_table.dart';
+
+/// Best-effort initial directory for the apply-trial dialog's file picker.
+/// Mirrors [StudiesScreen]'s `_suggestStudiesDir` — kept local to avoid
+/// pulling the screen-level helper into the widget public surface.
+String? _suggestStudiesDir() {
+  final candidate = Directory('01_Projectplan/optimizer_studies');
+  return candidate.existsSync() ? candidate.absolute.path : null;
+}
 
 /// Snake-case string the optimizer stores in `studies.strategy` for [kind].
 String strategySnakeCase(StrategyKind kind) => switch (kind) {
@@ -115,6 +125,7 @@ class _ApplyTrialDialogState extends State<ApplyTrialDialog> {
         allowedExtensions: const ['db', 'sqlite', 'sqlite3'],
         dialogTitle:
             'Pick an Optuna .db (suggest studies-${strategySnakeCase(widget.targetKind)}*.db)',
+        initialDirectory: _suggestStudiesDir(),
       );
       final path = result?.files.single.path;
       if (path == null) return;

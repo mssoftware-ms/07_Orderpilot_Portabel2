@@ -48,21 +48,26 @@ void main() {
     p.dispose();
   });
 
-  test('loadDb on bad path sets errorMessage and fires AppLog.error',
+  test('loadDb on bad path sets a friendly errorMessage and warns',
       () async {
+    // Welle O3-B2.1 unified the picker error path: any user mispick
+    // (nonexistent file, non-SQLite blob, wrong schema) routes through
+    // NotAStudiesDbException → friendly message + AppLog.warn. Truly
+    // unexpected errors keep the generic catch → AppLog.error.
     final p = StudiesProvider();
     await p.loadDb('/tmp/this/path/does/not/exist.db');
 
     expect(p.isLoading, isFalse);
     expect(p.errorMessage, isNotNull);
-    expect(p.errorMessage, contains('Failed to load DB'));
+    expect(p.errorMessage,
+        contains('01_Projectplan/optimizer_studies'));
+    expect(p.errorMessage, isNot(contains('SqfliteFfiException')));
 
-    // AppLog should have captured an error entry.
-    final errs = AppLog.instance.entries
-        .where((e) => e.level == LogLevel.error)
+    final warns = AppLog.instance.entries
+        .where((e) => e.level == LogLevel.warning)
         .toList();
-    expect(errs, isNotEmpty);
-    expect(errs.first.tag, 'StudiesProvider');
+    expect(warns, isNotEmpty);
+    expect(warns.first.tag, 'StudiesProvider');
     p.dispose();
   });
 
@@ -114,5 +119,60 @@ void main() {
     expect(p.studies.length, 1);
     expect(p.dbPath, fixturePath);
     p.dispose();
+  });
+
+  // ─── Welle O3-B2.1 — friendly error path for wrong-schema DB ──────────────
+  group('loadDb on non-studies DB (Welle O3-B2.1)', () {
+    late Directory tempDir;
+    late String wrongSchemaPath;
+
+    setUp(() async {
+      tempDir = await Directory.systemTemp.createTemp('studies_prov_b21_');
+      wrongSchemaPath = '${tempDir.path}/wrong_schema.db';
+      final seed = await databaseFactory.openDatabase(wrongSchemaPath);
+      await seed.execute('CREATE TABLE foo (id INTEGER PRIMARY KEY)');
+      await seed.close();
+    });
+
+    tearDown(() async {
+      if (tempDir.existsSync()) {
+        await tempDir.delete(recursive: true);
+      }
+    });
+
+    test('sets a friendly errorMessage (no raw SQLite stack)', () async {
+      final p = StudiesProvider();
+      await p.loadDb(wrongSchemaPath);
+
+      expect(p.isLoading, isFalse);
+      expect(p.errorMessage, isNotNull);
+      // Raw SQLite plumbing must NOT leak through to the UI banner.
+      expect(p.errorMessage, isNot(contains('SqfliteFfiException')));
+      expect(p.errorMessage, isNot(contains('code 26')));
+      expect(p.errorMessage, isNot(contains('Causing statement')));
+      // User-friendly hint pointing back to the bundled studies folder.
+      expect(p.errorMessage, contains('01_Projectplan/optimizer_studies'));
+      p.dispose();
+    });
+
+    test('routes via AppLog.warn, not AppLog.error', () async {
+      final p = StudiesProvider();
+      await p.loadDb(wrongSchemaPath);
+
+      // User mispick is not an app bug — must show up as a warning,
+      // never as a hard error in the System Log panel.
+      final errors = AppLog.instance.entries
+          .where((e) => e.level == LogLevel.error)
+          .toList();
+      expect(errors, isEmpty,
+          reason: 'wrong-schema DB is a user mispick, not an app error');
+
+      final warns = AppLog.instance.entries
+          .where((e) => e.level == LogLevel.warning)
+          .toList();
+      expect(warns, isNotEmpty);
+      expect(warns.first.tag, 'StudiesProvider');
+      p.dispose();
+    });
   });
 }

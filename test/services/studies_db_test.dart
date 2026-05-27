@@ -123,4 +123,80 @@ void main() {
       expect(() => fresh.listStudies(), throwsA(isA<StateError>()));
     });
   });
+
+  // ─── Welle O3-B2.1 — friendly schema preflight ────────────────────────────
+  //
+  // open() must reject files that look like SQLite but lack studies/trials
+  // (e.g. ruvector.db sitting next to the optimizer studies in the same
+  // folder) and files that are not SQLite at all (random bytes). In both
+  // cases we want a typed NotAStudiesDbException with a user-friendly
+  // message pointing back to 01_Projectplan/optimizer_studies/ — never
+  // a raw SqfliteFfiException leaking into the UI.
+  group('StudiesDb.open() schema preflight (Welle O3-B2.1)', () {
+    late Directory tempDir;
+
+    setUp(() async {
+      tempDir = await Directory.systemTemp.createTemp('studies_b21_');
+    });
+
+    tearDown(() async {
+      if (tempDir.existsSync()) {
+        await tempDir.delete(recursive: true);
+      }
+    });
+
+    test('throws NotAStudiesDbException for SQLite DB without studies/trials',
+        () async {
+      // Build a fully valid SQLite DB that just happens to have a
+      // different schema (mimics ruvector.db landing in the picker).
+      final wrongSchemaPath = '${tempDir.path}/wrong_schema.db';
+      final seed = await databaseFactory.openDatabase(wrongSchemaPath);
+      await seed.execute('CREATE TABLE foo (id INTEGER PRIMARY KEY)');
+      await seed.close();
+
+      final db = StudiesDb();
+      await expectLater(
+        () => db.open(wrongSchemaPath),
+        throwsA(isA<NotAStudiesDbException>()),
+      );
+      expect(db.isOpen, isFalse,
+          reason: 'failed open must not leave a dangling handle');
+    });
+
+    test('throws NotAStudiesDbException for non-SQLite random bytes', () async {
+      final junkPath = '${tempDir.path}/junk.db';
+      // 256 bytes of garbage — magic header will not match SQLite.
+      final bytes = List<int>.generate(256, (i) => (i * 7 + 13) & 0xFF);
+      await File(junkPath).writeAsBytes(bytes);
+
+      final db = StudiesDb();
+      await expectLater(
+        () => db.open(junkPath),
+        throwsA(isA<NotAStudiesDbException>()),
+      );
+      expect(db.isOpen, isFalse);
+    });
+
+    test('NotAStudiesDbException.message points back to optimizer_studies',
+        () async {
+      final wrongSchemaPath = '${tempDir.path}/wrong_schema_msg.db';
+      final seed = await databaseFactory.openDatabase(wrongSchemaPath);
+      await seed.execute('CREATE TABLE foo (id INTEGER PRIMARY KEY)');
+      await seed.close();
+
+      final db = StudiesDb();
+      try {
+        await db.open(wrongSchemaPath);
+        fail('expected NotAStudiesDbException');
+      } on NotAStudiesDbException catch (e) {
+        // User-friendly: no raw SQLite error code 26, no SqfliteFfiException
+        // class name, and a hint pointing to the bundled studies folder.
+        expect(e.message, isNot(contains('SqfliteFfiException')));
+        expect(e.message, isNot(contains('code 26')));
+        expect(e.message, isNot(contains('Causing statement')));
+        expect(e.message, contains('01_Projectplan/optimizer_studies'));
+        expect(e.path, wrongSchemaPath);
+      }
+    });
+  });
 }

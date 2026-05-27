@@ -70,6 +70,15 @@ class StudiesProvider extends ChangeNotifier {
       await _selectStudyInternal(studies.first);
       _isLoading = false;
       notifyListeners();
+    } on NotAStudiesDbException catch (e, st) {
+      // User picked the wrong file (e.g. ruvector.db, a random
+      // unrelated SQLite, or a non-SQLite blob). Treat as a warning,
+      // not an app error — surface the friendly message verbatim.
+      _errorMessage = e.message;
+      AppLog.warn('StudiesProvider',
+          'loadDb($path) rejected: ${e.message}', e, st);
+      _isLoading = false;
+      notifyListeners();
     } catch (e, st) {
       _errorMessage = 'Failed to load DB: $e';
       AppLog.error('StudiesProvider',

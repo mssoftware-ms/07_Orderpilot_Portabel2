@@ -8,6 +8,8 @@
 /// State lives in [StudiesProvider]; this widget is a thin presenter.
 library;
 
+import 'dart:io';
+
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
@@ -18,6 +20,18 @@ import '../../features/studies/studies_provider.dart';
 import '../themes/app_theme.dart';
 import '../widgets/param_convergence_plot.dart';
 import '../widgets/trials_top10_table.dart';
+
+/// Best-effort initial directory for the studies file picker.
+///
+/// Welle O3-B2.1: the optimizer CLI writes studies-*.db files into
+/// `01_Projectplan/optimizer_studies/` (project-relative — Directory.current
+/// is the project root when launched via `flutter run -d windows`).
+/// Falling back to `null` lets file_picker use the OS default — no crash on
+/// stale paths.
+String? _suggestStudiesDir() {
+  final candidate = Directory('01_Projectplan/optimizer_studies');
+  return candidate.existsSync() ? candidate.absolute.path : null;
+}
 
 class StudiesScreen extends StatelessWidget {
   const StudiesScreen({super.key});
@@ -80,6 +94,7 @@ class _PickerSection extends StatelessWidget {
         type: FileType.custom,
         allowedExtensions: const ['db', 'sqlite', 'sqlite3'],
         dialogTitle: 'Select an Optuna studies .db file',
+        initialDirectory: _suggestStudiesDir(),
       );
       final path = result?.files.single.path;
       if (path == null) return;
