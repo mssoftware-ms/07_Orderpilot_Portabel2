@@ -7,6 +7,147 @@
 /// can reuse them without dragging in the whole backtest engine.
 library;
 
+import 'dart:math' as math;
+
+/// Moving-average basis selector for [calcBollingerBands].
+///
+/// Mirrors `BbMaType` in `backtest_service.dart` (which additionally
+/// carries the Rust-engine 0.0/1.0 param encoding). Kept as a separate
+/// enum here so the indicator layer stays free of strategy-layer
+/// concerns; the engine converts at the call site.
+enum BbBasis { sma, ema }
+
+/// Bollinger Bands triplet — three time-aligned series of length
+/// `closes.length`. Warm-up bars (`i < period - 1`) carry `0.0` to
+/// match the legacy `runBbRsi` initialisation that the Dart↔Rust
+/// parity suite is pinned against; callers must gate reads behind
+/// `i >= period - 1` themselves.
+class BollingerBands {
+  final List<double> upper;
+  final List<double> middle;
+  final List<double> lower;
+
+  const BollingerBands({
+    required this.upper,
+    required this.middle,
+    required this.lower,
+  });
+}
+
+/// Compute the Bollinger Bands series across the close stream.
+///
+/// Bit-for-bit mirror of the inline block that used to live in
+/// `BacktestService.runBbRsi` (extracted in Welle P4C-1 so chart-layer
+/// indicator renderings stay 1e-9 with the engine). Conventions
+/// locked for Dart↔Rust parity:
+///
+/// - The stddev component always uses the **window-SMA** of the last
+///   `period` closes — independent of `basis`. Band-width therefore
+///   stays directly comparable when toggling SMA ↔ EMA, matching the
+///   Rust `calc_bollinger_bands_ema` in
+///   `rust/trading_engine/src/addins/bb_rsi.rs`.
+/// - For [BbBasis.ema] the running basis is maintained cumulatively
+///   (O(N)); the seed at `i = period - 1` is the window-SMA, then
+///   `ema = alpha * close[i] + (1 - alpha) * ema` with
+///   `alpha = 2 / (period + 1)`.
+/// - Population variance (`/ period`, not `/ (period - 1)`) — matches
+///   the engine inline that the parity suite is locked against.
+///
+/// Returns `null` if `period == 0` or `closes.length < period`.
+/// Output arrays have length `closes.length`; warm-up bars
+/// (`i < period - 1`) carry `0.0`.
+BollingerBands? calcBollingerBands(
+  List<double> closes,
+  int period,
+  double stdDev,
+  BbBasis basis,
+) {
+  if (period == 0 || closes.length < period) return null;
+  final n = closes.length;
+  final upper = List<double>.filled(n, 0);
+  final middle = List<double>.filled(n, 0);
+  final lower = List<double>.filled(n, 0);
+  final emaAlpha = 2.0 / (period + 1);
+  double emaBasis = 0.0;
+  for (int i = period - 1; i < n; i++) {
+    double sumWindow = 0;
+    for (int j = i - period + 1; j <= i; j++) {
+      sumWindow += closes[j];
+    }
+    final smaWindow = sumWindow / period;
+    double variance = 0;
+    for (int j = i - period + 1; j <= i; j++) {
+      final diff = closes[j] - smaWindow;
+      variance += diff * diff;
+    }
+    final std = math.sqrt(variance / period);
+
+    final double bbasis;
+    if (basis == BbBasis.sma) {
+      bbasis = smaWindow;
+    } else {
+      if (i == period - 1) {
+        emaBasis = smaWindow;
+      } else {
+        emaBasis = emaAlpha * closes[i] + (1 - emaAlpha) * emaBasis;
+      }
+      bbasis = emaBasis;
+    }
+
+    middle[i] = bbasis;
+    upper[i] = bbasis + stdDev * std;
+    lower[i] = bbasis - stdDev * std;
+  }
+  return BollingerBands(upper: upper, middle: middle, lower: lower);
+}
+
+/// Compute the RSI series using Wilder's smoothing method.
+///
+/// Bit-for-bit mirror of the `_computeRsi` helper that used to live in
+/// `BacktestService` (extracted in Welle P4C-1). Conventions locked
+/// for Dart↔Rust parity (see `calc_rsi` in
+/// `rust/trading_engine/src/addins/bb_rsi.rs`):
+///
+/// - Initial average gain / loss is the simple mean of the first
+///   `period` per-bar changes.
+/// - Wilder smoothing for the remaining bars:
+///   `avgX = (avgX * (period - 1) + currentX) / period`.
+/// - When `avgLoss == 0` the bar's RSI is `100`.
+///
+/// Returns `null` if `period == 0` or `closes.length < period + 1`.
+/// Output array has length `closes.length`; warm-up bars
+/// (`i < period`) carry `50.0` — matches the legacy engine
+/// initialisation the parity suite is pinned against; the engine
+/// `startIdx >= rsiPeriod + 1` guard means warm-up values are never
+/// consumed.
+List<double>? calcRsi(List<double> closes, int period) {
+  if (period == 0 || closes.length < period + 1) return null;
+  final n = closes.length;
+  final out = List<double>.filled(n, 50);
+  double avgGain = 0, avgLoss = 0;
+  for (int i = 1; i <= period; i++) {
+    final change = closes[i] - closes[i - 1];
+    if (change > 0) {
+      avgGain += change;
+    } else {
+      avgLoss += change.abs();
+    }
+  }
+  avgGain /= period;
+  avgLoss /= period;
+  out[period] = avgLoss == 0 ? 100 : 100 - (100 / (1 + avgGain / avgLoss));
+
+  for (int i = period + 1; i < n; i++) {
+    final change = closes[i] - closes[i - 1];
+    final gain = change > 0 ? change : 0.0;
+    final loss = change < 0 ? change.abs() : 0.0;
+    avgGain = (avgGain * (period - 1) + gain) / period;
+    avgLoss = (avgLoss * (period - 1) + loss) / period;
+    out[i] = avgLoss == 0 ? 100 : 100 - (100 / (1 + avgGain / avgLoss));
+  }
+  return out;
+}
+
 /// Compute the swing low: minimum value across the given `lows`.
 ///
 /// Convention (locked for Dart↔Rust parity, see `swing_low` in

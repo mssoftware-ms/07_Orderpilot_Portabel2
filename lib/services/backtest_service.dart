@@ -627,61 +627,27 @@ class BacktestService {
       );
     }
 
-    // Pre-compute indicators
+    // Pre-compute indicators via the P4C-1 helpers in indicators.dart.
+    // The helpers carry the legacy warm-up-init semantics (BB: 0.0, RSI:
+    // 50.0) so the bit-exact Dart↔Rust parity suite stays pinned. The
+    // strategy loop never reads warm-up bars (`startIdx >= bbPeriod`
+    // and `>= rsiPeriod + 1`), but the legacy fill values are kept for
+    // any downstream consumer that does.
     final closes = candles.map((c) => c.close).toList();
-    final bbUpper = List<double>.filled(candles.length, 0);
-    final bbMiddle = List<double>.filled(candles.length, 0);
-    final bbLower = List<double>.filled(candles.length, 0);
-    final rsiValues = List<double>.filled(candles.length, 50);
-
-    // Bollinger Bands.
-    //
-    // The stddev component always uses the window-SMA of the last
-    // `bbPeriod` closes — independent of `bbMaType` — so band-width is
-    // comparable when switching between SMA and EMA basis. Mirrors
-    // `calc_bollinger_bands_ema` in
-    // `rust/trading_engine/src/addins/bb_rsi.rs`.
-    //
-    // For EMA basis the running EMA is maintained cumulatively (O(N))
-    // instead of being recomputed from scratch per bar (O(N²)). The
-    // first valid bar is `bbPeriod - 1`; the EMA at that bar equals the
-    // SMA seed (no recursive step yet).
-    final emaAlpha = 2.0 / (params.bbPeriod + 1);
-    double emaBasis = 0.0;
-    for (int i = params.bbPeriod - 1; i < candles.length; i++) {
-      // Window-SMA stddev (shared between SMA-BB and EMA-BB branches).
-      double sumWindow = 0;
-      for (int j = i - params.bbPeriod + 1; j <= i; j++) {
-        sumWindow += closes[j];
-      }
-      final smaWindow = sumWindow / params.bbPeriod;
-      double variance = 0;
-      for (int j = i - params.bbPeriod + 1; j <= i; j++) {
-        final diff = closes[j] - smaWindow;
-        variance += diff * diff;
-      }
-      final stdDev = math.sqrt(variance / params.bbPeriod);
-
-      final double basis;
-      if (params.bbMaType == BbMaType.sma) {
-        basis = smaWindow;
-      } else {
-        if (i == params.bbPeriod - 1) {
-          // Seed: SMA of the first `bbPeriod` closes
-          emaBasis = smaWindow;
-        } else {
-          emaBasis = emaAlpha * closes[i] + (1 - emaAlpha) * emaBasis;
-        }
-        basis = emaBasis;
-      }
-
-      bbMiddle[i] = basis;
-      bbUpper[i] = basis + params.bbStdDev * stdDev;
-      bbLower[i] = basis - params.bbStdDev * stdDev;
-    }
-
-    // RSI (Wilder's smoothing)
-    _computeRsi(closes, params.rsiPeriod, rsiValues);
+    final bb = calcBollingerBands(
+      closes,
+      params.bbPeriod,
+      params.bbStdDev,
+      params.bbMaType == BbMaType.sma ? BbBasis.sma : BbBasis.ema,
+    )!;
+    final bbUpper = bb.upper;
+    final bbLower = bb.lower;
+    // The middle band is still computed (and lives on `bb.middle` for the
+    // chart layer) but is no longer consumed by the entry/exit block —
+    // Diff D-11 retired the BB-middle indicator exit; Diff D-06 anchored
+    // the TP to `tpRrRatio * sl_distance` instead of band geometry.
+    final rsiValues = calcRsi(closes, params.rsiPeriod) ??
+        List<double>.filled(candles.length, 50);
 
     // ── Welle R2-2 ADX regime filter pre-compute ───────────────────────
     // Pre-compute ADX/+DI/-DI series ONCE when the filter is enabled.
@@ -1950,34 +1916,4 @@ class BacktestService {
     );
   }
 
-  /// Compute RSI using Wilder's smoothing method.
-  static void _computeRsi(
-      List<double> closes, int period, List<double> output) {
-    if (closes.length < period + 1) return;
-
-    // Initial average gain/loss
-    double avgGain = 0, avgLoss = 0;
-    for (int i = 1; i <= period; i++) {
-      final change = closes[i] - closes[i - 1];
-      if (change > 0) {
-        avgGain += change;
-      } else {
-        avgLoss += change.abs();
-      }
-    }
-    avgGain /= period;
-    avgLoss /= period;
-
-    output[period] = avgLoss == 0 ? 100 : 100 - (100 / (1 + avgGain / avgLoss));
-
-    // Wilder's smoothing
-    for (int i = period + 1; i < closes.length; i++) {
-      final change = closes[i] - closes[i - 1];
-      final gain = change > 0 ? change : 0.0;
-      final loss = change < 0 ? change.abs() : 0.0;
-      avgGain = (avgGain * (period - 1) + gain) / period;
-      avgLoss = (avgLoss * (period - 1) + loss) / period;
-      output[i] = avgLoss == 0 ? 100 : 100 - (100 / (1 + avgGain / avgLoss));
-    }
-  }
 }
