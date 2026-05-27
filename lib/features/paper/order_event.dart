@@ -30,6 +30,11 @@ enum OrderEventKind {
   sessionStarted,
   sessionStopped,
   wsReconnect,
+
+  /// Welle B4.3-2: emitted when the [RiskManager] gate rejected a
+  /// would-be position open. The position is *not* opened and the
+  /// session stays running so the strategy can keep signalling.
+  riskBlocked,
 }
 
 @immutable

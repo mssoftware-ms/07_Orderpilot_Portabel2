@@ -714,6 +714,8 @@ String _labelFor(OrderEventKind k) {
       return 'STOP';
     case OrderEventKind.wsReconnect:
       return 'RECONNECT';
+    case OrderEventKind.riskBlocked:
+      return 'RISK BLOCK';
   }
 }
 
@@ -726,6 +728,7 @@ Color _colorFor(OrderEventKind k) {
     case OrderEventKind.slHit:
       return AppColors.bearRed;
     case OrderEventKind.wsReconnect:
+    case OrderEventKind.riskBlocked:
       return AppColors.warningAmber;
     case OrderEventKind.sessionStarted:
     case OrderEventKind.sessionStopped:

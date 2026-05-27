@@ -46,7 +46,7 @@ void main() {
       // to consciously bump this assertion. Persisted serialisations
       // (none today, but the Phase-4 audit log will probably add one)
       // depend on this stability.
-      expect(OrderEventKind.values, hasLength(8));
+      expect(OrderEventKind.values, hasLength(9));
       expect(OrderEventKind.values, contains(OrderEventKind.signalReceived));
       expect(OrderEventKind.values, contains(OrderEventKind.positionOpened));
       expect(OrderEventKind.values, contains(OrderEventKind.positionClosed));
@@ -55,6 +55,9 @@ void main() {
       expect(OrderEventKind.values, contains(OrderEventKind.sessionStarted));
       expect(OrderEventKind.values, contains(OrderEventKind.sessionStopped));
       expect(OrderEventKind.values, contains(OrderEventKind.wsReconnect));
+      // Welle B4.3-2: risk-blocked event surfaces gate breaches in the
+      // order trail without killing the session.
+      expect(OrderEventKind.values, contains(OrderEventKind.riskBlocked));
     });
 
     test('kOrderTrailCap pins the ring-buffer capacity at 100', () {

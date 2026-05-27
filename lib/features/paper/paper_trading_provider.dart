@@ -26,6 +26,8 @@ import '../../features/backtest/backtest_provider.dart';
 import '../../services/backtest_service.dart';
 import '../../services/binance_api_client.dart';
 import '../../services/binance_websocket.dart';
+import '../risk/risk_assessment.dart';
+import '../risk/risk_manager.dart';
 import 'order_event.dart';
 import 'paper_position.dart';
 import 'paper_session.dart';
@@ -93,14 +95,24 @@ class PaperTradingProvider extends ChangeNotifier {
   PaperTradingProvider({
     BinanceKlineStreamFactory? streamFactory,
     KlineBackfillFn? backfillFn,
+    RiskManager? riskManager,
   })  : _streamFactory = streamFactory ??
             (() => BinanceKlineStream(
                   maxReconnectAttempts: kPaperMaxReconnectAttempts,
                 )),
-        _backfillFn = backfillFn ?? _defaultBackfill;
+        _backfillFn = backfillFn ?? _defaultBackfill,
+        // ignore: prefer_initializing_formals
+        _riskManager = riskManager;
 
   final BinanceKlineStreamFactory _streamFactory;
   final KlineBackfillFn _backfillFn;
+
+  /// Welle B4.3-2: optional risk gate. When null (the default) the
+  /// position-open path is un-gated — preserves the original B4-1/B4-2
+  /// behaviour and keeps the prior test suite green without changes.
+  /// Wired in production via `main.dart` so the Account-Screen sliders
+  /// affect the live paper session.
+  final RiskManager? _riskManager;
 
   /// Unix ms of the last successful REST gap-recovery — used to gate
   /// back-to-back reconnects against [kBackfillCooldownMs].
@@ -338,8 +350,43 @@ class PaperTradingProvider extends ChangeNotifier {
     final prevOpen = session.openPosition;
     final prevClosedCount = session.closedTrades.length;
 
+    // Update closed trades + equity first — those are the engine's own
+    // bookkeeping and not subject to the risk gate (a position that was
+    // already open and just closed must always settle).
     session.closedTrades = List.of(result.trades);
+    session.equityCurve = result.equityCurve;
+    session.equity = result.equityCurve.isNotEmpty
+        ? result.equityCurve.last.equity
+        : session.config.initialBalance;
+
     final snap = result.openPosition;
+    final isNewlyOpened = snap != null &&
+        (prevOpen == null || prevOpen.openedAt != snap.openedAt);
+
+    // Welle B4.3-2: gate position opens through the optional risk manager.
+    // The gate only applies to *new* opens — a position that was already
+    // open in the previous tick is unaffected so it can close cleanly.
+    if (isNewlyOpened && _riskManager != null) {
+      final assessment = _riskManager.assess(session);
+      if (!assessment.allGatesPass) {
+        final breachLabel = _formatBreachedGates(assessment.breachedGates);
+        AppLog.warn(_tag,
+            'Position open blocked by risk gates: $breachLabel');
+        // Keep openPosition at its previous value (typically null) so the
+        // engine's would-be entry never appears in the UI.
+        session.openPosition = prevOpen;
+        _appendOrderEvent(
+          session,
+          OrderEventKind.riskBlocked,
+          'Position blocked by risk gates: $breachLabel',
+        );
+        // Still emit close deltas — those happened before the engine
+        // tried to re-enter.
+        _emitClosedTradeDeltas(session, prevClosedCount: prevClosedCount);
+        return;
+      }
+    }
+
     if (snap == null) {
       session.openPosition = null;
     } else {
@@ -352,12 +399,16 @@ class PaperTradingProvider extends ChangeNotifier {
         tpPrice: snap.tpPrice,
       );
     }
-    session.equityCurve = result.equityCurve;
-    session.equity = result.equityCurve.isNotEmpty
-        ? result.equityCurve.last.equity
-        : session.config.initialBalance;
 
     _emitTradeEvents(session, prevOpen: prevOpen, prevClosedCount: prevClosedCount);
+  }
+
+  /// Format a set of breached risk gates as a stable, sorted, comma-separated
+  /// label so UI strings and AppLog lines never re-order between calls (the
+  /// underlying [Set] iteration order isn't a contract — sorted is).
+  String _formatBreachedGates(Set<RiskGate> gates) {
+    final names = gates.map((g) => g.name).toList()..sort();
+    return names.join(',');
   }
 
   /// Emit the [OrderEvent] deltas implied by a freshly absorbed engine
@@ -369,6 +420,27 @@ class PaperTradingProvider extends ChangeNotifier {
   void _emitTradeEvents(
     PaperSession session, {
     required PaperPosition? prevOpen,
+    required int prevClosedCount,
+  }) {
+    _emitClosedTradeDeltas(session, prevClosedCount: prevClosedCount);
+
+    final current = session.openPosition;
+    final isNewlyOpened = current != null &&
+        (prevOpen == null || prevOpen.openedAt != current.openedAt);
+    if (isNewlyOpened) {
+      _appendOrderEvent(
+        session,
+        OrderEventKind.positionOpened,
+        '${current.direction} opened @ ${current.entryPrice.toStringAsFixed(2)}',
+      );
+    }
+  }
+
+  /// Emit just the closed-trade portion of the delta. Extracted from
+  /// [_emitTradeEvents] so the risk-blocked path can reuse it without
+  /// also firing a `positionOpened` event for the rejected entry.
+  void _emitClosedTradeDeltas(
+    PaperSession session, {
     required int prevClosedCount,
   }) {
     final newClosedCount = session.closedTrades.length;
@@ -388,17 +460,6 @@ class PaperTradingProvider extends ChangeNotifier {
         _appendOrderEvent(session, OrderEventKind.tpHit,
             'TP hit @ ${t.exitPrice.toStringAsFixed(2)}');
       }
-    }
-
-    final current = session.openPosition;
-    final isNewlyOpened = current != null &&
-        (prevOpen == null || prevOpen.openedAt != current.openedAt);
-    if (isNewlyOpened) {
-      _appendOrderEvent(
-        session,
-        OrderEventKind.positionOpened,
-        '${current.direction} opened @ ${current.entryPrice.toStringAsFixed(2)}',
-      );
     }
   }
 
