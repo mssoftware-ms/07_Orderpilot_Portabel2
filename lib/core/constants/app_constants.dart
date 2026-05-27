@@ -4,6 +4,11 @@ class AppConstants {
   static const String binanceBaseUrl = 'https://api.binance.com';
   static const String binanceKlinesEndpoint = '/api/v3/klines';
 
+  /// Bitunix Futures REST base URL — see Welle P4P (Phase-4-Prep) Step-1.
+  /// Auth-Tests run against production (no public testnet); only read-only
+  /// calls are exercised. Live order paths are gated behind Welle B4 Step-3.
+  static const String bitunixFuturesBaseUrl = 'https://fapi.bitunix.com';
+
   // Default trading parameters
   static const double defaultInitialCapital = 10000.0;
   static const double defaultFeeRate = 0.0006; // Bitunix VIP0 taker
