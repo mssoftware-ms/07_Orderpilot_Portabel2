@@ -20,6 +20,7 @@ import 'package:provider/provider.dart';
 import '../../core/models/bitunix_models.dart';
 import '../../features/exchange/bitunix_connection_provider.dart';
 import '../../features/paper/paper_trading_provider.dart';
+import '../../features/risk/live_mode_eligibility.dart';
 import '../../features/risk/risk_assessment.dart';
 import '../../features/risk/risk_config.dart';
 import '../../features/risk/risk_manager.dart';
@@ -165,7 +166,7 @@ class _AccountScreenState extends State<AccountScreen> {
                     _positionsCard(context, provider.positions),
                   ],
                   const SizedBox(height: 12),
-                  _liveTradingCard(context, provider),
+                  _liveTradingCard(context, provider, risk),
                   const SizedBox(height: 12),
                   _riskLimitsCard(context, risk),
                   const SizedBox(height: 12),
@@ -462,11 +463,17 @@ class _AccountScreenState extends State<AccountScreen> {
   }
 
   Widget _liveTradingCard(
-      BuildContext context, BitunixConnectionProvider provider) {
+      BuildContext context,
+      BitunixConnectionProvider provider,
+      RiskManager risk) {
     // Hardcoded false — the provider's getter is `false` by contract and
     // the switch has `onChanged: null`. Both layers must agree before a
     // future wave can flip live mode on.
     const liveEnabled = false;
+    final eligibility = LiveModeEligibility.evaluate(
+      riskManager: risk,
+      exchangeProvider: provider,
+    );
     return Card(
       key: const Key('account_live_trading_card'),
       child: Padding(
@@ -516,10 +523,18 @@ class _AccountScreenState extends State<AccountScreen> {
                 // CRITICAL: onChanged stays `null` so the switch is
                 // structurally non-interactable. A widget regression test
                 // pins this contract — if anyone removes the `null` here,
-                // the test must fail.
+                // the test must fail. Welle B4.3-5 only reports
+                // eligibility; the actual enable lands in a follow-up
+                // wave behind an explicit user confirmation.
                 onChanged: null,
               ),
             ),
+            // Welle B4.3-5: three-condition eligibility readout. Goes
+            // ✓/✗ under the still-disabled switch so the user can see
+            // exactly what's missing before the future wave flips the
+            // toggle on.
+            const SizedBox(height: 8),
+            _eligibilityReadout(eligibility),
             // Belt-and-braces: even if the provider getter ever flips
             // (it shouldn't), the switch is still hard-coded to `false`
             // via `liveEnabled`. Surface a status line so a developer
@@ -537,6 +552,77 @@ class _AccountScreenState extends State<AccountScreen> {
             ),
           ],
         ),
+      ),
+    );
+  }
+
+  Widget _eligibilityReadout(LiveModeEligibility e) {
+    return Container(
+      key: const Key('account_live_mode_eligibility'),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      decoration: BoxDecoration(
+        color: AppColors.surfaceElevated,
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: AppColors.border),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text(
+            'Prerequisites for the future live toggle',
+            style: TextStyle(
+              color: AppColors.textMuted,
+              fontSize: 11,
+              fontWeight: FontWeight.w600,
+              letterSpacing: 0.3,
+            ),
+          ),
+          const SizedBox(height: 6),
+          _eligibilityRow(
+            testKey: 'eligibility_risk_limits',
+            label: 'Risk limits configured',
+            active: e.allRiskGatesActive,
+          ),
+          _eligibilityRow(
+            testKey: 'eligibility_exchange',
+            label: 'Exchange connected',
+            active: e.exchangeConnected,
+          ),
+          _eligibilityRow(
+            testKey: 'eligibility_kill_switch',
+            label: 'Kill-switch inactive',
+            active: e.killSwitchInactive,
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _eligibilityRow({
+    required String testKey,
+    required String label,
+    required bool active,
+  }) {
+    final color = active ? AppColors.bullGreen : AppColors.warningAmber;
+    return Padding(
+      key: Key(testKey),
+      padding: const EdgeInsets.symmetric(vertical: 3),
+      child: Row(
+        children: [
+          Icon(
+            active ? Icons.check_circle : Icons.cancel,
+            color: color,
+            size: 16,
+          ),
+          const SizedBox(width: 8),
+          Text(
+            label,
+            style: const TextStyle(
+              color: AppColors.textSecondary,
+              fontSize: 12,
+            ),
+          ),
+        ],
       ),
     );
   }
