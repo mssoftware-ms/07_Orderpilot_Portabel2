@@ -45,6 +45,24 @@ class PaperConfig {
   final double initialBalance;
   final double feeRate;
 
+  /// Session-level one-side slippage in basis points (Welle B4.2-2).
+  ///
+  /// Default 5 bps reflects Binance Spot retail-fill quality for BTC/ETH
+  /// at typical order sizes. The value is merged into the active
+  /// `strategyParams.slippageBps` at `start()` so every strategy uses
+  /// the same paper-trading-specific slippage regardless of what the
+  /// user picked in the backtest tab.
+  final double slippageBps;
+
+  /// Lower bound the UI slider exposes for [slippageBps] (Welle B4.2-2).
+  static const double minSlippageBps = 0.0;
+
+  /// Upper bound the UI slider exposes for [slippageBps] (Welle B4.2-2).
+  static const double maxSlippageBps = 20.0;
+
+  /// Default value for [slippageBps] — 5 bps for Binance Spot retail.
+  static const double defaultSlippageBps = 5.0;
+
   const PaperConfig({
     required this.symbol,
     required this.timeframe,
@@ -52,6 +70,7 @@ class PaperConfig {
     required this.strategyParams,
     required this.initialBalance,
     required this.feeRate,
+    this.slippageBps = defaultSlippageBps,
   });
 
   /// Default starter config — BTCUSDT 1m, BB+RSI defaults, $10k, Bitunix
@@ -69,6 +88,9 @@ class PaperConfig {
   /// Mirror a [BacktestConfig] into a [PaperConfig] — invoked by
   /// PaperTradingProvider.syncFromBacktest. The two configs are NOT
   /// merged: a sync-then-start replaces the paper config wholesale.
+  /// Slippage is paper-trading-specific (5 bps default for Binance Spot
+  /// retail) and not pulled from the backtest config — the user sets it
+  /// via the dedicated session slider.
   factory PaperConfig.fromBacktestConfig(BacktestConfig source) => PaperConfig(
         symbol: source.symbol,
         timeframe: source.timeframe,
@@ -85,6 +107,7 @@ class PaperConfig {
     Object? strategyParams,
     double? initialBalance,
     double? feeRate,
+    double? slippageBps,
   }) =>
       PaperConfig(
         symbol: symbol ?? this.symbol,
@@ -93,6 +116,7 @@ class PaperConfig {
         strategyParams: strategyParams ?? this.strategyParams,
         initialBalance: initialBalance ?? this.initialBalance,
         feeRate: feeRate ?? this.feeRate,
+        slippageBps: slippageBps ?? this.slippageBps,
       );
 
   @override
@@ -104,7 +128,8 @@ class PaperConfig {
           strategyKind == other.strategyKind &&
           strategyParams == other.strategyParams &&
           initialBalance == other.initialBalance &&
-          feeRate == other.feeRate;
+          feeRate == other.feeRate &&
+          slippageBps == other.slippageBps;
 
   @override
   int get hashCode => Object.hash(
@@ -114,6 +139,7 @@ class PaperConfig {
         strategyParams,
         initialBalance,
         feeRate,
+        slippageBps,
       );
 }
 

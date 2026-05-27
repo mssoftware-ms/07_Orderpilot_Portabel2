@@ -254,4 +254,61 @@ void main() {
       expect(find.text('Reconnecting'), findsOneWidget);
     });
   });
+
+  group('PaperTradingScreen — Welle B4.2-2 slippage slider', () {
+    testWidgets('slippage card visible in idle, slider enabled', (tester) async {
+      final paper = PaperTradingProvider(streamFactory: () => _FakeStream());
+      addTearDown(paper.dispose);
+      final bt = BacktestProvider();
+      addTearDown(bt.dispose);
+
+      await _pump(tester, paper: paper, backtest: bt);
+
+      expect(find.byKey(const Key('paper-slippage-card')), findsOneWidget);
+      expect(find.byKey(const Key('paper-slippage-slider')), findsOneWidget);
+      expect(find.text('5 bps'), findsOneWidget);
+
+      final slider = tester.widget<Slider>(
+          find.byKey(const Key('paper-slippage-slider')));
+      expect(slider.onChanged, isNotNull,
+          reason: 'slider must be enabled while idle so the user can tune '
+              'the session slippage before pressing Start');
+    });
+
+    testWidgets('slider is disabled while running', (tester) async {
+      final fake = _FakeStream();
+      final paper = PaperTradingProvider(streamFactory: () => fake);
+      addTearDown(paper.dispose);
+      final bt = BacktestProvider();
+      addTearDown(bt.dispose);
+
+      await tester.runAsync(() async {
+        await paper.start();
+        await Future<void>.delayed(Duration.zero);
+      });
+      await _pump(tester, paper: paper, backtest: bt);
+
+      final slider = tester.widget<Slider>(
+          find.byKey(const Key('paper-slippage-slider')));
+      expect(slider.onChanged, isNull,
+          reason: 'slider must be disabled while the session is active so '
+              'slippage stays stable for its lifetime');
+    });
+
+    testWidgets('value label reflects pendingSlippageBps mutations',
+        (tester) async {
+      final paper = PaperTradingProvider(streamFactory: () => _FakeStream());
+      addTearDown(paper.dispose);
+      final bt = BacktestProvider();
+      addTearDown(bt.dispose);
+
+      await _pump(tester, paper: paper, backtest: bt);
+      expect(find.text('5 bps'), findsOneWidget);
+
+      paper.setPendingSlippage(12.0);
+      await tester.pump();
+      expect(find.text('12 bps'), findsOneWidget);
+      expect(find.text('5 bps'), findsNothing);
+    });
+  });
 }

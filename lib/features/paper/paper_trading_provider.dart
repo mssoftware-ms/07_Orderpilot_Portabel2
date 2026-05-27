@@ -86,6 +86,12 @@ class PaperTradingProvider extends ChangeNotifier {
   /// hits the sync button at least once.
   PaperConfig? _pendingConfig;
 
+  /// UI-tunable session slippage in basis points (Welle B4.2-2).
+  /// Default 5 bps for Binance Spot retail. Applied by [start] when no
+  /// explicit config is passed; explicit-config callers (tests) keep
+  /// their config's own [PaperConfig.slippageBps].
+  double _pendingSlippageBps = PaperConfig.defaultSlippageBps;
+
   // Active WS plumbing — cleared in [stop] / [dispose].
   BinanceKlineStream? _stream;
   StreamSubscription<KlineUpdate>? _klineSub;
@@ -96,6 +102,7 @@ class PaperTradingProvider extends ChangeNotifier {
   PaperSessionStatus get status => _status;
   PaperSession? get session => _session;
   PaperConfig? get pendingConfig => _pendingConfig;
+  double get pendingSlippageBps => _pendingSlippageBps;
   String? get errorMessage => _errorMessage;
   int get reconnectAttempts => _stream?.reconnectAttempts ?? 0;
 
@@ -116,8 +123,15 @@ class PaperTradingProvider extends ChangeNotifier {
       AppLog.warn(_tag, 'start() ignored — session already active');
       return;
     }
-    final effective =
-        config ?? _pendingConfig ?? PaperConfig.defaults();
+    final base = config ?? _pendingConfig ?? PaperConfig.defaults();
+    // Apply the UI-tunable session slippage only when no explicit config
+    // was passed (test-friendly: explicit configs are honoured verbatim).
+    final withSlippage = config == null
+        ? base.copyWith(slippageBps: _pendingSlippageBps)
+        : base;
+    final mergedParams = _mergeSlippageBps(
+        withSlippage.strategyParams, withSlippage.slippageBps);
+    final effective = withSlippage.copyWith(strategyParams: mergedParams);
     await _hardReset();
     final now = DateTime.now().millisecondsSinceEpoch;
     _session = PaperSession(config: effective, startedAtMs: now);
@@ -174,6 +188,22 @@ class PaperTradingProvider extends ChangeNotifier {
   /// Does not start a session — the user still has to hit "Start".
   void syncFromBacktest(BacktestConfig source) {
     _pendingConfig = PaperConfig.fromBacktestConfig(source);
+    notifyListeners();
+  }
+
+  /// Set the session-level slippage that the next `start()` will apply
+  /// (Welle B4.2-2). Clamped to the [PaperConfig.minSlippageBps] ..
+  /// [PaperConfig.maxSlippageBps] range the UI slider exposes.
+  /// No-op while a session is active so the slippage stays stable for
+  /// the lifetime of the session.
+  void setPendingSlippage(double bps) {
+    if (isActive) return;
+    final clamped = bps.clamp(
+      PaperConfig.minSlippageBps,
+      PaperConfig.maxSlippageBps,
+    );
+    if (clamped == _pendingSlippageBps) return;
+    _pendingSlippageBps = clamped;
     notifyListeners();
   }
 
@@ -366,6 +396,31 @@ class PaperTradingProvider extends ChangeNotifier {
     }
     return null;
   }
+}
+
+/// Re-build the given strategy params with `slippage_bps` overridden to
+/// [slippageBps]. Used by [PaperTradingProvider.start] to push the
+/// session-level slippage into the active strategy params (Welle B4.2-2).
+/// Falls through unchanged when [params] is not one of the three known
+/// strategy parameter classes — defensive future-proofing for Phase-3
+/// additions.
+Object _mergeSlippageBps(Object params, double slippageBps) {
+  if (params is BbRsiParams) {
+    final m = Map<String, double>.from(params.toMap());
+    m['slippage_bps'] = slippageBps;
+    return BbRsiParams.fromMap(m);
+  }
+  if (params is UtBotParams) {
+    final m = Map<String, double>.from(params.toMap());
+    m['slippage_bps'] = slippageBps;
+    return UtBotParams.fromMap(m);
+  }
+  if (params is IchimokuParams) {
+    final m = Map<String, double>.from(params.toMap());
+    m['slippage_bps'] = slippageBps;
+    return IchimokuParams.fromMap(m);
+  }
+  return params;
 }
 
 /// Map a Binance interval label (`1m`, `5m`, …) to the closest

@@ -46,6 +46,8 @@ class PaperTradingScreen extends StatelessWidget {
 
               _StatusCard(provider: provider),
               const SizedBox(height: 12),
+              _SlippageCard(provider: provider),
+              const SizedBox(height: 12),
 
               if (session != null) ...[
                 _ActiveSessionCard(session: session),
@@ -232,6 +234,83 @@ class _StatusDot extends StatelessWidget {
         height: 12,
         decoration: BoxDecoration(color: color, shape: BoxShape.circle),
       );
+}
+
+// ─── Session slippage card ────────────────────────────────────────────────
+
+class _SlippageCard extends StatelessWidget {
+  final PaperTradingProvider provider;
+  const _SlippageCard({required this.provider});
+
+  @override
+  Widget build(BuildContext context) {
+    final isActive = provider.isActive;
+    // While running, show the frozen session value. While idle, show
+    // the live pending value the user is tuning.
+    final live = isActive
+        ? (provider.session?.config.slippageBps ?? provider.pendingSlippageBps)
+        : provider.pendingSlippageBps;
+    final hint = isActive
+        ? 'Locked for the active session'
+        : 'Binance Spot retail default = 5 bps';
+
+    return Card(
+      key: const Key('paper-slippage-card'),
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(16, 12, 16, 12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                const Icon(Icons.swap_horiz,
+                    color: AppColors.accentCyan, size: 16),
+                const SizedBox(width: 6),
+                const Text(
+                  'Session slippage',
+                  style: TextStyle(
+                    color: AppColors.textPrimary,
+                    fontSize: 13,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+                const Spacer(),
+                Text(
+                  '${live.toStringAsFixed(0)} bps',
+                  key: const Key('paper-slippage-value'),
+                  style: const TextStyle(
+                    color: AppColors.accentCyan,
+                    fontSize: 13,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+              ],
+            ),
+            Slider(
+              key: const Key('paper-slippage-slider'),
+              value: live.clamp(
+                PaperConfig.minSlippageBps,
+                PaperConfig.maxSlippageBps,
+              ),
+              min: PaperConfig.minSlippageBps,
+              max: PaperConfig.maxSlippageBps,
+              divisions: 20,
+              onChanged: isActive
+                  ? null
+                  : (v) => provider.setPendingSlippage(v),
+            ),
+            Text(
+              hint,
+              style: const TextStyle(
+                color: AppColors.textMuted,
+                fontSize: 11,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
 }
 
 // ─── Active session card ──────────────────────────────────────────────────

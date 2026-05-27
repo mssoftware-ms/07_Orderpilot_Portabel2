@@ -454,6 +454,102 @@ void main() {
     });
   });
 
+  group('PaperTradingProvider — Welle B4.2-2 slippage', () {
+    test('pendingSlippageBps defaults to 5 bps (Binance Spot retail)',
+        () async {
+      final provider = PaperTradingProvider(
+          streamFactory: () => FakeBinanceKlineStream());
+      addTearDown(provider.dispose);
+
+      expect(provider.pendingSlippageBps, PaperConfig.defaultSlippageBps);
+      expect(provider.pendingSlippageBps, 5.0);
+    });
+
+    test('setPendingSlippage clamps to [0, 20] bps', () async {
+      final provider = PaperTradingProvider(
+          streamFactory: () => FakeBinanceKlineStream());
+      addTearDown(provider.dispose);
+
+      provider.setPendingSlippage(7.5);
+      expect(provider.pendingSlippageBps, 7.5);
+
+      provider.setPendingSlippage(-3.0);
+      expect(provider.pendingSlippageBps, 0.0,
+          reason: 'below-range values clamp to PaperConfig.minSlippageBps');
+
+      provider.setPendingSlippage(99.0);
+      expect(provider.pendingSlippageBps, 20.0,
+          reason: 'above-range values clamp to PaperConfig.maxSlippageBps');
+    });
+
+    test('setPendingSlippage notifies listeners once per real change',
+        () async {
+      final provider = PaperTradingProvider(
+          streamFactory: () => FakeBinanceKlineStream());
+      addTearDown(provider.dispose);
+
+      var notifications = 0;
+      provider.addListener(() => notifications++);
+
+      provider.setPendingSlippage(10.0);
+      provider.setPendingSlippage(10.0); // duplicate value — no-op
+      provider.setPendingSlippage(12.0);
+
+      expect(notifications, 2,
+          reason: 'duplicate-value calls must be no-ops');
+    });
+
+    test('setPendingSlippage is a no-op while the session is active',
+        () async {
+      final fake = FakeBinanceKlineStream();
+      final provider = PaperTradingProvider(streamFactory: () => fake);
+      addTearDown(provider.dispose);
+
+      await provider.start(config: _fastConfig());
+      await Future<void>.delayed(Duration.zero);
+
+      provider.setPendingSlippage(13.0);
+      expect(provider.pendingSlippageBps, PaperConfig.defaultSlippageBps,
+          reason: 'slippage stays stable for the lifetime of the session');
+    });
+
+    test('start() merges pendingSlippageBps into BbRsi strategy params',
+        () async {
+      final fake = FakeBinanceKlineStream();
+      final provider = PaperTradingProvider(streamFactory: () => fake);
+      addTearDown(provider.dispose);
+
+      provider.setPendingSlippage(8.0);
+      await provider.start(); // no explicit config → defaults + 8 bps
+      await Future<void>.delayed(Duration.zero);
+
+      final params = provider.session!.config.strategyParams as BbRsiParams;
+      expect(params.slippageBps, 8.0,
+          reason: 'pending slippage must be merged into the live strategy '
+              'params at start()');
+      expect(provider.session!.config.slippageBps, 8.0);
+    });
+
+    test('start() respects an explicit config.slippageBps verbatim',
+        () async {
+      final fake = FakeBinanceKlineStream();
+      final provider = PaperTradingProvider(streamFactory: () => fake);
+      addTearDown(provider.dispose);
+
+      provider.setPendingSlippage(15.0);
+      // Caller passes an explicit config with slippageBps 3.0 → wins over
+      // the UI-tunable pending value (test-friendly contract).
+      await provider.start(
+        config: _fastConfig().copyWith(slippageBps: 3.0),
+      );
+      await Future<void>.delayed(Duration.zero);
+
+      expect(provider.session!.config.slippageBps, 3.0);
+      final params = provider.session!.config.strategyParams as BbRsiParams;
+      expect(params.slippageBps, 3.0);
+    });
+  });
+
   group('PaperTradingProvider — WS status mirroring', () {
     test('reconnecting status from WS surfaces in session status', () async {
       final fake = FakeBinanceKlineStream();
