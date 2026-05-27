@@ -6,6 +6,7 @@ import 'package:provider/provider.dart';
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 
 import 'core/logging/app_log.dart';
+import 'core/navigation/app_navigation.dart';
 import 'features/backtest/backtest_provider.dart';
 import 'features/studies/studies_provider.dart';
 import 'ui/themes/app_theme.dart';
@@ -40,6 +41,7 @@ class TradingApp extends StatelessWidget {
       providers: [
         ChangeNotifierProvider(create: (_) => BacktestProvider()),
         ChangeNotifierProvider(create: (_) => StudiesProvider()),
+        ChangeNotifierProvider(create: (_) => AppNavigation()),
         ChangeNotifierProvider<AppLogStore>.value(value: AppLog.instance),
       ],
       child: MaterialApp(
@@ -55,15 +57,8 @@ class TradingApp extends StatelessWidget {
 /// Main scaffold with adaptive navigation:
 /// - BottomNavigationBar on narrow screens (mobile / portrait)
 /// - NavigationRail on wide screens (desktop / landscape)
-class AppScaffold extends StatefulWidget {
+class AppScaffold extends StatelessWidget {
   const AppScaffold({super.key});
-
-  @override
-  State<AppScaffold> createState() => _AppScaffoldState();
-}
-
-class _AppScaffoldState extends State<AppScaffold> {
-  int _selectedIndex = 0;
 
   static const _screens = <Widget>[
     HomeScreen(),
@@ -87,6 +82,8 @@ class _AppScaffoldState extends State<AppScaffold> {
 
   @override
   Widget build(BuildContext context) {
+    final nav = context.watch<AppNavigation>();
+    final selectedIndex = nav.selectedIndex;
     final isWide = MediaQuery.of(context).size.width >= _wideBreakpoint;
 
     if (isWide) {
@@ -94,8 +91,8 @@ class _AppScaffoldState extends State<AppScaffold> {
         body: Row(
           children: [
             NavigationRail(
-              selectedIndex: _selectedIndex,
-              onDestinationSelected: (i) => setState(() => _selectedIndex = i),
+              selectedIndex: selectedIndex,
+              onDestinationSelected: nav.goToIndex,
               labelType: NavigationRailLabelType.all,
               leading: Padding(
                 padding: const EdgeInsets.symmetric(vertical: 16),
@@ -110,17 +107,17 @@ class _AppScaffoldState extends State<AppScaffold> {
                   .toList(),
             ),
             const VerticalDivider(width: 1, thickness: 0.5, color: AppColors.divider),
-            Expanded(child: _screens[_selectedIndex]),
+            Expanded(child: _screens[selectedIndex]),
           ],
         ),
       );
     }
 
     return Scaffold(
-      body: _screens[_selectedIndex],
+      body: _screens[selectedIndex],
       bottomNavigationBar: BottomNavigationBar(
-        currentIndex: _selectedIndex,
-        onTap: (i) => setState(() => _selectedIndex = i),
+        currentIndex: selectedIndex,
+        onTap: nav.goToIndex,
         items: _navItems
             .map((item) => BottomNavigationBarItem(
                   icon: Icon(item.icon),

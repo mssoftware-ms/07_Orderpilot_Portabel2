@@ -1,121 +1,154 @@
+/// Welle O3-B3-4 — Strategy-Management screen as apply-trial hub.
+///
+/// Renders one [StrategyCard] per [StrategyKind], live-bound to the active
+/// [BacktestProvider]. The card's "Apply Trial" button opens the
+/// [ApplyTrialDialog] so the loop
+///
+///     CLI optimizer → studies DB → Strategy-Management → Backtest tab
+///
+/// can be walked without leaving the navigation rail. A footer status bar
+/// mirrors the currently-active strategy + whether its params are
+/// optimized or defaults, and a quick-link routes to the Studies tab via
+/// the shared [AppNavigation] notifier.
+library;
+
 import 'package:flutter/material.dart';
-import '../../ui/themes/app_theme.dart';
+import 'package:provider/provider.dart';
+
+import '../../core/navigation/app_navigation.dart';
+import '../../features/backtest/backtest_provider.dart';
+import '../themes/app_theme.dart';
+import '../widgets/apply_trial_dialog.dart';
+import '../widgets/strategy_card.dart';
 
 class StrategyManagementScreen extends StatelessWidget {
   const StrategyManagementScreen({super.key});
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      body: SafeArea(
-        child: Padding(
-          padding: const EdgeInsets.all(16),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text('Strategies', style: Theme.of(context).textTheme.headlineMedium),
-              const SizedBox(height: 4),
-              Text(
-                'Manage your trading strategy add-ins',
-                style: Theme.of(context).textTheme.bodyMedium,
+    return Consumer<BacktestProvider>(
+      builder: (context, provider, _) {
+        return Scaffold(
+          body: SafeArea(
+            child: Padding(
+              padding: const EdgeInsets.all(16),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  _header(context),
+                  const SizedBox(height: 20),
+                  Expanded(child: _cardsLayout(context, provider)),
+                  const SizedBox(height: 12),
+                  _footer(context, provider),
+                ],
               ),
-              const SizedBox(height: 24),
-
-              // Installed strategies
-              _buildStrategyCard(
-                context,
-                name: 'BB + RSI Mean Reversion',
-                version: 'v1.0.0',
-                category: 'Mean Reversion',
-                description: 'Buy when price touches lower BB and RSI < 30, exit at middle BB or RSI > 70',
-                isInstalled: true,
-                isFree: true,
-              ),
-              const SizedBox(height: 12),
-              _buildStrategyCard(
-                context,
-                name: 'UT Bot Alerts',
-                version: 'v1.0.0',
-                category: 'Trend Following',
-                description: 'ATR-based trailing stop trend strategy',
-                isInstalled: false,
-                isFree: false,
-              ),
-              const SizedBox(height: 12),
-              _buildStrategyCard(
-                context,
-                name: 'Ichimoku Cloud Retest',
-                version: 'v1.0.0',
-                category: 'Multi-Indicator',
-                description: 'Cloud retest strategy with confluence filtering',
-                isInstalled: false,
-                isFree: false,
-              ),
-            ],
+            ),
           ),
-        ),
-      ),
+        );
+      },
     );
   }
 
-  Widget _buildStrategyCard(
-    BuildContext context, {
-    required String name,
-    required String version,
-    required String category,
-    required String description,
-    required bool isInstalled,
-    required bool isFree,
-  }) {
-    return Card(
-      child: Padding(
-        padding: const EdgeInsets.all(16),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
+  Widget _header(BuildContext context) => Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Expanded(
-                  child: Text(name, style: Theme.of(context).textTheme.titleMedium),
+                Text(
+                  'Strategies',
+                  style: Theme.of(context).textTheme.headlineMedium,
                 ),
-                Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-                  decoration: BoxDecoration(
-                    color: isInstalled
-                        ? AppColors.bullGreen.withAlpha(30)
-                        : AppColors.textMuted.withAlpha(30),
-                    borderRadius: BorderRadius.circular(4),
-                  ),
-                  child: Text(
-                    isInstalled ? 'Installed' : (isFree ? 'Free' : 'Premium'),
-                    style: TextStyle(
-                      color: isInstalled ? AppColors.bullGreen : AppColors.warningAmber,
-                      fontSize: 11,
-                      fontWeight: FontWeight.w600,
-                    ),
+                const SizedBox(height: 4),
+                const Text(
+                  'Apply optimization results to the active backtest.',
+                  style: TextStyle(
+                    color: AppColors.textSecondary,
+                    fontSize: 13,
                   ),
                 ),
               ],
             ),
-            const SizedBox(height: 4),
-            Row(
-              children: [
-                Text(version, style: const TextStyle(color: AppColors.textMuted, fontSize: 12)),
-                const SizedBox(width: 8),
-                Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
-                  decoration: BoxDecoration(
-                    border: Border.all(color: AppColors.border),
-                    borderRadius: BorderRadius.circular(4),
-                  ),
-                  child: Text(category, style: const TextStyle(color: AppColors.accentPurple, fontSize: 11)),
-                ),
-              ],
-            ),
-            const SizedBox(height: 8),
-            Text(description, style: Theme.of(context).textTheme.bodySmall),
+          ),
+          OutlinedButton.icon(
+            key: const Key('strategies_open_studies_link'),
+            onPressed: () =>
+                context.read<AppNavigation>().goTo(AppTab.studies),
+            icon: const Icon(Icons.analytics_outlined, size: 16),
+            label: const Text('Open Studies viewer'),
+          ),
+        ],
+      );
+
+  Widget _cardsLayout(BuildContext context, BacktestProvider provider) {
+    final width = MediaQuery.of(context).size.width;
+    final cards = StrategyKind.values
+        .map((k) => StrategyCard(
+              key: Key('strategy_card_${k.name}'),
+              kind: k,
+              provider: provider,
+              onApplyTrialRequested: (ctx, kind) => showApplyTrialDialog(
+                ctx,
+                targetKind: kind,
+                backtestProvider: provider,
+              ),
+            ))
+        .toList();
+
+    // Wide layout: 3 cards in a row. Narrow: vertical scroll.
+    if (width >= 900) {
+      return Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          for (var i = 0; i < cards.length; i++) ...[
+            Expanded(child: cards[i]),
+            if (i < cards.length - 1) const SizedBox(width: 12),
           ],
-        ),
+        ],
+      );
+    }
+    return ListView.separated(
+      itemCount: cards.length,
+      separatorBuilder: (_, _) => const SizedBox(height: 12),
+      itemBuilder: (_, i) => cards[i],
+    );
+  }
+
+  Widget _footer(BuildContext context, BacktestProvider provider) {
+    final active = provider.config.strategyKind;
+    final isOptimized = provider.usingOptimizedParams;
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+      decoration: BoxDecoration(
+        color: AppColors.surfaceCard,
+        border: Border.all(color: AppColors.border, width: 0.5),
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Row(
+        key: const Key('strategies_footer_active_status'),
+        children: [
+          const Icon(Icons.play_circle_outline,
+              size: 16, color: AppColors.accentCyan),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              'Active in Backtest: ${active.displayLabel} '
+              '(${isOptimized ? "optimized" : "default"} params)',
+              style: const TextStyle(
+                color: AppColors.textPrimary,
+                fontSize: 12,
+              ),
+            ),
+          ),
+          TextButton.icon(
+            key: const Key('strategies_open_backtest_link'),
+            onPressed: () =>
+                context.read<AppNavigation>().goTo(AppTab.backtest),
+            icon: const Icon(Icons.arrow_forward, size: 14),
+            label: const Text('Open Backtest'),
+          ),
+        ],
       ),
     );
   }
