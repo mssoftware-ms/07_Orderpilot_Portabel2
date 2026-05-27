@@ -25,7 +25,10 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:provider/provider.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:trading_app/features/exchange/bitunix_connection_provider.dart';
+import 'package:trading_app/features/paper/paper_trading_provider.dart';
+import 'package:trading_app/features/risk/risk_manager.dart';
 import 'package:trading_app/services/bitunix_auth.dart';
 import 'package:trading_app/services/bitunix_client.dart';
 import 'package:trading_app/ui/screens/account_screen.dart';
@@ -51,6 +54,11 @@ class _InMemoryBackend implements BitunixSecretsBackend {
 
 void main() {
   testWidgets('Bitunix connector E2E smoke', (tester) async {
+    // Welle B4.3-3: AccountScreen now also reads RiskManager +
+    // PaperTradingProvider from the surrounding MultiProvider. Prime the
+    // SharedPreferences mock so the risk config loadConfig() resolves.
+    SharedPreferences.setMockInitialValues({});
+
     // ── Setup: mock HTTP + in-memory secrets backend ───────────────────
     final backend = _InMemoryBackend();
     final store = BitunixSecretsStore(backend: backend);
@@ -121,11 +129,21 @@ void main() {
       ),
     );
 
+    final risk = RiskManager();
+    await risk.loadConfig();
+    final paper = PaperTradingProvider(riskManager: risk);
+    addTearDown(paper.dispose);
+
     await tester.pumpWidget(
       MaterialApp(
         theme: AppTheme.darkTheme,
-        home: ChangeNotifierProvider<BitunixConnectionProvider>.value(
-          value: provider,
+        home: MultiProvider(
+          providers: [
+            ChangeNotifierProvider<BitunixConnectionProvider>.value(
+                value: provider),
+            ChangeNotifierProvider<RiskManager>.value(value: risk),
+            ChangeNotifierProvider<PaperTradingProvider>.value(value: paper),
+          ],
           child: const AccountScreen(),
         ),
       ),

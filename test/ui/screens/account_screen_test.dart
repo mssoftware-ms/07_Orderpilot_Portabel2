@@ -14,7 +14,10 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:provider/provider.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:trading_app/features/exchange/bitunix_connection_provider.dart';
+import 'package:trading_app/features/paper/paper_trading_provider.dart';
+import 'package:trading_app/features/risk/risk_manager.dart';
 import 'package:trading_app/services/bitunix_auth.dart';
 import 'package:trading_app/services/bitunix_client.dart';
 import 'package:trading_app/ui/screens/account_screen.dart';
@@ -108,12 +111,28 @@ BitunixConnectionProvider _buildProvider({
 }
 
 Future<void> _pumpScreen(
-    WidgetTester tester, BitunixConnectionProvider provider) async {
+  WidgetTester tester,
+  BitunixConnectionProvider provider, {
+  RiskManager? risk,
+  PaperTradingProvider? paper,
+}) async {
+  // Welle B4.3-3: AccountScreen now reads RiskManager + PaperTradingProvider
+  // from the surrounding MultiProvider. SharedPreferences is primed by the
+  // setUp hook so the RiskManager's loadConfig hits an in-memory mock store.
+  final riskMgr = risk ?? RiskManager();
+  await riskMgr.loadConfig();
+  final paperMgr = paper ?? PaperTradingProvider(riskManager: riskMgr);
+  addTearDown(paperMgr.dispose);
   await tester.pumpWidget(
     MaterialApp(
       theme: AppTheme.darkTheme,
-      home: ChangeNotifierProvider<BitunixConnectionProvider>.value(
-        value: provider,
+      home: MultiProvider(
+        providers: [
+          ChangeNotifierProvider<BitunixConnectionProvider>.value(
+              value: provider),
+          ChangeNotifierProvider<RiskManager>.value(value: riskMgr),
+          ChangeNotifierProvider<PaperTradingProvider>.value(value: paperMgr),
+        ],
         child: const AccountScreen(),
       ),
     ),
@@ -122,6 +141,12 @@ Future<void> _pumpScreen(
 }
 
 void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
+
+  setUp(() {
+    SharedPreferences.setMockInitialValues({});
+  });
+
   group('initial / disconnected state', () {
     testWidgets('shows credentials card, no balance / positions cards yet',
         (tester) async {

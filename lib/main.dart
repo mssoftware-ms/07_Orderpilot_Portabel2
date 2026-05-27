@@ -10,6 +10,7 @@ import 'core/navigation/app_navigation.dart';
 import 'features/backtest/backtest_provider.dart';
 import 'features/exchange/bitunix_connection_provider.dart';
 import 'features/paper/paper_trading_provider.dart';
+import 'features/risk/risk_manager.dart';
 import 'features/studies/studies_provider.dart';
 import 'ui/themes/app_theme.dart';
 import 'ui/screens/account_screen.dart';
@@ -44,7 +45,16 @@ class TradingApp extends StatelessWidget {
       providers: [
         ChangeNotifierProvider(create: (_) => BacktestProvider()),
         ChangeNotifierProvider(create: (_) => StudiesProvider()),
-        ChangeNotifierProvider(create: (_) => PaperTradingProvider()),
+        // Welle B4.3-3: RiskManager has to live before PaperTradingProvider
+        // so the paper provider can read it back via context.read at
+        // construction time. The proxy-provider alternative was overkill
+        // for a single optional dependency.
+        ChangeNotifierProvider(create: (_) => RiskManager()..loadConfig()),
+        ChangeNotifierProvider(
+          create: (ctx) => PaperTradingProvider(
+            riskManager: ctx.read<RiskManager>(),
+          ),
+        ),
         ChangeNotifierProvider(
           create: (_) =>
               BitunixConnectionProvider()..loadStoredCredentials(),

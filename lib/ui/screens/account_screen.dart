@@ -19,6 +19,10 @@ import 'package:provider/provider.dart';
 
 import '../../core/models/bitunix_models.dart';
 import '../../features/exchange/bitunix_connection_provider.dart';
+import '../../features/paper/paper_trading_provider.dart';
+import '../../features/risk/risk_assessment.dart';
+import '../../features/risk/risk_config.dart';
+import '../../features/risk/risk_manager.dart';
 import '../../services/bitunix_auth.dart';
 import '../themes/app_theme.dart';
 
@@ -37,6 +41,13 @@ class _AccountScreenState extends State<AccountScreen> {
   final TextEditingController _apiKeyController = TextEditingController();
   final TextEditingController _secretController = TextEditingController();
   bool _obscureSecret = true;
+
+  /// Welle B4.3-3: pending Risk-Limits state. `null` while the on-screen
+  /// sliders mirror the persisted config; non-null once the user drags any
+  /// slider. Clearing happens on a successful Save and on any kill-switch
+  /// state change so external mutations (e.g. activate / reset) re-sync the
+  /// UI to the freshest persisted values.
+  RiskConfig? _pendingRiskConfig;
 
   @override
   void dispose() {
@@ -65,10 +76,34 @@ class _AccountScreenState extends State<AccountScreen> {
     await context.read<BitunixConnectionProvider>().refresh();
   }
 
+  // ─── Risk-Limits handlers (Welle B4.3-3) ────────────────────────────────
+
+  RiskConfig _displayedRiskConfig(RiskManager rm) =>
+      _pendingRiskConfig ?? rm.config;
+
+  void _setPendingRisk(RiskConfig next, RiskManager rm) {
+    if (next == rm.config) {
+      if (_pendingRiskConfig == null) return;
+      setState(() => _pendingRiskConfig = null);
+      return;
+    }
+    setState(() => _pendingRiskConfig = next);
+  }
+
+  Future<void> _onSaveRiskLimits() async {
+    final pending = _pendingRiskConfig;
+    if (pending == null) return;
+    await context.read<RiskManager>().saveConfig(pending);
+    if (!mounted) return;
+    setState(() => _pendingRiskConfig = null);
+  }
+
   @override
   Widget build(BuildContext context) {
     return Consumer<BitunixConnectionProvider>(
       builder: (context, provider, _) {
+        final risk = context.watch<RiskManager>();
+        final paper = context.watch<PaperTradingProvider>();
         return Scaffold(
           body: SafeArea(
             child: SingleChildScrollView(
@@ -92,6 +127,10 @@ class _AccountScreenState extends State<AccountScreen> {
                   ],
                   const SizedBox(height: 12),
                   _liveTradingCard(context, provider),
+                  const SizedBox(height: 12),
+                  _riskLimitsCard(context, risk),
+                  const SizedBox(height: 12),
+                  _riskStatusCard(context, risk, paper),
                 ],
               ),
             ),
@@ -459,6 +498,282 @@ class _AccountScreenState extends State<AccountScreen> {
             ),
           ],
         ),
+      ),
+    );
+  }
+
+  // ─── Risk Limits (Welle B4.3-3) ────────────────────────────────────────
+
+  Widget _riskLimitsCard(BuildContext context, RiskManager risk) {
+    final displayed = _displayedRiskConfig(risk);
+    final dirty = _pendingRiskConfig != null;
+    return Card(
+      key: const Key('account_risk_limits_card'),
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            _sectionTitle('Risk Limits'),
+            const SizedBox(height: 4),
+            const Text(
+              'Limits gate every position open (paper today, live in a '
+              'future wave).',
+              style: TextStyle(color: AppColors.textMuted, fontSize: 12),
+            ),
+            const SizedBox(height: 12),
+            _riskSlider(
+              key: const Key('risk_slider_max_position'),
+              label: 'Max position risk',
+              value: displayed.maxPositionRiskPct,
+              min: 0.5,
+              max: 10,
+              divisions: 19,
+              format: (v) => '${v.toStringAsFixed(1)} %',
+              onChanged: (v) => _setPendingRisk(
+                  displayed.copyWith(maxPositionRiskPct: v), risk),
+            ),
+            _riskSlider(
+              key: const Key('risk_slider_daily_loss'),
+              label: 'Max daily loss',
+              value: displayed.maxDailyLossPct,
+              min: 1,
+              max: 10,
+              divisions: 18,
+              format: (v) => '${v.toStringAsFixed(1)} %',
+              onChanged: (v) => _setPendingRisk(
+                  displayed.copyWith(maxDailyLossPct: v), risk),
+            ),
+            _riskSlider(
+              key: const Key('risk_slider_drawdown'),
+              label: 'Max drawdown',
+              value: displayed.maxDrawdownPct,
+              min: 5,
+              max: 30,
+              divisions: 25,
+              format: (v) => '${v.toStringAsFixed(0)} %',
+              onChanged: (v) => _setPendingRisk(
+                  displayed.copyWith(maxDrawdownPct: v), risk),
+            ),
+            _riskSlider(
+              key: const Key('risk_slider_consec_losses'),
+              label: 'Max consec losses',
+              value: displayed.maxConsecutiveLosses.toDouble(),
+              min: 3,
+              max: 15,
+              divisions: 12,
+              format: (v) => v.toStringAsFixed(0),
+              onChanged: (v) => _setPendingRisk(
+                  displayed.copyWith(maxConsecutiveLosses: v.round()), risk),
+            ),
+            const SizedBox(height: 12),
+            Row(
+              children: [
+                ElevatedButton.icon(
+                  key: const Key('account_save_risk_limits_button'),
+                  onPressed: dirty ? _onSaveRiskLimits : null,
+                  icon: const Icon(Icons.save_outlined, size: 16),
+                  label: const Text('Save Risk Limits'),
+                ),
+                if (dirty) ...[
+                  const SizedBox(width: 12),
+                  TextButton(
+                    key: const Key('account_discard_risk_limits_button'),
+                    onPressed: () =>
+                        setState(() => _pendingRiskConfig = null),
+                    child: const Text('Discard'),
+                  ),
+                ],
+              ],
+            ),
+            if (dirty)
+              const Padding(
+                padding: EdgeInsets.only(top: 8),
+                child: Text(
+                  'Unsaved changes — Save to persist or Discard to revert.',
+                  style:
+                      TextStyle(color: AppColors.warningAmber, fontSize: 12),
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _riskSlider({
+    required Key key,
+    required String label,
+    required double value,
+    required double min,
+    required double max,
+    required int divisions,
+    required String Function(double) format,
+    required ValueChanged<double> onChanged,
+  }) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 4),
+      child: Row(
+        children: [
+          SizedBox(
+            width: 150,
+            child: Text(label,
+                style: const TextStyle(
+                    color: AppColors.textSecondary, fontSize: 12)),
+          ),
+          Expanded(
+            child: SliderTheme(
+              data: SliderTheme.of(context).copyWith(
+                trackHeight: 3,
+                thumbShape:
+                    const RoundSliderThumbShape(enabledThumbRadius: 6),
+                activeTrackColor: AppColors.accentCyan,
+                inactiveTrackColor: AppColors.border,
+                thumbColor: AppColors.accentCyan,
+                overlayColor: AppColors.accentCyan.withAlpha(30),
+              ),
+              child: Slider(
+                key: key,
+                value: value.clamp(min, max),
+                min: min,
+                max: max,
+                divisions: divisions,
+                onChanged: onChanged,
+              ),
+            ),
+          ),
+          SizedBox(
+            width: 60,
+            child: Text(
+              format(value),
+              style: const TextStyle(
+                  color: AppColors.accentCyan,
+                  fontSize: 12,
+                  fontWeight: FontWeight.bold),
+              textAlign: TextAlign.right,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _riskStatusCard(
+      BuildContext context, RiskManager risk, PaperTradingProvider paper) {
+    final session = paper.session;
+    final assessment = session == null
+        ? RiskAssessment(
+            currentDailyPnlPct: 0,
+            currentDrawdownPct: 0,
+            currentConsecutiveLosses: 0,
+            killSwitchActive: risk.killSwitchActive,
+            breachedGates: risk.killSwitchActive
+                ? const {RiskGate.killSwitch}
+                : const <RiskGate>{},
+          )
+        : risk.assess(session);
+    return Card(
+      key: const Key('account_risk_status_card'),
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            _sectionTitle('Risk Status'),
+            const SizedBox(height: 4),
+            Text(
+              session == null
+                  ? 'No active paper session — values reflect the persisted '
+                      'kill-switch state only.'
+                  : 'Live values from the active paper session.',
+              style: const TextStyle(
+                color: AppColors.textMuted,
+                fontSize: 12,
+              ),
+            ),
+            const SizedBox(height: 12),
+            GridView.count(
+              shrinkWrap: true,
+              physics: const NeverScrollableScrollPhysics(),
+              crossAxisCount: 2,
+              childAspectRatio: 3.0,
+              mainAxisSpacing: 8,
+              crossAxisSpacing: 8,
+              children: [
+                _riskMiniCard(
+                  testKey: 'risk_status_daily_pnl',
+                  label: 'Daily PnL',
+                  value: '${assessment.currentDailyPnlPct.toStringAsFixed(2)} %',
+                  breached: assessment.gateBreached(RiskGate.dailyLoss),
+                ),
+                _riskMiniCard(
+                  testKey: 'risk_status_drawdown',
+                  label: 'Drawdown',
+                  value:
+                      '${assessment.currentDrawdownPct.toStringAsFixed(2)} %',
+                  breached: assessment.gateBreached(RiskGate.drawdown),
+                ),
+                _riskMiniCard(
+                  testKey: 'risk_status_consec_losses',
+                  label: 'Consec losses',
+                  value: '${assessment.currentConsecutiveLosses}',
+                  breached:
+                      assessment.gateBreached(RiskGate.consecutiveLosses),
+                ),
+                _riskMiniCard(
+                  testKey: 'risk_status_kill_switch',
+                  label: 'Kill switch',
+                  value: risk.killSwitchActive ? 'ACTIVE' : 'inactive',
+                  breached: risk.killSwitchActive,
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _riskMiniCard({
+    required String testKey,
+    required String label,
+    required String value,
+    required bool breached,
+  }) {
+    final color = breached ? AppColors.bearRed : AppColors.textPrimary;
+    return Container(
+      key: Key(testKey),
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+      decoration: BoxDecoration(
+        color: AppColors.surfaceElevated,
+        border: Border.all(
+          color: breached
+              ? AppColors.bearRed.withValues(alpha: 0.6)
+              : AppColors.border,
+        ),
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Text(
+            label,
+            style: const TextStyle(
+              color: AppColors.textMuted,
+              fontSize: 11,
+            ),
+          ),
+          const SizedBox(height: 2),
+          Text(
+            value,
+            style: TextStyle(
+              color: color,
+              fontSize: 14,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+        ],
       ),
     );
   }
