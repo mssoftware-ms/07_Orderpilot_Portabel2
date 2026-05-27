@@ -37,6 +37,10 @@ dependencies:
   flutter_secure_storage: ^9.2.4
   crypto: ^3.0.3
 
+  # Welle B4.3 (risk layer): persistent risk limits + kill-switch state in
+  # plain key-value storage. Non-sensitive — secure_storage would be overkill.
+  shared_preferences: ^2.2.0
+
   # Rust Bridge
   flutter_rust_bridge: 2.12.0
   ffi: ^2.1.0
