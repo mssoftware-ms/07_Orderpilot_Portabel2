@@ -17,6 +17,7 @@ import 'dart:async';
 
 import 'package:flutter/foundation.dart';
 
+import '../../core/constants/app_constants.dart';
 import '../../core/logging/app_log.dart';
 import '../../core/models/timeframe.dart';
 import '../../features/backtest/backtest_provider.dart';
@@ -39,9 +40,39 @@ const int kPaperBufferCap = 500;
 /// Tag used for log entries emitted from this provider.
 const String _tag = 'PaperTrading';
 
+/// Hard cap on consecutive failed WS reconnect attempts before the
+/// session tips into [PaperSessionStatus.error]. Wired into the
+/// default [BinanceKlineStream] factory; 5 mirrors the cap requested
+/// in the Welle B4-4 brief and stops an unbounded backoff loop when
+/// the WS endpoint is structurally unavailable (e.g. wrong symbol,
+/// blocked port, DNS poisoned).
+const int kPaperMaxReconnectAttempts = 5;
+
+/// Subset of Binance's kline-interval whitelist that this app accepts
+/// in step-1. Mirrors the (kline)-doc list at
+/// `https://developers.binance.com/docs/binance-spot-api-docs/web-socket-streams#kline-candlestick-streams`,
+/// trimmed to the timeframes the project's strategy defaults actually
+/// produce trades on (1s / 1M would compile but produce noisy or
+/// stale signals respectively).
+const Set<String> kPaperSupportedTimeframes = {
+  '1m',
+  '3m',
+  '5m',
+  '15m',
+  '30m',
+  '1h',
+  '2h',
+  '4h',
+  '1d',
+  '1w',
+};
+
 class PaperTradingProvider extends ChangeNotifier {
   PaperTradingProvider({BinanceKlineStreamFactory? streamFactory})
-      : _streamFactory = streamFactory ?? (() => BinanceKlineStream());
+      : _streamFactory = streamFactory ??
+            (() => BinanceKlineStream(
+                  maxReconnectAttempts: kPaperMaxReconnectAttempts,
+                ));
 
   final BinanceKlineStreamFactory _streamFactory;
 
@@ -90,6 +121,19 @@ class PaperTradingProvider extends ChangeNotifier {
     final now = DateTime.now().millisecondsSinceEpoch;
     _session = PaperSession(config: effective, startedAtMs: now);
     _errorMessage = null;
+
+    // Welle B4-4: gate on the symbol/timeframe whitelists before the
+    // WS handshake so a typo'd config does not waste a network round
+    // trip and surfaces as a session-level error instead of a deep
+    // Binance 1100 ("Illegal characters") message buried in AppLog.
+    final validation = _validateConfig(effective);
+    if (validation != null) {
+      _errorMessage = validation;
+      AppLog.error(_tag, validation);
+      _setStatus(PaperSessionStatus.error);
+      return;
+    }
+
     _setStatus(PaperSessionStatus.connecting);
 
     final stream = _streamFactory();
@@ -303,6 +347,21 @@ class PaperTradingProvider extends ChangeNotifier {
     _session = null;
     _errorMessage = null;
     // status reset is the caller's responsibility; start() drives it.
+  }
+
+  /// Validate the config against the project's symbol whitelist and
+  /// the Binance WS interval whitelist. Returns the error message on
+  /// failure, null on success.
+  String? _validateConfig(PaperConfig cfg) {
+    if (!AppConstants.supportedSymbols.contains(cfg.symbol)) {
+      return 'Unsupported symbol "${cfg.symbol}". '
+          'Allowed: ${AppConstants.supportedSymbols.join(", ")}';
+    }
+    if (!kPaperSupportedTimeframes.contains(cfg.timeframe)) {
+      return 'Unsupported timeframe "${cfg.timeframe}". '
+          'Allowed: ${kPaperSupportedTimeframes.join(", ")}';
+    }
+    return null;
   }
 }
 

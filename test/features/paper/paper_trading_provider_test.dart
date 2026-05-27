@@ -384,6 +384,65 @@ void main() {
     });
   });
 
+  group('PaperTradingProvider — Welle B4-4 validation', () {
+    test('invalid symbol fails start with Error + AppLog', () async {
+      AppLog.instance.clear();
+      final fake = FakeBinanceKlineStream();
+      final provider = PaperTradingProvider(streamFactory: () => fake);
+      addTearDown(provider.dispose);
+
+      await provider.start(
+        config: _fastConfig().copyWith(symbol: 'XYZUSDT'),
+      );
+      await Future<void>.delayed(Duration.zero);
+
+      expect(provider.status, PaperSessionStatus.error);
+      expect(provider.errorMessage, contains('Unsupported symbol'));
+      final errors = AppLog.instance.entries.where(
+          (e) => e.level == LogLevel.error && e.tag == 'PaperTrading');
+      expect(errors, isNotEmpty);
+      // WS must NOT have been opened — the validation gate is pre-handshake.
+      expect(fake.lastSymbol, isNull);
+    });
+
+    test('invalid timeframe fails start with Error', () async {
+      AppLog.instance.clear();
+      final fake = FakeBinanceKlineStream();
+      final provider = PaperTradingProvider(streamFactory: () => fake);
+      addTearDown(provider.dispose);
+
+      await provider.start(
+        config: _fastConfig().copyWith(timeframe: '7m'),
+      );
+      await Future<void>.delayed(Duration.zero);
+
+      expect(provider.status, PaperSessionStatus.error);
+      expect(provider.errorMessage, contains('Unsupported timeframe'));
+      expect(fake.lastInterval, isNull);
+    });
+
+    test('error after restart with valid config reclears errorMessage',
+        () async {
+      final fake1 = FakeBinanceKlineStream();
+      var fakeIdx = 0;
+      final fakes = [fake1, FakeBinanceKlineStream()];
+      final provider = PaperTradingProvider(
+          streamFactory: () => fakes[fakeIdx++]);
+      addTearDown(provider.dispose);
+
+      await provider.start(
+          config: _fastConfig().copyWith(symbol: 'XYZUSDT'));
+      await Future<void>.delayed(Duration.zero);
+      expect(provider.status, PaperSessionStatus.error);
+      expect(provider.errorMessage, isNotNull);
+
+      await provider.start(config: _fastConfig());
+      await Future<void>.delayed(Duration.zero);
+      expect(provider.status, PaperSessionStatus.running);
+      expect(provider.errorMessage, isNull);
+    });
+  });
+
   group('PaperTradingProvider — WS status mirroring', () {
     test('reconnecting status from WS surfaces in session status', () async {
       final fake = FakeBinanceKlineStream();
