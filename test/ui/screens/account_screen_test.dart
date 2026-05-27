@@ -233,21 +233,28 @@ void main() {
     });
   });
 
-  group('Live-Trading toggle — regression guard', () {
-    testWidgets('switch is disabled while disconnected', (tester) async {
+  group('Live-Trading toggle — eligibility-gated regression guard', () {
+    testWidgets('switch is disabled while disconnected (exchange gate fails)',
+        (tester) async {
+      // Disconnected exchange → eligibility.exchangeConnected = false →
+      // onChanged must be null no matter how the other gates look.
       final p = _buildProvider(mock: _happyMock());
       await _pumpScreen(tester, p);
 
       final sw = tester.widget<SwitchListTile>(
           find.byKey(const Key('account_live_trading_switch')));
       expect(sw.onChanged, isNull,
-          reason: 'Live toggle must be disabled — no risk layer yet.');
+          reason: 'Live toggle must stay disabled while the exchange gate '
+              'has not yet flipped to connected.');
       expect(sw.value, isFalse);
     });
 
-    testWidgets(
-        'CRITICAL: switch stays disabled even when successfully connected',
+    testWidgets('switch becomes enable-bar once the exchange is connected',
         (tester) async {
+      // All three eligibility conjuncts pass after a successful connect:
+      // risk caps default to positive values, exchange flips to connected,
+      // kill switch starts inactive. The switch's onChanged is therefore
+      // non-null — but the toggle itself stays OFF until the user confirms.
       final p = _buildProvider(mock: _happyMock());
       await _pumpScreen(tester, p);
 
@@ -258,35 +265,46 @@ void main() {
       await tester.tap(find.byKey(const Key('account_save_connect_button')));
       await tester.pumpAndSettle();
 
-      // Sanity: provider really did connect — otherwise the test
-      // wouldn't be exercising the dangerous state.
       expect(p.status, BitunixConnectionStatus.connected);
 
       final sw = tester.widget<SwitchListTile>(
           find.byKey(const Key('account_live_trading_switch')));
-      expect(sw.onChanged, isNull,
-          reason: 'Even a fully connected provider must keep live trading '
-              'locked off until Welle B4 Step-3 ships.');
-      expect(sw.value, isFalse);
+      expect(sw.onChanged, isNotNull,
+          reason: 'all three eligibility gates pass — the switch must be '
+              'interactable so the user can confirm-and-flip ON.');
+      expect(sw.value, isFalse,
+          reason: 'flipping ON only happens through the confirm dialog.');
     });
 
-    testWidgets('Step-3 pending pill is visible', (tester) async {
+    testWidgets('status pill flips Locked → Ready when eligibility passes',
+        (tester) async {
       final p = _buildProvider(mock: _happyMock());
       await _pumpScreen(tester, p);
-      expect(find.byKey(const Key('account_step3_pending_pill')),
+      // Disconnected → Locked.
+      expect(find.byKey(const Key('account_live_trading_pill')),
           findsOneWidget);
-      expect(find.text('Step-3 pending'), findsOneWidget);
+      expect(find.text('Locked'), findsOneWidget);
+
+      await tester.enterText(
+          find.byKey(const Key('account_api_key_field')), 'k');
+      await tester.enterText(
+          find.byKey(const Key('account_secret_field')), 's');
+      await tester.tap(find.byKey(const Key('account_save_connect_button')));
+      await tester.pumpAndSettle();
+      // Connected, live OFF, eligibility passes → Ready.
+      expect(find.text('Ready'), findsOneWidget);
     });
 
-    testWidgets('Tooltip carries the Step-3 risk-layer hint', (tester) async {
+    testWidgets('tooltip names the three eligibility prerequisites',
+        (tester) async {
       final p = _buildProvider(mock: _happyMock());
       await _pumpScreen(tester, p);
 
       final tooltip = tester.widget<Tooltip>(
           find.byKey(const Key('account_live_trading_tooltip')));
-      expect(tooltip.message, contains('Welle B4 Step-3'));
+      expect(tooltip.message, contains('risk limits'));
+      expect(tooltip.message, contains('exchange connected'));
       expect(tooltip.message, contains('kill-switch'));
-      expect(tooltip.message, contains('Currently disabled'));
     });
   });
 

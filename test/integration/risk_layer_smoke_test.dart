@@ -168,28 +168,56 @@ void main() {
           reason: 'all three gates now pass');
     }
 
-    // ── 3. Live-Toggle STAYS DISABLED — the gate is the next wave ─────
+    // ── 3. Live-Toggle is now enable-bar — but persisted OFF ──────────
+    // Welle B4.4 opened the UI path: with every conjunct green the
+    // switch's `onChanged` is no longer null. Flipping it ON still
+    // requires the user to walk through a confirm dialog; merely
+    // becoming eligible does NOT auto-enable.
     {
       final sw = tester.widget<SwitchListTile>(
           find.byKey(const Key('account_live_trading_switch')));
-      expect(sw.onChanged, isNull,
-          reason: 'CRITICAL — even with all three checkmarks green the '
-              'switch stays structurally disabled. The enable-of-the-switch '
-              'is a separate wave.');
-      expect(sw.value, isFalse);
+      expect(sw.onChanged, isNotNull,
+          reason: 'all three eligibility gates pass — switch is now '
+              'interactable behind the confirm dialog.');
+      expect(sw.value, isFalse,
+          reason: 'no confirm has happened — persisted state is still OFF');
+      expect(risk.liveTradingEnabled, isFalse);
     }
 
-    // ── 4. Activate kill-switch ────────────────────────────────────────
+    // ── 4. User opts in: enable live trading explicitly ─────────────────
+    await risk.enableLiveTrading();
+    await tester.pump();
+    {
+      final sw = tester.widget<SwitchListTile>(
+          find.byKey(const Key('account_live_trading_switch')));
+      expect(sw.value, isTrue,
+          reason: 'after enableLiveTrading the switch must reflect ON');
+      expect(risk.liveTradingEnabled, isTrue);
+    }
+
+    // ── 5. Activate kill-switch → auto-disable kicks in ────────────────
     await risk.activateKillSwitch(reason: 'smoke-test');
+    await tester.pump();
+    // Second pump so the post-frame auto-disable callback runs and the
+    // resulting notifyListeners rebuilds the screen.
     await tester.pump();
     {
       final eligibility = LiveModeEligibility.evaluate(
           riskManager: risk, exchangeProvider: bitunix);
       expect(eligibility.killSwitchInactive, isFalse);
       expect(eligibility.isEligible, isFalse);
+      expect(risk.liveTradingEnabled, isFalse,
+          reason: 'auto-disable hook must clear the live flag the moment '
+              'an eligibility gate breaks — even if the user just enabled');
+
+      final sw = tester.widget<SwitchListTile>(
+          find.byKey(const Key('account_live_trading_switch')));
+      expect(sw.onChanged, isNull,
+          reason: 'kill switch tripped → switch is locked again');
+      expect(sw.value, isFalse);
     }
 
-    // ── 5. Reset kill-switch ───────────────────────────────────────────
+    // ── 6. Reset kill-switch → switch becomes enable-bar again ─────────
     await risk.resetKillSwitch();
     await tester.pump();
     {
@@ -198,14 +226,15 @@ void main() {
       expect(eligibility.killSwitchInactive, isTrue);
       expect(eligibility.isEligible, isTrue,
           reason: 'reset clears the third gate again');
-    }
 
-    // ── 6. Belt-and-braces: switch is *still* `onChanged: null` ─────────
-    {
       final sw = tester.widget<SwitchListTile>(
           find.byKey(const Key('account_live_trading_switch')));
-      expect(sw.onChanged, isNull,
-          reason: 'every eligibility transition leaves the toggle disabled');
+      expect(sw.onChanged, isNotNull,
+          reason: 'all gates green again — switch is interactable but the '
+              'persisted state stays OFF, the user has to re-confirm to flip ON');
+      expect(sw.value, isFalse,
+          reason: 'auto-disable cleared the flag; re-enable requires the '
+              'confirm dialog again');
     }
   });
 

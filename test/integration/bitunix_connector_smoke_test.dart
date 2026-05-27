@@ -158,7 +158,8 @@ void main() {
       final sw = tester.widget<SwitchListTile>(
           find.byKey(const Key('account_live_trading_switch')));
       expect(sw.onChanged, isNull,
-          reason: 'live toggle must be disabled on empty state');
+          reason: 'exchange gate not yet satisfied — switch must stay '
+              'structurally locked on empty state');
       expect(sw.value, isFalse);
     }
 
@@ -178,30 +179,23 @@ void main() {
     expect(find.text('BTCUSDT'), findsOneWidget);
     expect(find.text('LONG'), findsOneWidget);
 
-    // ── 4. Live-Trading switch is STILL disabled ────────────────────────
+    // ── 4. Live-Trading switch is now enable-bar, but stays OFF ─────────
+    // All three eligibility gates pass (risk caps positive, exchange
+    // connected, kill-switch inactive). The user has not yet confirmed,
+    // so the persisted bit is still false and the visual value is OFF —
+    // only an explicit confirm dialog can flip it. The provider-side
+    // getter is informational and stays false in lock-step.
     {
       final sw = tester.widget<SwitchListTile>(
           find.byKey(const Key('account_live_trading_switch')));
-      expect(sw.onChanged, isNull,
-          reason: 'CRITICAL — live toggle must stay disabled even when '
-              'fully connected to Bitunix.');
-      expect(sw.value, isFalse);
-      expect(provider.liveTradingEnabled, isFalse);
-    }
-
-    // ── 5. Tap-attack on the disabled switch must not flip it ────────────
-    // Tapping a SwitchListTile whose onChanged is null is a no-op by
-    // Material design; we tap anyway to prove the regression guard.
-    await tester.tap(
-      find.byKey(const Key('account_live_trading_switch')),
-      warnIfMissed: false,
-    );
-    await tester.pump();
-    {
-      final sw = tester.widget<SwitchListTile>(
-          find.byKey(const Key('account_live_trading_switch')));
+      expect(sw.onChanged, isNotNull,
+          reason: 'all eligibility gates pass — switch must be interactable');
       expect(sw.value, isFalse,
-          reason: 'A tap on the disabled switch must not flip it on.');
+          reason: 'no confirm has happened yet — persisted state is still OFF');
+      expect(provider.liveTradingEnabled, isFalse);
+      expect(risk.liveTradingEnabled, isFalse,
+          reason: 'merely interacting with the switch outside the confirm '
+              'dialog must not flip the persisted bit');
     }
 
     // ── 6. Credentials really did land in the secrets backend ──────────

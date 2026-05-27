@@ -202,17 +202,47 @@ void main() {
     });
   });
 
-  group('Live-Trading toggle still disabled — B4.3 must not lift the gate',
+  group('Live-Trading toggle still gated when the exchange is disconnected',
       () {
-    testWidgets('switch keeps onChanged: null after the risk layer ships',
+    testWidgets(
+        'switch keeps onChanged: null while exchange eligibility is missing',
         (tester) async {
+      // The `_pump` helper installs a fresh provider that has never gone
+      // through `connect()`, so `eligibility.exchangeConnected` stays false
+      // and the switch must remain non-interactable even though the risk
+      // limits are configured and the kill switch is inactive.
       await _pump(tester);
       final sw = tester.widget<SwitchListTile>(
           find.byKey(const Key('account_live_trading_switch')));
       expect(sw.onChanged, isNull,
-          reason: 'CRITICAL: live toggle must stay disabled — enable is the '
-              'next wave with explicit user confirmation.');
+          reason: 'Exchange gate not yet satisfied — switch must stay '
+              'structurally locked.');
       expect(sw.value, isFalse);
+    });
+
+    testWidgets(
+        'persisted live=true with the exchange disconnected → auto-disables',
+        (tester) async {
+      // The disconnected exchange already fails the eligibility check,
+      // so the auto-disable hook in `build()` must fire even before any
+      // kill-switch trip. This is the "reload after a crash while live
+      // was on but the exchange is still warming up" recovery scenario.
+      final created = await _pump(tester,
+          initialConfig: const RiskConfig(
+            maxPositionRiskPct: 5,
+            maxDailyLossPct: 3,
+            maxDrawdownPct: 10,
+            maxConsecutiveLosses: 5,
+            killSwitchActive: false,
+            liveTradingEnabled: true,
+          ));
+      // First pump runs `build`; the post-frame callback schedules the
+      // disable. Second pump processes the resulting notifyListeners.
+      await tester.pump();
+      await tester.pump();
+      expect(created.risk.liveTradingEnabled, isFalse,
+          reason: 'reloading with live=true but exchange disconnected must '
+              'auto-clear the flag rather than re-arm an unsafe state');
     });
   });
 }

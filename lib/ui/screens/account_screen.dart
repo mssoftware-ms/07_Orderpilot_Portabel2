@@ -1,4 +1,4 @@
-/// Account screen — Welle P4P Step-4.
+/// Account screen — Welle B4.4.
 ///
 /// Five vertically stacked cards backed by [BitunixConnectionProvider]:
 ///   * Credentials-Card: API-Key + Secret entry, Save & Connect, Clear.
@@ -7,10 +7,14 @@
 ///   * Balance-Card: available / margin / unrealized PnL, only when
 ///     connected and a balance is loaded.
 ///   * Positions-Card: DataTable of open positions, only when connected.
-///   * Live-Trading-Card: a **permanently disabled** switch with a tooltip
-///     that points at the pending Welle B4 Step-3 risk layer. A widget
-///     test asserts the switch stays disabled regardless of connection
-///     status — accidental enable would be the worst possible regression.
+///   * Live-Trading-Card: an **eligibility-gated** switch. Interactable iff
+///     all three [LiveModeEligibility] conjuncts pass; flipping it ON pops
+///     a confirm dialog spelling out the real-money implication, flipping
+///     OFF skips the dialog (safety-first). A post-frame auto-disable hook
+///     flips the toggle back off the moment any eligibility gate breaks
+///     (kill-switch activated, exchange disconnected, caps cleared).
+///     [BitunixClient.placeOrder] / [BitunixClient.cancelOrder] still throw
+///     [LiveTradingDisabledException] — order routing lands in P4P Step-2.
 library;
 
 import 'package:flutter/material.dart';
@@ -28,8 +32,8 @@ import '../../services/bitunix_auth.dart';
 import '../themes/app_theme.dart';
 
 const String _kLiveDisabledTooltip =
-    'Live trading requires Welle B4 Step-3 risk layer '
-    '(kill-switch, daily-loss cap). Currently disabled.';
+    'Live trading requires all three eligibility checkmarks below: '
+    'risk limits configured, exchange connected, kill-switch inactive.';
 
 class AccountScreen extends StatefulWidget {
   const AccountScreen({super.key});
@@ -144,6 +148,24 @@ class _AccountScreenState extends State<AccountScreen> {
       builder: (context, provider, _) {
         final risk = context.watch<RiskManager>();
         final paper = context.watch<PaperTradingProvider>();
+        final eligibility = LiveModeEligibility.evaluate(
+          riskManager: risk,
+          exchangeProvider: provider,
+        );
+
+        // Welle B4.4: auto-disable hook. If live trading was turned on but
+        // any eligibility gate has dropped (kill switch activated, exchange
+        // disconnected, caps cleared) flip it back off after this frame
+        // commits. State mutation in `build` is illegal — the post-frame
+        // callback hops out of the current frame so the listener tree can
+        // settle before `disableLiveTrading` notifies again.
+        if (risk.config.liveTradingEnabled && !eligibility.isEligible) {
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            if (!mounted) return;
+            risk.disableLiveTrading(reason: 'Eligibility lost');
+          });
+        }
+
         return Scaffold(
           body: SafeArea(
             child: SingleChildScrollView(
@@ -166,7 +188,7 @@ class _AccountScreenState extends State<AccountScreen> {
                     _positionsCard(context, provider.positions),
                   ],
                   const SizedBox(height: 12),
-                  _liveTradingCard(context, provider, risk),
+                  _liveTradingCard(context, provider, risk, eligibility),
                   const SizedBox(height: 12),
                   _riskLimitsCard(context, risk),
                   const SizedBox(height: 12),
@@ -465,15 +487,16 @@ class _AccountScreenState extends State<AccountScreen> {
   Widget _liveTradingCard(
       BuildContext context,
       BitunixConnectionProvider provider,
-      RiskManager risk) {
-    // Hardcoded false — the provider's getter is `false` by contract and
-    // the switch has `onChanged: null`. Both layers must agree before a
-    // future wave can flip live mode on.
-    const liveEnabled = false;
-    final eligibility = LiveModeEligibility.evaluate(
-      riskManager: risk,
-      exchangeProvider: provider,
-    );
+      RiskManager risk,
+      LiveModeEligibility eligibility) {
+    final liveEnabled = risk.config.liveTradingEnabled;
+    // CRITICAL: onChanged is non-null iff *all three* eligibility conjuncts
+    // pass. The widget tests pin this — anyone who lights the switch up
+    // without going through `eligibility.isEligible` is a regression that
+    // must surface immediately.
+    final ValueChanged<bool>? onChanged = eligibility.isEligible
+        ? (v) => _handleLiveToggle(context, risk, v)
+        : null;
     return Card(
       key: const Key('account_live_trading_card'),
       child: Padding(
@@ -484,25 +507,7 @@ class _AccountScreenState extends State<AccountScreen> {
             Row(
               children: [
                 Expanded(child: _sectionTitle('Live Trading')),
-                Container(
-                  key: const Key('account_step3_pending_pill'),
-                  padding: const EdgeInsets.symmetric(
-                      horizontal: 8, vertical: 3),
-                  decoration: BoxDecoration(
-                    color: AppColors.warningAmber.withValues(alpha: 0.14),
-                    border: Border.all(
-                        color: AppColors.warningAmber.withValues(alpha: 0.6)),
-                    borderRadius: BorderRadius.circular(20),
-                  ),
-                  child: const Text(
-                    'Step-3 pending',
-                    style: TextStyle(
-                      color: AppColors.warningAmber,
-                      fontSize: 11,
-                      fontWeight: FontWeight.w600,
-                    ),
-                  ),
-                ),
+                _liveTradingStatusPill(liveEnabled, eligibility.isEligible),
               ],
             ),
             const SizedBox(height: 4),
@@ -512,33 +517,27 @@ class _AccountScreenState extends State<AccountScreen> {
               child: SwitchListTile(
                 key: const Key('account_live_trading_switch'),
                 title: const Text('Enable live order routing'),
-                subtitle: const Text(
-                  'Disabled until the risk layer ships in Welle B4 Step-3.',
-                  style: TextStyle(
+                subtitle: Text(
+                  eligibility.isEligible
+                      ? 'All eligibility checks pass. Flipping ON requires '
+                          'an explicit confirmation.'
+                      : 'Disabled — see the eligibility checklist below for '
+                          'what is still missing.',
+                  style: const TextStyle(
                     color: AppColors.textMuted,
                     fontSize: 12,
                   ),
                 ),
                 value: liveEnabled,
-                // CRITICAL: onChanged stays `null` so the switch is
-                // structurally non-interactable. A widget regression test
-                // pins this contract — if anyone removes the `null` here,
-                // the test must fail. Welle B4.3-5 only reports
-                // eligibility; the actual enable lands in a follow-up
-                // wave behind an explicit user confirmation.
-                onChanged: null,
+                onChanged: onChanged,
               ),
             ),
-            // Welle B4.3-5: three-condition eligibility readout. Goes
-            // ✓/✗ under the still-disabled switch so the user can see
-            // exactly what's missing before the future wave flips the
-            // toggle on.
             const SizedBox(height: 8),
             _eligibilityReadout(eligibility),
-            // Belt-and-braces: even if the provider getter ever flips
-            // (it shouldn't), the switch is still hard-coded to `false`
-            // via `liveEnabled`. Surface a status line so a developer
-            // who fiddles can see the dependency.
+            // Belt-and-braces: surface the provider-side flag so a
+            // developer who flips the persisted bit by hand can see the
+            // dependency. The provider getter is no longer the gate (the
+            // switch's onChanged is), but the value is informative.
             Padding(
               padding: const EdgeInsets.only(top: 4, left: 12),
               child: Text(
@@ -554,6 +553,93 @@ class _AccountScreenState extends State<AccountScreen> {
         ),
       ),
     );
+  }
+
+  Widget _liveTradingStatusPill(bool liveEnabled, bool isEligible) {
+    final (label, color) = liveEnabled
+        ? ('LIVE', AppColors.bullGreen)
+        : isEligible
+            ? ('Ready', AppColors.accentCyan)
+            : ('Locked', AppColors.warningAmber);
+    return Container(
+      key: const Key('account_live_trading_pill'),
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.14),
+        border: Border.all(color: color.withValues(alpha: 0.6)),
+        borderRadius: BorderRadius.circular(20),
+      ),
+      child: Text(
+        label,
+        style: TextStyle(
+          color: color,
+          fontSize: 11,
+          fontWeight: FontWeight.w600,
+        ),
+      ),
+    );
+  }
+
+  /// Welle B4.4 — Live-toggle dispatch.
+  ///
+  /// `target == false` is the safety path: flips OFF immediately without
+  /// any dialog, so a user yanking back from live mode is never blocked.
+  ///
+  /// `target == true` is the danger path: a non-dismissible confirm dialog
+  /// spells out the real-money implication. Only an explicit "Activate"
+  /// click reaches [RiskManager.enableLiveTrading]; tapping outside or
+  /// hitting Cancel leaves the persisted state untouched.
+  Future<void> _handleLiveToggle(
+      BuildContext context, RiskManager risk, bool target) async {
+    if (!target) {
+      await risk.disableLiveTrading(reason: 'manual');
+      return;
+    }
+    final confirmed = await showDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => AlertDialog(
+        key: const Key('account_enable_live_trading_dialog'),
+        backgroundColor: AppColors.surfaceCard,
+        title: const Row(
+          children: [
+            Icon(Icons.warning_amber_rounded, color: AppColors.warningAmber),
+            SizedBox(width: 8),
+            Expanded(child: Text('Activate Live Trading?')),
+          ],
+        ),
+        content: const Text(
+          'This will enable real-money trading on Bitunix Futures.\n\n'
+          'Before continuing, confirm you understand:\n'
+          '  • The Risk-Layer guards (position risk, daily loss, drawdown, '
+          'consecutive losses) are configured and will block trades that '
+          'breach the caps.\n'
+          '  • The kill switch is currently inactive — trades can fire.\n'
+          '  • Strategy signals will be routed to Bitunix via authenticated '
+          'API calls. You are responsible for the outcomes.',
+        ),
+        actions: [
+          TextButton(
+            key: const Key('account_enable_live_trading_cancel'),
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('Cancel'),
+          ),
+          ElevatedButton.icon(
+            key: const Key('account_enable_live_trading_confirm'),
+            onPressed: () => Navigator.of(ctx).pop(true),
+            icon: const Icon(Icons.bolt, size: 16),
+            label: const Text('Activate Live Trading'),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: AppColors.warningAmber,
+              foregroundColor: Colors.black,
+            ),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+    if (!mounted) return;
+    await risk.enableLiveTrading();
   }
 
   Widget _eligibilityReadout(LiveModeEligibility e) {
