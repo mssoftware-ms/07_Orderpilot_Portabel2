@@ -8,6 +8,7 @@ import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 import 'core/logging/app_log.dart';
 import 'core/navigation/app_navigation.dart';
 import 'features/backtest/backtest_provider.dart';
+import 'features/paper/paper_trading_provider.dart';
 import 'features/studies/studies_provider.dart';
 import 'ui/themes/app_theme.dart';
 import 'ui/screens/home_screen.dart';
@@ -41,6 +42,7 @@ class TradingApp extends StatelessWidget {
       providers: [
         ChangeNotifierProvider(create: (_) => BacktestProvider()),
         ChangeNotifierProvider(create: (_) => StudiesProvider()),
+        ChangeNotifierProvider(create: (_) => PaperTradingProvider()),
         ChangeNotifierProvider(create: (_) => AppNavigation()),
         ChangeNotifierProvider<AppLogStore>.value(value: AppLog.instance),
       ],
