@@ -5,9 +5,10 @@
 /// appends each closed-candle tick to a 500-candle ring buffer, and
 /// re-runs the active strategy through [BacktestService] every tick.
 /// The session's open position and recent closed trades are derived
-/// from the last engine result (the engine's `End of Data` force-close
-/// is the sentinel for "still open"). See [PaperPosition] and
-/// [PaperSession] for the data shape.
+/// from the last engine result: [BacktestResult.openPosition] surfaces
+/// the live position (with SL/TP) when the engine is called with
+/// `extractOpenPosition: true` — see Welle B4.2-1. [PaperPosition] and
+/// [PaperSession] document the on-screen shape.
 ///
 /// Reconnect-cap, symbol/timeframe whitelist and per-tick latency
 /// guards are layered on by Welle B4-4 + B4-5.
@@ -227,6 +228,11 @@ class PaperTradingProvider extends ChangeNotifier {
 
   /// Public for testability — override in tests to inject engine
   /// failures or stubbed results.
+  ///
+  /// Always passes `extractOpenPosition: true` so the engine returns the
+  /// live position via [BacktestResult.openPosition] (carrying SL/TP)
+  /// instead of force-closing it as an `'End of Data'` sentinel trade —
+  /// see Welle B4.2-1.
   @visibleForTesting
   BacktestResult runEngineForBuffer(PaperSession session) {
     final tf = _timeframeFromLabel(session.config.timeframe);
@@ -238,6 +244,7 @@ class PaperTradingProvider extends ChangeNotifier {
           feeRate: session.config.feeRate,
           params: session.config.strategyParams as BbRsiParams,
           timeframe: tf,
+          extractOpenPosition: true,
         );
       case StrategyKind.utBot:
         return BacktestService.runUtBot(
@@ -246,6 +253,7 @@ class PaperTradingProvider extends ChangeNotifier {
           feeRate: session.config.feeRate,
           params: session.config.strategyParams as UtBotParams,
           timeframe: tf,
+          extractOpenPosition: true,
         );
       case StrategyKind.ichimoku:
         return BacktestService.runIchimoku(
@@ -254,30 +262,25 @@ class PaperTradingProvider extends ChangeNotifier {
           feeRate: session.config.feeRate,
           params: session.config.strategyParams as IchimokuParams,
           timeframe: tf,
+          extractOpenPosition: true,
         );
     }
   }
 
   void _absorbResult(PaperSession session, BacktestResult result) {
-    if (result.trades.isEmpty) {
-      session.closedTrades = const [];
+    session.closedTrades = List.of(result.trades);
+    final snap = result.openPosition;
+    if (snap == null) {
       session.openPosition = null;
     } else {
-      final last = result.trades.last;
-      final stillOpen = last.exitReason == 'End of Data';
-      if (stillOpen) {
-        session.closedTrades =
-            result.trades.sublist(0, result.trades.length - 1);
-        session.openPosition = PaperPosition(
-          direction: last.direction,
-          entryPrice: last.entryPrice,
-          quantity: last.quantity,
-          openedAt: last.entryTimestamp,
-        );
-      } else {
-        session.closedTrades = List.of(result.trades);
-        session.openPosition = null;
-      }
+      session.openPosition = PaperPosition(
+        direction: snap.direction,
+        entryPrice: snap.entryPrice,
+        quantity: snap.quantity,
+        openedAt: snap.openedAt,
+        slPrice: snap.slPrice,
+        tpPrice: snap.tpPrice,
+      );
     }
     session.equityCurve = result.equityCurve;
     session.equity = result.equityCurve.isNotEmpty

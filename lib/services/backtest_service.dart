@@ -39,10 +39,18 @@ class BacktestResult {
   final List<EquityPoint> equityCurve;
   final List<ClosedTrade> trades;
 
+  /// Snapshot of the still-open position at the end of the run, populated
+  /// only when the caller passed `extractOpenPosition: true` (default
+  /// `false`). The default path keeps the legacy force-close-at-last-bar
+  /// behaviour (`exitReason == 'End of Data'`) so the Phase-1 reference
+  /// backtest stays bit-exact — see Welle B4.2-1 brief.
+  final OpenPositionSnapshot? openPosition;
+
   const BacktestResult({
     required this.metrics,
     required this.equityCurve,
     required this.trades,
+    this.openPosition,
   });
 }
 
@@ -589,12 +597,22 @@ class BacktestService {
   /// `timeframe` defaults to [Timeframe.h1] for backward compatibility with
   /// the parity fixture; pass the actual candle timeframe to get a correct
   /// annualized Sharpe (Plan §3.4 F-03).
+  ///
+  /// `extractOpenPosition` (Welle B4.2-1, default `false`) toggles whether
+  /// a still-open position at the last bar is force-closed with
+  /// `exitReason == 'End of Data'` (legacy bit-exact behaviour required by
+  /// the Phase-1 reference backtest) or extracted into
+  /// [BacktestResult.openPosition] without entering [BacktestResult.trades].
+  /// The paper-trading provider passes `true` so it can surface live SL/TP
+  /// on the open-position card; every other caller (backtest provider,
+  /// optimizer, parity tests) keeps the default.
   static BacktestResult runBbRsi({
     required List<CandleData> candles,
     required double initialBalance,
     required double feeRate,
     BbRsiParams params = const BbRsiParams(),
     Timeframe timeframe = Timeframe.h1,
+    bool extractOpenPosition = false,
   }) {
     if (candles.length < params.bbPeriod + 1) {
       return BacktestResult(
@@ -1002,14 +1020,24 @@ class BacktestService {
       prevEquity = equity;
     }
 
-    // End-of-data: any pending order is discarded (no next bar to fill on);
-    // any still-open position is force-closed at the last bar's close with
-    // reason 'End of Data', no slippage (mark-to-last). Matches Rust
-    // backtest/mod.rs::run end-of-loop handling.
+    // End-of-data: any pending order is discarded (no next bar to fill on).
+    // Default path (`extractOpenPosition: false`) force-closes any still-open
+    // position at the last bar's close with reason 'End of Data', no slippage
+    // (mark-to-last). Matches Rust backtest/mod.rs::run end-of-loop handling
+    // and keeps the Phase-1 reference backtest bit-exact.
+    // Opt-in path (`extractOpenPosition: true`) snapshots the open position
+    // into the [openPositionSnapshot] return value instead — used by the
+    // paper-trading provider to surface live SL/TP. Trades remain unchanged.
     pending = null;
+    OpenPositionSnapshot? openPositionSnapshot;
     if (position != null && candles.isNotEmpty) {
-      final lastCandle = candles.last;
-      closePosition(lastCandle.close, lastCandle.timestamp, 'End of Data');
+      if (extractOpenPosition) {
+        openPositionSnapshot = _snapshotOpenPosition(position!);
+        position = null;
+      } else {
+        final lastCandle = candles.last;
+        closePosition(lastCandle.close, lastCandle.timestamp, 'End of Data');
+      }
     }
 
     // Compute aggregate metrics
@@ -1050,6 +1078,7 @@ class BacktestService {
       ),
       equityCurve: equityCurve,
       trades: trades,
+      openPosition: openPositionSnapshot,
     );
   }
 
@@ -1079,6 +1108,7 @@ class BacktestService {
     required double feeRate,
     UtBotParams params = const UtBotParams(),
     Timeframe timeframe = Timeframe.m5,
+    bool extractOpenPosition = false,
   }) {
     final n = candles.length;
     // Sanity warm-up gate. EMA(200) dominates for the default Phase-2
@@ -1425,11 +1455,18 @@ class BacktestService {
       prevEquity = equity;
     }
 
-    // End-of-data: discard pending, force-close any still-open position.
+    // End-of-data: discard pending. Default path force-closes any still-open
+    // position with 'End of Data'; opt-in path snapshots it instead (Welle B4.2-1).
     pending = null;
+    OpenPositionSnapshot? openPositionSnapshot;
     if (position != null && candles.isNotEmpty) {
-      final lastCandle = candles.last;
-      closePosition(lastCandle.close, lastCandle.timestamp, 'End of Data');
+      if (extractOpenPosition) {
+        openPositionSnapshot = _snapshotOpenPosition(position!);
+        position = null;
+      } else {
+        final lastCandle = candles.last;
+        closePosition(lastCandle.close, lastCandle.timestamp, 'End of Data');
+      }
     }
 
     final winningTrades = trades.where((t) => t.pnl > 0).toList();
@@ -1464,6 +1501,7 @@ class BacktestService {
       ),
       equityCurve: equityCurve,
       trades: trades,
+      openPosition: openPositionSnapshot,
     );
   }
 
@@ -1496,6 +1534,7 @@ class BacktestService {
     required double feeRate,
     IchimokuParams params = const IchimokuParams(),
     Timeframe timeframe = Timeframe.h1,
+    bool extractOpenPosition = false,
   }) {
     final n = candles.length;
 
@@ -1815,12 +1854,19 @@ class BacktestService {
       prevEquity = equity;
     }
 
-    // End-of-data: discard pending, force-close any open position.
+    // End-of-data: discard pending. Default path force-closes any still-open
+    // position with 'End of Data'; opt-in path snapshots it instead (Welle B4.2-1).
     pending = null;
+    OpenPositionSnapshot? openPositionSnapshot;
     if (position != null && candles.isNotEmpty) {
-      final lastCandle = candles.last;
-      closePosition(
-          lastCandle.close, lastCandle.timestamp, 'End of Data');
+      if (extractOpenPosition) {
+        openPositionSnapshot = _snapshotOpenPosition(position!);
+        position = null;
+      } else {
+        final lastCandle = candles.last;
+        closePosition(
+            lastCandle.close, lastCandle.timestamp, 'End of Data');
+      }
     }
 
     final winningTrades = trades.where((t) => t.pnl > 0).toList();
@@ -1856,6 +1902,25 @@ class BacktestService {
       ),
       equityCurve: equityCurve,
       trades: trades,
+      openPosition: openPositionSnapshot,
+    );
+  }
+
+  /// Snapshot an internal [_OpenPosition] into the cross-engine
+  /// [OpenPositionSnapshot] DTO. NaN / Inf values in SL/TP fall back to
+  /// `null` so the UI renders "—" without leaking degenerate floats —
+  /// matches the Welle B4.2-1 brief's edge-case mitigation.
+  static OpenPositionSnapshot _snapshotOpenPosition(_OpenPosition pos) {
+    final rawSl = pos.stopLoss;
+    final rawTp = pos.takeProfit;
+    return OpenPositionSnapshot(
+      direction: pos.isLong ? 'LONG' : 'SHORT',
+      openedAt: pos.entryTimestamp,
+      entryPrice: pos.entryPrice,
+      quantity: pos.quantity,
+      entryFee: pos.entryFee,
+      slPrice: (rawSl != null && rawSl.isFinite) ? rawSl : null,
+      tpPrice: (rawTp != null && rawTp.isFinite) ? rawTp : null,
     );
   }
 

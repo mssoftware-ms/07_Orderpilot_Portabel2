@@ -1,15 +1,13 @@
 /// Open virtual position in a paper-trading session.
 ///
-/// Re-derived after every WS tick by reading the last entry in the
-/// rolling-window backtest result (the engine force-closes any open
-/// position at the last bar with `exitReason == 'End of Data'` —
-/// PaperTradingProvider treats that sentinel as "still open").
+/// Re-derived after every WS tick by reading
+/// [BacktestResult.openPosition], which the engine populates when called
+/// with `extractOpenPosition: true` — see Welle B4.2-1.
 ///
-/// SL/TP are not yet surfaced through ClosedTrade by BacktestService,
-/// so step-1 carries them as nullable fields and the UI renders "—"
-/// when absent. Step-2 will either extend BacktestResult with the
-/// open-position SL/TP, or re-derive them from the signal-bar
-/// snapshot at entry-time. See Welle B4 step-2 brief.
+/// `slPrice` and `tpPrice` come from the engine snapshot and stay
+/// nullable so warm-up edge cases (NaN/Inf in the SL/TP placement) and
+/// future non-SL strategies render as "—" instead of leaking degenerate
+/// floats to the UI.
 library;
 
 import 'package:flutter/foundation.dart';
@@ -33,11 +31,12 @@ class PaperPosition {
   /// derived directly from the engine's last trade entry.
   final int openedAt;
 
-  /// Absolute SL price at entry. Null in step-1 (BacktestService does
-  /// not expose this for the open position).
+  /// Absolute SL price at entry. Null when the engine snapshot reports
+  /// a missing or non-finite SL — UI renders "—".
   final double? slPrice;
 
-  /// Absolute TP price at entry. Null in step-1.
+  /// Absolute TP price at entry. Null under the same conditions as
+  /// [slPrice].
   final double? tpPrice;
 
   const PaperPosition({

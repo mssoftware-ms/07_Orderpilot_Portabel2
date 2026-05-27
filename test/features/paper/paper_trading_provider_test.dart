@@ -286,10 +286,14 @@ void main() {
       await Future<void>.delayed(Duration.zero);
 
       // Feed the full 400-bar fixture and verify at least once during
-      // the replay we saw an open position (the engine's 'End of Data'
-      // sentinel surfaces as session.openPosition != null).
+      // the replay we saw an open position. Welle B4.2-1: provider calls
+      // the engine with extractOpenPosition: true, so the live position
+      // surfaces via BacktestResult.openPosition (with non-null SL/TP)
+      // instead of the legacy 'End of Data' sentinel trade.
       bool sawOpenPosition = false;
       double? markPriceWhenOpen;
+      double? slWhenOpen;
+      double? tpWhenOpen;
       final fixture = _lcgFixture(400);
       for (final c in fixture) {
         fake.emitKline(_toUpdate(c));
@@ -297,15 +301,22 @@ void main() {
         // queue; pump it so the provider's listener has fired before
         // we read the open-position state.
         await Future<void>.delayed(Duration.zero);
-        if (provider.session!.openPosition != null && !sawOpenPosition) {
+        final pos = provider.session!.openPosition;
+        if (pos != null && !sawOpenPosition) {
           sawOpenPosition = true;
           markPriceWhenOpen = provider.session!.latestMarkPrice;
+          slWhenOpen = pos.slPrice;
+          tpWhenOpen = pos.tpPrice;
         }
       }
 
       expect(sawOpenPosition, isTrue,
           reason: 'fast BB+RSI on 400 LCG candles must open at least one position');
       expect(markPriceWhenOpen, isNotNull);
+      expect(slWhenOpen, isNotNull,
+          reason: 'Welle B4.2-1: SL must surface via openPosition snapshot');
+      expect(tpWhenOpen, isNotNull,
+          reason: 'Welle B4.2-1: TP must surface via openPosition snapshot');
     });
 
     test('engine error per tick logs to AppLog and session stays running',

@@ -128,8 +128,10 @@ class PaperSession {
   /// PaperTradingProvider so the engine replay stays bounded.
   final List<CandleData> candleBuffer;
 
-  /// Open virtual position, re-derived after every tick from the
-  /// engine's last trade (when `exitReason == 'End of Data'`).
+  /// Open virtual position, re-derived after every tick from
+  /// [BacktestResult.openPosition] (Welle B4.2-1, engine called with
+  /// `extractOpenPosition: true`). Null whenever the engine has no
+  /// still-open position at the end of its window.
   PaperPosition? openPosition;
 
   /// Real closed trades — engine result minus the open-position
