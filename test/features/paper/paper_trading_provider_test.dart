@@ -14,6 +14,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:trading_app/core/logging/app_log.dart';
 import 'package:trading_app/core/models/candle.dart';
 import 'package:trading_app/features/backtest/backtest_provider.dart';
+import 'package:trading_app/features/paper/order_event.dart';
 import 'package:trading_app/features/paper/paper_session.dart';
 import 'package:trading_app/features/paper/paper_trading_provider.dart';
 import 'package:trading_app/services/backtest_service.dart';
@@ -237,6 +238,13 @@ void main() {
         await provider.start(config: _fastConfig());
         await Future<void>.delayed(Duration.zero);
         expect(provider.status, PaperSessionStatus.running);
+        // Welle B4.2-3: each fresh session starts with exactly the
+        // sessionStarted event — never inherits the previous session's
+        // trail.
+        final trail = provider.session!.orderTrail;
+        expect(trail, hasLength(1),
+            reason: 'fresh session must start with one sessionStarted event');
+        expect(trail.first.kind, OrderEventKind.sessionStarted);
         await provider.stop();
         expect(provider.status, PaperSessionStatus.stopped);
       }
@@ -547,6 +555,113 @@ void main() {
       expect(provider.session!.config.slippageBps, 3.0);
       final params = provider.session!.config.strategyParams as BbRsiParams;
       expect(params.slippageBps, 3.0);
+    });
+  });
+
+  group('PaperTradingProvider — Welle B4.2-3 order trail', () {
+    test('start() emits sessionStarted as the first trail entry', () async {
+      final fake = FakeBinanceKlineStream();
+      final provider = PaperTradingProvider(streamFactory: () => fake);
+      addTearDown(provider.dispose);
+
+      await provider.start(config: _fastConfig());
+      await Future<void>.delayed(Duration.zero);
+
+      final trail = provider.session!.orderTrail;
+      expect(trail, isNotEmpty);
+      expect(trail.first.kind, OrderEventKind.sessionStarted);
+      expect(trail.first.message, contains('BTCUSDT'));
+    });
+
+    test('stop() emits sessionStopped event', () async {
+      final fake = FakeBinanceKlineStream();
+      final provider = PaperTradingProvider(streamFactory: () => fake);
+      addTearDown(provider.dispose);
+
+      await provider.start(config: _fastConfig());
+      await Future<void>.delayed(Duration.zero);
+      final sessionRef = provider.session!;
+
+      await provider.stop();
+
+      // session reference survives stop until the next start (status went
+      // to stopped, but the trail is still readable).
+      final stopEvent = sessionRef.orderTrail.lastWhere(
+          (e) => e.kind == OrderEventKind.sessionStopped,
+          orElse: () => throw StateError('missing sessionStopped event'));
+      expect(stopEvent.message, contains('user'));
+    });
+
+    test('replay emits positionOpened + positionClosed events with TP hint',
+        () async {
+      final fake = FakeBinanceKlineStream();
+      final provider = PaperTradingProvider(streamFactory: () => fake);
+      addTearDown(provider.dispose);
+
+      await provider.start(config: _fastConfig());
+      await Future<void>.delayed(Duration.zero);
+
+      final fixture = _lcgFixture(400);
+      for (final c in fixture) {
+        fake.emitKline(_toUpdate(c));
+      }
+      await Future<void>.delayed(Duration.zero);
+
+      final trail = provider.session!.orderTrail;
+      final kinds = trail.map((e) => e.kind).toSet();
+      expect(kinds, contains(OrderEventKind.sessionStarted));
+      expect(kinds, contains(OrderEventKind.positionOpened),
+          reason: 'fast BB+RSI on 400 LCG candles must open at least one '
+              'position and emit positionOpened');
+      // The 400-bar LCG fixture reliably produces at least one closed
+      // trade — verify the trail captured it as positionClosed and one
+      // of the SL/TP outcomes.
+      expect(kinds, contains(OrderEventKind.positionClosed));
+      final closeOutcomes = {OrderEventKind.slHit, OrderEventKind.tpHit};
+      final hasOutcome = trail.any((e) => closeOutcomes.contains(e.kind));
+      expect(hasOutcome, isTrue,
+          reason: 'BB+RSI positions exit via SL or TP — order trail must '
+              'record one of those outcomes');
+    });
+
+    test('WS reconnecting → running transition emits wsReconnect event',
+        () async {
+      final fake = FakeBinanceKlineStream();
+      final provider = PaperTradingProvider(streamFactory: () => fake);
+      addTearDown(provider.dispose);
+
+      await provider.start(config: _fastConfig());
+      await Future<void>.delayed(Duration.zero);
+
+      fake.emitStatus(KlineConnectionStatus.reconnecting);
+      await Future<void>.delayed(Duration.zero);
+      fake.emitStatus(KlineConnectionStatus.running);
+      await Future<void>.delayed(Duration.zero);
+
+      final trail = provider.session!.orderTrail;
+      final hasReconnect =
+          trail.any((e) => e.kind == OrderEventKind.wsReconnect);
+      expect(hasReconnect, isTrue);
+    });
+
+    test('order trail is capped at kOrderTrailCap (100) entries', () async {
+      final fake = FakeBinanceKlineStream();
+      final provider = PaperTradingProvider(streamFactory: () => fake);
+      addTearDown(provider.dispose);
+
+      await provider.start(config: _fastConfig());
+      await Future<void>.delayed(Duration.zero);
+
+      // Toggle WS status repeatedly to flood the trail with wsReconnect
+      // events past the cap.
+      for (int i = 0; i < kOrderTrailCap + 30; i++) {
+        fake.emitStatus(KlineConnectionStatus.reconnecting);
+        fake.emitStatus(KlineConnectionStatus.running);
+      }
+      await Future<void>.delayed(Duration.zero);
+
+      expect(provider.session!.orderTrail.length, kOrderTrailCap,
+          reason: 'order trail must be ring-buffered at kOrderTrailCap');
     });
   });
 

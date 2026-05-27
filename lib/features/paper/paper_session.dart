@@ -9,6 +9,7 @@ import '../../core/models/candle.dart';
 import '../../core/models/trade.dart';
 import '../../features/backtest/backtest_provider.dart';
 import '../../services/backtest_service.dart';
+import 'order_event.dart';
 import 'paper_position.dart';
 
 /// Lifecycle status of a paper-trading session.
@@ -174,6 +175,13 @@ class PaperSession {
   /// Count of closed-candle ticks consumed since `start()`.
   int tickCount;
 
+  /// Ring-buffered order-trail event log (Welle B4.2-3). Oldest-first;
+  /// capped at [kOrderTrailCap] entries by PaperTradingProvider so the
+  /// UI render budget stays bounded across long sessions. Always empty
+  /// on a fresh [PaperSession] so 3× start/stop cycles can never leak
+  /// events from a previous session.
+  final List<OrderEvent> orderTrail;
+
   PaperSession({
     required this.config,
     required this.startedAtMs,
@@ -183,10 +191,12 @@ class PaperSession {
     double? equity,
     List<EquityPoint>? equityCurve,
     this.tickCount = 0,
+    List<OrderEvent>? orderTrail,
   })  : candleBuffer = candleBuffer ?? <CandleData>[],
         closedTrades = closedTrades ?? <ClosedTrade>[],
         equity = equity ?? config.initialBalance,
-        equityCurve = equityCurve ?? <EquityPoint>[];
+        equityCurve = equityCurve ?? <EquityPoint>[],
+        orderTrail = orderTrail ?? <OrderEvent>[];
 
   /// Absolute P&L since session start.
   double get totalPnl => equity - config.initialBalance;

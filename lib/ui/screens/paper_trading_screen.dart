@@ -13,6 +13,7 @@ import 'package:provider/provider.dart';
 
 import '../../core/models/trade.dart';
 import '../../features/backtest/backtest_provider.dart';
+import '../../features/paper/order_event.dart';
 import '../../features/paper/paper_position.dart';
 import '../../features/paper/paper_session.dart';
 import '../../features/paper/paper_trading_provider.dart';
@@ -66,6 +67,8 @@ class PaperTradingScreen extends StatelessWidget {
                   const SizedBox(height: 12),
                 ],
                 _RecentTradesCard(trades: session.closedTrades),
+                const SizedBox(height: 12),
+                _OrderTrailCard(trail: session.orderTrail),
               ] else
                 _EmptyStateCard(provider: provider),
             ],
@@ -595,6 +598,140 @@ class _RecentTradesCard extends StatelessWidget {
             style: const TextStyle(color: AppColors.textMuted, fontSize: 12))),
       ],
     );
+  }
+}
+
+// ─── Order trail card (Welle B4.2-3) ──────────────────────────────────────
+
+class _OrderTrailCard extends StatelessWidget {
+  final List<OrderEvent> trail;
+  const _OrderTrailCard({required this.trail});
+
+  static const int _maxRows = 20;
+
+  @override
+  Widget build(BuildContext context) {
+    // Newest first — provider appends to the end of the ring buffer.
+    final ordered = trail.reversed.take(_maxRows).toList();
+
+    return Card(
+      key: const Key('paper-order-trail-card'),
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Row(
+              children: [
+                Icon(Icons.list_alt,
+                    color: AppColors.accentCyan, size: 18),
+                SizedBox(width: 8),
+                Text(
+                  'Order trail',
+                  style: TextStyle(
+                    color: AppColors.textPrimary,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            if (ordered.isEmpty)
+              const Text(
+                'No session events yet.',
+                style: TextStyle(color: AppColors.textMuted, fontSize: 12),
+              )
+            else
+              for (final e in ordered) _OrderTrailRow(event: e),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _OrderTrailRow extends StatelessWidget {
+  final OrderEvent event;
+  const _OrderTrailRow({required this.event});
+
+  @override
+  Widget build(BuildContext context) {
+    final color = _colorFor(event.kind);
+    final label = _labelFor(event.kind);
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 2),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          SizedBox(
+            width: 70,
+            child: Text(
+              _fmtTime(event.timestamp.millisecondsSinceEpoch),
+              style: const TextStyle(
+                  color: AppColors.textMuted, fontSize: 11),
+            ),
+          ),
+          SizedBox(
+            width: 100,
+            child: Text(
+              label,
+              style: TextStyle(
+                color: color,
+                fontSize: 11,
+                fontWeight: FontWeight.w600,
+                letterSpacing: 0.3,
+              ),
+            ),
+          ),
+          Expanded(
+            child: Text(
+              event.message,
+              style: const TextStyle(
+                  color: AppColors.textSecondary, fontSize: 12),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+String _labelFor(OrderEventKind k) {
+  switch (k) {
+    case OrderEventKind.signalReceived:
+      return 'SIGNAL';
+    case OrderEventKind.positionOpened:
+      return 'OPENED';
+    case OrderEventKind.positionClosed:
+      return 'CLOSED';
+    case OrderEventKind.slHit:
+      return 'SL HIT';
+    case OrderEventKind.tpHit:
+      return 'TP HIT';
+    case OrderEventKind.sessionStarted:
+      return 'START';
+    case OrderEventKind.sessionStopped:
+      return 'STOP';
+    case OrderEventKind.wsReconnect:
+      return 'RECONNECT';
+  }
+}
+
+Color _colorFor(OrderEventKind k) {
+  switch (k) {
+    case OrderEventKind.positionOpened:
+      return AppColors.accentCyan;
+    case OrderEventKind.tpHit:
+      return AppColors.bullGreen;
+    case OrderEventKind.slHit:
+      return AppColors.bearRed;
+    case OrderEventKind.wsReconnect:
+      return AppColors.warningAmber;
+    case OrderEventKind.sessionStarted:
+    case OrderEventKind.sessionStopped:
+    case OrderEventKind.signalReceived:
+    case OrderEventKind.positionClosed:
+      return AppColors.textMuted;
   }
 }
 

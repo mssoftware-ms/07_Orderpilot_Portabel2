@@ -255,6 +255,27 @@ void main() {
     });
   });
 
+  group('PaperTradingScreen — Welle B4.2-3 order trail card', () {
+    testWidgets('Order Trail card renders sessionStarted after start',
+        (tester) async {
+      final fake = _FakeStream();
+      final paper = PaperTradingProvider(streamFactory: () => fake);
+      addTearDown(paper.dispose);
+      final bt = BacktestProvider();
+      addTearDown(bt.dispose);
+
+      await tester.runAsync(() async {
+        await paper.start();
+        await Future<void>.delayed(Duration.zero);
+      });
+      await _pump(tester, paper: paper, backtest: bt);
+
+      expect(find.byKey(const Key('paper-order-trail-card')), findsOneWidget);
+      expect(find.text('Order trail'), findsOneWidget);
+      expect(find.text('START'), findsOneWidget);
+    });
+  });
+
   group('PaperTradingScreen — Welle B4.2-2 slippage slider', () {
     testWidgets('slippage card visible in idle, slider enabled', (tester) async {
       final paper = PaperTradingProvider(streamFactory: () => _FakeStream());

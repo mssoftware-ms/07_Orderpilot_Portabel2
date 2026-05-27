@@ -24,6 +24,7 @@ import '../../core/models/timeframe.dart';
 import '../../features/backtest/backtest_provider.dart';
 import '../../services/backtest_service.dart';
 import '../../services/binance_websocket.dart';
+import 'order_event.dart';
 import 'paper_position.dart';
 import 'paper_session.dart';
 
@@ -136,6 +137,9 @@ class PaperTradingProvider extends ChangeNotifier {
     final now = DateTime.now().millisecondsSinceEpoch;
     _session = PaperSession(config: effective, startedAtMs: now);
     _errorMessage = null;
+    _appendOrderEvent(_session!, OrderEventKind.sessionStarted,
+        'Session started — ${effective.symbol} · ${effective.timeframe} · '
+        '${effective.strategyKind.displayLabel}');
 
     // Welle B4-4: gate on the symbol/timeframe whitelists before the
     // WS handshake so a typo'd config does not waste a network round
@@ -179,6 +183,11 @@ class PaperTradingProvider extends ChangeNotifier {
     if (_status == PaperSessionStatus.idle ||
         _status == PaperSessionStatus.stopped) {
       return;
+    }
+    final session = _session;
+    if (session != null) {
+      _appendOrderEvent(session, OrderEventKind.sessionStopped,
+          'Session stopped by user');
     }
     await _tearDownStream();
     _setStatus(PaperSessionStatus.stopped);
@@ -298,6 +307,9 @@ class PaperTradingProvider extends ChangeNotifier {
   }
 
   void _absorbResult(PaperSession session, BacktestResult result) {
+    final prevOpen = session.openPosition;
+    final prevClosedCount = session.closedTrades.length;
+
     session.closedTrades = List.of(result.trades);
     final snap = result.openPosition;
     if (snap == null) {
@@ -316,6 +328,64 @@ class PaperTradingProvider extends ChangeNotifier {
     session.equity = result.equityCurve.isNotEmpty
         ? result.equityCurve.last.equity
         : session.config.initialBalance;
+
+    _emitTradeEvents(session, prevOpen: prevOpen, prevClosedCount: prevClosedCount);
+  }
+
+  /// Emit the [OrderEvent] deltas implied by a freshly absorbed engine
+  /// result: every new closed trade becomes a `positionClosed` (plus
+  /// `slHit` / `tpHit` when the exit reason matches), and a fresh open
+  /// position becomes a `positionOpened`. The "fresh open" delta is
+  /// detected by [PaperPosition.openedAt] so a same-tick close-then-open
+  /// sequence still emits both events.
+  void _emitTradeEvents(
+    PaperSession session, {
+    required PaperPosition? prevOpen,
+    required int prevClosedCount,
+  }) {
+    final newClosedCount = session.closedTrades.length;
+    for (int i = prevClosedCount; i < newClosedCount; i++) {
+      final t = session.closedTrades[i];
+      final pnlSign = t.pnl >= 0 ? '+' : '';
+      _appendOrderEvent(
+        session,
+        OrderEventKind.positionClosed,
+        '${t.direction} closed @ ${t.exitPrice.toStringAsFixed(2)} '
+            '($pnlSign${t.pnl.toStringAsFixed(2)}, ${t.exitReason})',
+      );
+      if (t.exitReason == 'StopLoss') {
+        _appendOrderEvent(session, OrderEventKind.slHit,
+            'SL hit @ ${t.exitPrice.toStringAsFixed(2)}');
+      } else if (t.exitReason == 'TakeProfit') {
+        _appendOrderEvent(session, OrderEventKind.tpHit,
+            'TP hit @ ${t.exitPrice.toStringAsFixed(2)}');
+      }
+    }
+
+    final current = session.openPosition;
+    final isNewlyOpened = current != null &&
+        (prevOpen == null || prevOpen.openedAt != current.openedAt);
+    if (isNewlyOpened) {
+      _appendOrderEvent(
+        session,
+        OrderEventKind.positionOpened,
+        '${current.direction} opened @ ${current.entryPrice.toStringAsFixed(2)}',
+      );
+    }
+  }
+
+  /// Append an order-trail event to the session, trimming the head to
+  /// keep the buffer at [kOrderTrailCap].
+  void _appendOrderEvent(
+      PaperSession session, OrderEventKind kind, String message) {
+    session.orderTrail.add(OrderEvent(
+      timestamp: DateTime.now(),
+      kind: kind,
+      message: message,
+    ));
+    while (session.orderTrail.length > kOrderTrailCap) {
+      session.orderTrail.removeAt(0);
+    }
   }
 
   void _onStreamError(Object error, StackTrace stackTrace) {
@@ -335,10 +405,21 @@ class PaperTradingProvider extends ChangeNotifier {
   }
 
   void _onWsStatusChange(KlineConnectionStatus wsStatus) {
+    final wasReconnecting = _status == PaperSessionStatus.reconnecting;
     switch (wsStatus) {
       case KlineConnectionStatus.connecting:
         _setStatus(PaperSessionStatus.connecting);
       case KlineConnectionStatus.running:
+        // Reconnecting → running transition emits a wsReconnect event so
+        // the user can see the gap on the order trail. B4.2-4 will
+        // extend the message with the REST backfill count.
+        if (wasReconnecting) {
+          final session = _session;
+          if (session != null) {
+            _appendOrderEvent(session, OrderEventKind.wsReconnect,
+                'WS reconnected');
+          }
+        }
         _setStatus(PaperSessionStatus.running);
       case KlineConnectionStatus.reconnecting:
         _setStatus(PaperSessionStatus.reconnecting);
