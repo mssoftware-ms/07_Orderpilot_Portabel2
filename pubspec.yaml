@@ -18,6 +18,7 @@ dependencies:
 
   # Networking
   http: ^1.4.0
+  web_socket_channel: ^3.0.0
 
   # State Management
   provider: ^6.1.4
