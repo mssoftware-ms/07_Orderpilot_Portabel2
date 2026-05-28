@@ -538,18 +538,28 @@ impl StrategyAddin for UtBotStrategy {
             None
         };
 
-        if entry.long {
-            if let Some((adx_v, pdi, mdi)) = adx_snapshot {
-                if !regime_passes_filter(
+        // Helper: apply the ADX gate when the filter is enabled.  Returns
+        // `true` when the bar should be *blocked* (gate rejected the entry
+        // or the ADX computation failed).
+        let adx_gate = |snapshot: Option<(f64, f64, f64)>, is_long: bool| -> bool {
+            match snapshot {
+                Some((adx_v, pdi, mdi)) => !regime_passes_filter(
                     adx_v,
                     pdi,
                     mdi,
                     adx_threshold,
-                    true,
+                    is_long,
                     adx_use_di_confluence,
-                ) {
-                    return Some(Signal::NoAction);
-                }
+                ),
+                // Filter enabled but calc_adx returned None — fail
+                // CLOSED: no entry without a valid regime assessment.
+                None => adx_filter_enabled,
+            }
+        };
+
+        if entry.long {
+            if adx_gate(adx_snapshot, true) {
+                return Some(Signal::NoAction);
             }
             let swing = swing_low(&lows_pre)?;
             if swing < current_close {
@@ -567,17 +577,8 @@ impl StrategyAddin for UtBotStrategy {
         }
 
         if entry.short {
-            if let Some((adx_v, pdi, mdi)) = adx_snapshot {
-                if !regime_passes_filter(
-                    adx_v,
-                    pdi,
-                    mdi,
-                    adx_threshold,
-                    false,
-                    adx_use_di_confluence,
-                ) {
-                    return Some(Signal::NoAction);
-                }
+            if adx_gate(adx_snapshot, false) {
+                return Some(Signal::NoAction);
             }
             let swing = swing_high(&highs_pre)?;
             if swing > current_close {

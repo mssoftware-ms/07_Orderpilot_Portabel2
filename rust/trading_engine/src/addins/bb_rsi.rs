@@ -386,7 +386,28 @@ impl StrategyAddin for BbRsiStrategy {
             calc_adx(&highs_full, &lows_full, &closes_full, adx_period)
                 .map(|out| (out.adx[i], out.plus_di[i], out.minus_di[i]))
         } else {
+            // Filter disabled — `None` signals that the gate must be
+            // skipped entirely (pre-R2 path preserved).
             None
+        };
+
+        // Helper: apply the ADX gate when the filter is enabled.  Returns
+        // `true` when the bar should be *blocked* (i.e. the gate rejected
+        // the entry or the ADX computation failed).
+        let adx_gate = |snapshot: Option<(f64, f64, f64)>, is_long: bool| -> bool {
+            match snapshot {
+                Some((adx_v, pdi, mdi)) => !regime_passes_filter(
+                    adx_v,
+                    pdi,
+                    mdi,
+                    adx_threshold,
+                    is_long,
+                    adx_use_di_confluence,
+                ),
+                // Filter is enabled but calc_adx returned None — fail
+                // CLOSED: no entry without a valid regime assessment.
+                None => adx_filter_enabled,
+            }
         };
 
         // ── Entry logic ─────────────────────────────────────────────────
@@ -422,17 +443,8 @@ impl StrategyAddin for BbRsiStrategy {
                     && rsi >= rsi_oversold
                     && swing_low_price < price
                 {
-                    if let Some((adx_v, pdi, mdi)) = adx_snapshot {
-                        if !regime_passes_filter(
-                            adx_v,
-                            pdi,
-                            mdi,
-                            adx_threshold,
-                            true,
-                            adx_use_di_confluence,
-                        ) {
-                            return Some(Signal::NoAction);
-                        }
+                    if adx_gate(adx_snapshot, true) {
+                        return Some(Signal::NoAction);
                     }
                     let sl_distance = price - swing_low_price;
                     let tp_price = price + tp_rr_ratio * sl_distance;
@@ -450,17 +462,8 @@ impl StrategyAddin for BbRsiStrategy {
                     && rsi <= rsi_overbought
                     && swing_high_price > price
                 {
-                    if let Some((adx_v, pdi, mdi)) = adx_snapshot {
-                        if !regime_passes_filter(
-                            adx_v,
-                            pdi,
-                            mdi,
-                            adx_threshold,
-                            false,
-                            adx_use_di_confluence,
-                        ) {
-                            return Some(Signal::NoAction);
-                        }
+                    if adx_gate(adx_snapshot, false) {
+                        return Some(Signal::NoAction);
                     }
                     let sl_distance = swing_high_price - price;
                     let tp_price = price - tp_rr_ratio * sl_distance;
