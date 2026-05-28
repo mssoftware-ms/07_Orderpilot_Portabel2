@@ -108,6 +108,13 @@ pub struct AdxOutput {
 ///    `period` valid DX values. For `i >= 2 * period - 1`:
 ///    `adx[i] = (adx[i-1] * (period - 1) + dx[i]) / period`.
 ///
+/// TODO(S-05): recomputes ADX from bar 0 on every call — O(n²) per
+/// backtest.  A stateful incremental version (`update_adx`) that only
+/// processes the latest bar would cut this to O(n).  Deferred because
+/// statelessness guarantees Dart↔Rust parity and the optimizer bottleneck
+/// is I/O-dominated; if Phase-3 sweep throughput becomes the limiting
+/// factor, consider Rayon parallelisation first.
+///
 /// Returns `None` if `period == 0`, the input slices have mismatched
 /// lengths, or fewer than `period` candles are supplied (i.e. not even
 /// the first +DI / -DI can be seeded). When `period <= n < 2 * period - 1`

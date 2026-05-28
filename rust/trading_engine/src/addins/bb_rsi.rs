@@ -191,6 +191,9 @@ pub fn position_size_pct(entry_price: f64, sl_distance: f64, risk_per_trade: f64
 
 /// Calculate RSI using Wilder's smoothing method.
 ///
+/// TODO(S-05): recomputes from bar 0 on every call — O(n²) per backtest.
+/// See `common.rs:calc_adx` for deferred rationale.
+///
 /// Returns `None` if there are fewer than `period + 1` data points.
 pub fn calc_rsi(closes: &[f64], period: usize) -> Option<f64> {
     if closes.len() < period + 1 {
