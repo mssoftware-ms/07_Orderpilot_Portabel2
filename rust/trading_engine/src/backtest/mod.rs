@@ -410,6 +410,10 @@ impl BacktestEngine {
     /// The entry fee is a cost debited from the account but does NOT reduce
     /// position size — quantity is based on the full allocation (N-13).  In
     /// real futures trading, fees are balance charges, not notional dilution.
+    ///
+    /// When a stop-loss is set, the allocation is adjusted for both entry
+    /// AND exit fees (N-08, 0.06 % per side = 0.12 % round-trip on Bitunix
+    /// VIP0) so the total loss at SL stays within the risk budget.
     fn open_position(
         &mut self,
         entry_price: f64,
@@ -419,7 +423,6 @@ impl BacktestEngine {
         tp: Option<f64>,
         size_pct: f64,
     ) {
-        // Guard against synthetic / corrupt data with zero or negative price.
         debug_assert!(
             entry_price > 0.0,
             "open_position: entry_price must be positive, got {entry_price}"
@@ -428,7 +431,36 @@ impl BacktestEngine {
             return;
         }
 
-        let alloc = self.balance * (size_pct.clamp(0.0, 100.0) / 100.0);
+        let raw_alloc = self.balance * (size_pct.clamp(0.0, 100.0) / 100.0);
+        if raw_alloc <= 0.0 {
+            return;
+        }
+
+        // Fee-adjusted allocation (N-08): the risk budget expressed by
+        // size_pct targets the total loss including entry + exit fees.
+        // Loss at SL = quantity * sl_dist + entry_fee + exit_fee_at_sl.
+        // Exit fee at SL = quantity * sl_price * fee_rate.
+        // Algebra: alloc = raw_alloc / (sl_dist/entry + fee*(1 + sl/entry)).
+        let alloc = if let Some(sl_price) = sl {
+            let sl_dist = (entry_price - sl_price).abs();
+            if sl_dist > 0.0 {
+                let fee_factor =
+                    sl_dist / entry_price + self.config.fee_rate * (1.0 + sl_price / entry_price);
+                if fee_factor > 0.0 {
+                    (raw_alloc / fee_factor).min(self.balance).max(0.0)
+                } else {
+                    raw_alloc
+                }
+            } else {
+                raw_alloc
+            }
+        } else {
+            raw_alloc
+        };
+        if alloc <= 0.0 {
+            return;
+        }
+
         let entry_fee = alloc * self.config.fee_rate;
         let quantity = alloc / entry_price;
 
