@@ -28,7 +28,7 @@ use crate::strategy::{
     AddinManifest, Context, InputSpec, ParameterSchema, Signal, StrategyAddin, StrategyCategory,
 };
 
-use super::common::{calc_adx, regime_passes_filter};
+use super::common::{calc_adx, regime_passes_filter, within_session};
 
 // ─── Indicator helpers (pure functions) ─────────────────────────────────────
 
@@ -310,6 +310,11 @@ impl StrategyAddin for BbRsiStrategy {
         let adx_use_di_confluence =
             ctx.param_or("adx_use_di_confluence", 0.0) >= 0.5;
 
+        let session_enabled = ctx.param_or("session_filter_enabled", 0.0) >= 0.5;
+        let session_start = ctx.param_or("session_start_hour_local", 9.0) as u32;
+        let session_end = ctx.param_or("session_end_hour_local", 23.0) as u32;
+        let tz_offset = ctx.param_or("tz_offset_hours", 1.0) as i32;
+
         // F-09 parity gate: match Dart `startIdx = max(bbPeriod, rsiPeriod + 1)`.
         // Without this, Rust emits signals one bar earlier than Dart at the
         // BB-warmup boundary on real markets (cf. phase1_reference_backtest).
@@ -369,6 +374,18 @@ impl StrategyAddin for BbRsiStrategy {
         let pre_highs: Vec<f64> = pre_signal.iter().map(|c| c.high).collect();
         let swing_low_price = swing_low(&pre_lows)?;
         let swing_high_price = swing_high(&pre_highs)?;
+
+        // ── Session filter ──────────────────────────────────────────────
+        // Default OFF (0.0). When enabled, suppress new entries outside
+        // the configured local-time window. Mirrors UT Bot / Ichimoku
+        // behaviour — open positions are unaffected (engine-side SL/TP
+        // still applies).
+        let current_ts = ctx.all_candles()[ctx.index()].timestamp;
+        if session_enabled
+            && !within_session(current_ts, session_start, session_end, tz_offset)
+        {
+            return Some(Signal::NoAction);
+        }
 
         // ── Welle R2-2 ADX regime snapshot ──────────────────────────────
         // Only computed when the filter is enabled — keeps the disabled
@@ -496,14 +513,14 @@ impl StrategyAddin for BbRsiStrategy {
 pub fn bb_rsi_manifest() -> AddinManifest {
     AddinManifest {
         id: "bb_rsi_v1".to_string(),
-        name: "Bollinger Bands + RSI Mean Reversion".to_string(),
+        name: "Bollinger Bands + RSI Trend Following".to_string(),
         version: "1.0.0".to_string(),
         author: "Trading App Team".to_string(),
         description:
-            "Mean-reversion strategy: enter when price touches a Bollinger Band extreme \
-             with confirming RSI, exit at the middle band or opposite RSI extreme."
+            "Trend-following strategy: price beyond BB marks trend direction, \
+             RSI cross-back provides pullback re-entry, swing-based SL/TP (1:3)."
                 .to_string(),
-        category: StrategyCategory::MeanReversion,
+        category: StrategyCategory::Trend,
         timeframes: vec![Timeframe::M15, Timeframe::H1, Timeframe::H4],
         parameters: vec![
             // Defaults from the video-spec verbesserte Variante
@@ -551,6 +568,40 @@ pub fn bb_rsi_manifest() -> AddinManifest {
                 0.001,
                 1.0,
                 0.001,
+            ),
+            // ── Session filter (default OFF — pre-Phase-2.5 BB+RSI has no
+            //    session gate; toggle ON for Spec §7 London+NY window) ───
+            ParameterSchema::new(
+                "session_filter_enabled",
+                "Session Filter Enabled (0/1)",
+                0.0,
+                0.0,
+                1.0,
+                1.0,
+            ),
+            ParameterSchema::new(
+                "session_start_hour_local",
+                "Session Start Hour (Berlin)",
+                9.0,
+                0.0,
+                23.0,
+                1.0,
+            ),
+            ParameterSchema::new(
+                "session_end_hour_local",
+                "Session End Hour (Berlin)",
+                23.0,
+                1.0,
+                24.0,
+                1.0,
+            ),
+            ParameterSchema::new(
+                "tz_offset_hours",
+                "Local TZ Offset (hours east of UTC)",
+                1.0,
+                -12.0,
+                14.0,
+                1.0,
             ),
             // ── Welle R2-2 ADX regime filter ──────────────────────────
             // All four default to "off" so a fresh BB+RSI instance
@@ -948,9 +999,11 @@ mod tests {
         // rsi_overbought, swing_lookback_bars (D-07), tp_rr_ratio (D-06),
         // risk_per_trade (D-09) + R2-2 ADX filter quartet
         // (adx_filter_enabled, adx_threshold, adx_period,
-        // adx_use_di_confluence) = 13.
-        assert_eq!(manifest.parameters.len(), 13);
-        assert_eq!(manifest.category, StrategyCategory::MeanReversion);
+        // adx_use_di_confluence) + session filter quartet
+        // (session_filter_enabled, session_start_hour_local,
+        // session_end_hour_local, tz_offset_hours) = 17.
+        assert_eq!(manifest.parameters.len(), 17);
+        assert_eq!(manifest.category, StrategyCategory::Trend);
         assert!(manifest
             .parameters
             .iter()

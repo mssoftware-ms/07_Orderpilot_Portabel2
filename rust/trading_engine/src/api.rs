@@ -347,7 +347,7 @@ mod tests {
         let json = get_bb_rsi_manifest();
         let manifest: AddinManifest = serde_json::from_str(&json).unwrap();
         assert_eq!(manifest.id, "bb_rsi_v1");
-        assert_eq!(manifest.category, StrategyCategory::MeanReversion);
+        assert_eq!(manifest.category, StrategyCategory::Trend);
     }
 
     #[test]

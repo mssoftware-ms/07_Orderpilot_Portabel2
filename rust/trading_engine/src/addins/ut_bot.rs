@@ -442,6 +442,7 @@ impl StrategyAddin for UtBotStrategy {
         let session_enabled = ctx.param_or("session_filter_enabled", 0.0) >= 0.5;
         let session_start = ctx.param_or("session_start_hour_local", 9.0) as u32;
         let session_end = ctx.param_or("session_end_hour_local", 23.0) as u32;
+        let tz_offset = ctx.param_or("tz_offset_hours", 1.0) as i32;
         // Path-B toggle (Spec §12.5 / §13.3): default false = strict spec
         // (SMI cross while same-sign with zero); true flips the zero-line
         // gate per `detect_entry` doc.
@@ -505,7 +506,7 @@ impl StrategyAddin for UtBotStrategy {
         // (engine-side SL/TP/BE-trail still applies). Berlin offset is
         // fixed UTC+1 (no DST) — see `within_session` doc in addins/common.rs.
         if session_enabled
-            && !within_session(current_ts, session_start, session_end, 1)
+            && !within_session(current_ts, session_start, session_end, tz_offset)
         {
             return Some(Signal::NoAction);
         }
@@ -675,6 +676,14 @@ pub fn ut_bot_manifest() -> AddinManifest {
                 23.0,
                 1.0,
                 24.0,
+                1.0,
+            ),
+            ParameterSchema::new(
+                "tz_offset_hours",
+                "Local TZ Offset (hours east of UTC)",
+                1.0,
+                -12.0,
+                14.0,
                 1.0,
             ),
             // Path-B toggle (Spec §12.5). Default 0 = strict spec
@@ -1397,7 +1406,7 @@ mod tests {
         // session_end_hour_local, smi_cross_above_zero
         // + R2-3 ADX filter quartet (adx_filter_enabled, adx_threshold,
         // adx_period, adx_use_di_confluence) = 17 parameters.
-        assert_eq!(m.parameters.len(), 17);
+        assert_eq!(m.parameters.len(), 18);
         for required in [
             "ema_period",
             "key_value",
@@ -1411,6 +1420,7 @@ mod tests {
             "session_filter_enabled",
             "session_start_hour_local",
             "session_end_hour_local",
+            "tz_offset_hours",
             "smi_cross_above_zero",
             "adx_filter_enabled",
             "adx_threshold",
