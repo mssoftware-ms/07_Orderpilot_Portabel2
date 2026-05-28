@@ -256,8 +256,20 @@ impl BacktestEngine {
                         .is_stop_hit(candle.low, candle.high);
                     if sl_hit_post {
                         let sl_price = self.position.as_ref().unwrap().stop_loss.unwrap();
+                        // N-15: apply slippage to SL closure (stop→market
+                        // on trigger).  Default 0 bps — BTC/USDT retail
+                        // has negligible spread.  Direction: long sells
+                        // lower, short buys higher (against trader).
+                        let sl_with_slippage = match self.position.as_ref().unwrap().side {
+                            PositionSide::Long => {
+                                sl_price * (1.0 - self.config.slippage_bps / 10000.0)
+                            }
+                            PositionSide::Short => {
+                                sl_price * (1.0 + self.config.slippage_bps / 10000.0)
+                            }
+                        };
                         self.close_position(
-                            sl_price,
+                            sl_with_slippage,
                             candle.timestamp,
                             ExitReason::StopLoss,
                         );
