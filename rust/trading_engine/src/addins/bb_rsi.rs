@@ -499,14 +499,14 @@ impl StrategyAddin for BbRsiStrategy {
 pub fn bb_rsi_manifest() -> AddinManifest {
     AddinManifest {
         id: "bb_rsi_v1".to_string(),
-        name: "Bollinger Bands + RSI Mean Reversion".to_string(),
+        name: "Bollinger Bands + RSI Trend Following".to_string(),
         version: "1.0.0".to_string(),
         author: "Trading App Team".to_string(),
         description:
-            "Mean-reversion strategy: enter when price touches a Bollinger Band extreme \
-             with confirming RSI, exit at the middle band or opposite RSI extreme."
+            "Trend-following strategy: price beyond BB marks trend direction, \
+             RSI cross-back provides pullback re-entry, swing-based SL/TP (1:3)."
                 .to_string(),
-        category: StrategyCategory::MeanReversion,
+        category: StrategyCategory::Trend,
         timeframes: vec![Timeframe::M15, Timeframe::H1, Timeframe::H4],
         parameters: vec![
             // Defaults from the video-spec verbesserte Variante
@@ -953,7 +953,7 @@ mod tests {
         // (adx_filter_enabled, adx_threshold, adx_period,
         // adx_use_di_confluence) = 13.
         assert_eq!(manifest.parameters.len(), 13);
-        assert_eq!(manifest.category, StrategyCategory::MeanReversion);
+        assert_eq!(manifest.category, StrategyCategory::Trend);
         assert!(manifest
             .parameters
             .iter()

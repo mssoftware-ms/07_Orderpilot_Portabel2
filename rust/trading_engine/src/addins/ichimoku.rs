@@ -567,7 +567,7 @@ impl StrategyAddin for IchimokuStrategy {
 
     fn on_candle(&mut self, ctx: &mut Context, _candle: &Candle) -> Option<Signal> {
         // Defaults from `ichimoku_manifest()` per Spec §1 + §12.2. All
-        // five Ichimoku linesare recomputed per-bar from scratch — same
+        // five Ichimoku lines are recomputed per-bar from scratch — same
         // shape as the UT-Bot StrategyAddin path, which keeps the
         // strategy stateless and Dart↔Rust parity-friendly.
         let tenkan_period = ctx.param_or("tenkan_period", 9.0) as usize;
