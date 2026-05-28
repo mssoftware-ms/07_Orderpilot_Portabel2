@@ -8,6 +8,7 @@ library;
 
 import 'dart:async';
 
+import 'package:fake_async/fake_async.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:trading_app/core/models/candle.dart';
 import 'package:trading_app/features/chart/chart_provider.dart';
@@ -460,6 +461,199 @@ void main() {
       // The fake's controller has been closed too via dispose() — no
       // assertion expected, just confirm no exception bubbled.
       expect(true, isTrue);
+    });
+  });
+
+  // ── Welle P4C-H-2 — stale-stream watchdog ─────────────────────────
+  //
+  // Defensive coverage for the smoke-test finding where 1m candles
+  // never ticked into the chart after the wifi was pulled for a
+  // minute. The watchdog watches wall-time since the last kline and
+  // tears the WS down once it exceeds [kChartStaleThresholdFactor]×
+  // the timeframe interval. Tests drive `FakeAsync` to compress time
+  // and inject the matching `now()` clock so DateTime calls inside
+  // the provider observe fake-time too.
+  group('ChartProvider stale-stream watchdog', () {
+    test('reconnects after 2.5x interval without a tick', () {
+      fakeAsync((async) {
+        final start = DateTime.utc(2026, 5, 28);
+        final streams = <FakeBinanceKlineStream>[];
+        final rest = _ScriptedRest()..response = _makeBackfill(5);
+        final p = ChartProvider(
+          timeframe: '1m',
+          wsFactory: () {
+            final s = FakeBinanceKlineStream();
+            streams.add(s);
+            return s;
+          },
+          restFn: rest.call,
+          now: () => start.add(async.elapsed),
+        );
+
+        unawaited(p.load());
+        async.flushMicrotasks();
+        expect(streams.length, 1, reason: 'load() attaches one stream');
+        expect(p.status, ChartStatus.live);
+
+        // 2 minutes of silence on a 1m timeframe → 2.0x — still inside
+        // the grace window, no restart yet.
+        async.elapse(const Duration(minutes: 2));
+        expect(streams.length, 1, reason: 'still inside the 2.5x window');
+
+        // Push past 2.5x → watchdog must restart the WS.
+        async.elapse(const Duration(seconds: 31));
+        async.flushMicrotasks();
+        expect(streams.length, greaterThanOrEqualTo(2),
+            reason: 'watchdog should detach + reattach a fresh stream');
+        expect(p.status, ChartStatus.reconnecting,
+            reason: 'pill flips to reconnecting while the restart runs');
+
+        p.dispose();
+      });
+    });
+
+    test('cooldown floor prevents a reconnect storm', () {
+      fakeAsync((async) {
+        final start = DateTime.utc(2026, 5, 28);
+        final streams = <FakeBinanceKlineStream>[];
+        final rest = _ScriptedRest()..response = _makeBackfill(5);
+        final p = ChartProvider(
+          timeframe: '1m',
+          wsFactory: () {
+            final s = FakeBinanceKlineStream();
+            streams.add(s);
+            return s;
+          },
+          restFn: rest.call,
+          now: () => start.add(async.elapsed),
+        );
+
+        unawaited(p.load());
+        async.flushMicrotasks();
+
+        // Trip the watchdog once.
+        async.elapse(const Duration(minutes: 3));
+        async.flushMicrotasks();
+        final restartsAfterFirst = streams.length;
+        expect(restartsAfterFirst, greaterThanOrEqualTo(2));
+
+        // Two more watchdog ticks within the 30 s cooldown floor must
+        // not trigger any further restart.
+        async.elapse(const Duration(seconds: 5));
+        async.flushMicrotasks();
+        async.elapse(const Duration(seconds: 10));
+        async.flushMicrotasks();
+        expect(streams.length, restartsAfterFirst,
+            reason: 'restarts inside the 30 s cooldown are suppressed');
+
+        p.dispose();
+      });
+    });
+
+    test('an incoming tick resets the watchdog clock', () {
+      fakeAsync((async) {
+        final start = DateTime.utc(2026, 5, 28);
+        final streams = <FakeBinanceKlineStream>[];
+        final rest = _ScriptedRest()..response = _makeBackfill(5);
+        final p = ChartProvider(
+          timeframe: '1m',
+          wsFactory: () {
+            final s = FakeBinanceKlineStream();
+            streams.add(s);
+            return s;
+          },
+          restFn: rest.call,
+          now: () => start.add(async.elapsed),
+        );
+
+        unawaited(p.load());
+        async.flushMicrotasks();
+        final attachedStream = streams.first;
+
+        // 2 minutes elapse, then a real tick arrives — clock should
+        // reset and the watchdog must not fire on the next cycle.
+        async.elapse(const Duration(minutes: 2));
+        attachedStream.emitKline(
+          _makeKline(ts: 60_000, closed: true, close: 101.0),
+        );
+        async.flushMicrotasks();
+        async.elapse(const Duration(minutes: 2));
+        async.flushMicrotasks();
+
+        expect(streams.length, 1,
+            reason: 'a fresh tick must reset the stale clock');
+        p.dispose();
+      });
+    });
+
+    test('dispose cancels the watchdog (no timer leak)', () {
+      fakeAsync((async) {
+        final start = DateTime.utc(2026, 5, 28);
+        final streams = <FakeBinanceKlineStream>[];
+        final rest = _ScriptedRest()..response = _makeBackfill(5);
+        final p = ChartProvider(
+          timeframe: '1m',
+          wsFactory: () {
+            final s = FakeBinanceKlineStream();
+            streams.add(s);
+            return s;
+          },
+          restFn: rest.call,
+          now: () => start.add(async.elapsed),
+        );
+
+        unawaited(p.load());
+        async.flushMicrotasks();
+        p.dispose();
+        async.flushMicrotasks();
+
+        // Far past the stale threshold — must not schedule any new
+        // restart now that the watchdog has been cancelled.
+        final streamsAtDispose = streams.length;
+        async.elapse(const Duration(minutes: 10));
+        async.flushMicrotasks();
+        expect(streams.length, streamsAtDispose);
+        expect(async.pendingTimers, isEmpty,
+            reason: 'no orphan timers may outlive dispose');
+      });
+    });
+
+    test('setTimeframe restarts the watchdog with the new cadence', () {
+      fakeAsync((async) {
+        final start = DateTime.utc(2026, 5, 28);
+        final streams = <FakeBinanceKlineStream>[];
+        final rest = _ScriptedRest()..response = _makeBackfill(5);
+        final p = ChartProvider(
+          timeframe: '1m',
+          wsFactory: () {
+            final s = FakeBinanceKlineStream();
+            streams.add(s);
+            return s;
+          },
+          restFn: rest.call,
+          now: () => start.add(async.elapsed),
+        );
+
+        unawaited(p.load());
+        async.flushMicrotasks();
+        unawaited(p.setTimeframe('5m'));
+        async.flushMicrotasks();
+        final streamsBefore = streams.length;
+
+        // 8 minutes ≈ 1.6× the new 5m interval — still inside the
+        // 2.5× grace window. Must not restart yet.
+        async.elapse(const Duration(minutes: 8));
+        async.flushMicrotasks();
+        expect(streams.length, streamsBefore);
+
+        // Push past 2.5× × 5 m = 12.5 m.
+        async.elapse(const Duration(minutes: 6));
+        async.flushMicrotasks();
+        expect(streams.length, greaterThan(streamsBefore),
+            reason: 'watchdog uses the new 5m cadence after setTimeframe');
+
+        p.dispose();
+      });
     });
   });
 }

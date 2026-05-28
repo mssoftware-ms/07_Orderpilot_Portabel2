@@ -34,6 +34,31 @@ const String _tag = 'Chart';
 /// renders by default (BB period 20, RSI period 14).
 const int kChartBufferCap = 500;
 
+/// Welle P4C-H-2 — stale-stream watchdog tuning.
+///
+/// Maik's smoke-test surfaced two related defects: on 1m the chart
+/// never ticked (no new closed candle in two minutes), and pulling
+/// the wifi for a minute neither flipped the connection pill to
+/// `reconnecting` nor recovered when the wifi came back. The most
+/// likely cause is a half-open TCP socket where the OS still believes
+/// the connection is alive while no data flows (Windows-WSL TCP
+/// keep-alive defaults to ~2 h before the dead socket is detected),
+/// so [BinanceKlineStream]'s exponential-backoff machinery never
+/// triggers because no `onError`/`onDone` ever fires.
+///
+/// The defensive fix is a per-timeframe stale-stream watchdog: every
+/// [kChartStaleCheckIntervalFactor]× the timeframe interval the
+/// provider checks the time-since-last-tick; once we miss
+/// [kChartStaleThresholdFactor]× the interval it tears the WS down
+/// and reattaches a fresh one. A [kChartReconnectCooldown] floor
+/// between restart attempts prevents a flaky network from triggering
+/// a reconnect storm against Binance's edge.
+const double kChartStaleThresholdFactor = 2.5;
+const double kChartStaleCheckIntervalFactor = 1.0;
+const Duration kChartReconnectCooldown = Duration(seconds: 30);
+const Duration kChartWatchdogMinTick = Duration(milliseconds: 500);
+const Duration kChartWatchdogMaxTick = Duration(minutes: 5);
+
 /// Connection-lifecycle status surfaced to the chart screen.
 enum ChartStatus {
   /// Created, no symbol/timeframe loaded yet.
@@ -77,16 +102,23 @@ class ChartProvider extends ChangeNotifier {
     int rsiPeriod = AppConstants.defaultRSIPeriod,
     ChartWsFactory? wsFactory,
     ChartRestFn? restFn,
+    DateTime Function()? now,
   })  : _symbol = symbol, // ignore: prefer_initializing_formals
         _timeframe = timeframe, // ignore: prefer_initializing_formals
         _bbPeriod = bbPeriod, // ignore: prefer_initializing_formals
         _bbStdDev = bbStdDev, // ignore: prefer_initializing_formals
         _rsiPeriod = rsiPeriod, // ignore: prefer_initializing_formals
         _wsFactory = wsFactory ?? (() => BinanceKlineStream()),
-        _restFn = restFn ?? _defaultRestFn;
+        _restFn = restFn ?? _defaultRestFn,
+        _now = now ?? DateTime.now;
 
   final ChartWsFactory _wsFactory;
   final ChartRestFn _restFn;
+
+  /// Clock hook — defaults to [DateTime.now]. Tests inject a clock
+  /// driven off `FakeAsync.elapsed` so the stale-watchdog can be
+  /// exercised in simulated time without a real wall-clock wait.
+  final DateTime Function() _now;
 
   String _symbol;
   String _timeframe;
@@ -104,6 +136,22 @@ class ChartProvider extends ChangeNotifier {
   BinanceKlineStream? _stream;
   StreamSubscription<KlineUpdate>? _klineSub;
   StreamSubscription<KlineConnectionStatus>? _wsStatusSub;
+
+  /// Wall-time of the last received kline. Reset at every
+  /// [_attachStream] so a fresh subscription gets a full grace window
+  /// before the stale-watchdog can fire on it. Null between detach
+  /// and the next attach.
+  DateTime? _lastTickAt;
+
+  /// Wall-time-ms of the last stale-detection-triggered restart.
+  /// Compared against [kChartReconnectCooldown] so a sustained outage
+  /// can't loop-restart the WS faster than once per 30 s. Null
+  /// before any stale restart has fired.
+  int? _lastStaleRestartMs;
+
+  /// Per-attach watchdog timer. Recreated on every successful
+  /// [_attachStream] so a timeframe switch picks up the new interval.
+  Timer? _staleWatchdog;
 
   /// Monotonic counter incremented on every (re)load. Async REST
   /// completions check their snapshot against the live counter before
@@ -238,6 +286,7 @@ class ChartProvider extends ChangeNotifier {
     // late notifyListeners from an in-flight tick, then fire-and-forget
     // the async WS teardown.
     _disposed = true;
+    _stopStaleWatchdog();
     final sub = _klineSub;
     _klineSub = null;
     final statusSub = _wsStatusSub;
@@ -266,9 +315,14 @@ class ChartProvider extends ChangeNotifier {
       cancelOnError: false,
     );
     _wsStatusSub = stream.statusStream.listen(_onWsStatusChange);
+    // Reset the stale-watchdog clock so the fresh subscription gets a
+    // full grace window before the watchdog can decide it's dead.
+    _lastTickAt = _now();
+    _startStaleWatchdog();
   }
 
   Future<void> _detachStream() async {
+    _stopStaleWatchdog();
     final sub = _klineSub;
     _klineSub = null;
     await sub?.cancel();
@@ -284,6 +338,7 @@ class ChartProvider extends ChangeNotifier {
 
   void _onKline(KlineUpdate update) {
     if (_disposed) return;
+    _lastTickAt = _now();
     _candles.add(update.toCandle());
     while (_candles.length > kChartBufferCap) {
       _candles.removeAt(0);
@@ -334,6 +389,118 @@ class ChartProvider extends ChangeNotifier {
     // stream never auto-closes on transient drops; if onDone fires it
     // means the controller was explicitly disposed (which we already
     // handle elsewhere). Nothing to do here.
+  }
+
+  /// Welle P4C-H-2: start a periodic watchdog that compares the
+  /// wall-time since the last kline against
+  /// [kChartStaleThresholdFactor]× the timeframe interval. Recreated
+  /// on every [_attachStream], so a timeframe switch picks up the new
+  /// cadence.
+  void _startStaleWatchdog() {
+    _stopStaleWatchdog();
+    if (_disposed) return;
+    final tickEvery = _watchdogTickInterval(_timeframe);
+    _staleWatchdog = Timer.periodic(tickEvery, (_) => _evaluateStale());
+  }
+
+  void _stopStaleWatchdog() {
+    _staleWatchdog?.cancel();
+    _staleWatchdog = null;
+  }
+
+  /// Watchdog callback — runs at every check interval and tears the
+  /// stream down if no kline has arrived within
+  /// [kChartStaleThresholdFactor]× the timeframe interval.
+  /// Self-cooldown via [kChartReconnectCooldown] prevents a sustained
+  /// outage from looping the restart faster than once per 30 s.
+  void _evaluateStale() {
+    if (_disposed) return;
+    final tickAt = _lastTickAt;
+    if (tickAt == null) return;
+    final intervalMs = _timeframeToMs(_timeframe);
+    final nowDt = _now();
+    final elapsedMs = nowDt.difference(tickAt).inMilliseconds;
+    final thresholdMs = (intervalMs * kChartStaleThresholdFactor).round();
+    if (elapsedMs < thresholdMs) return;
+
+    final nowMs = nowDt.millisecondsSinceEpoch;
+    final lastRestart = _lastStaleRestartMs;
+    if (lastRestart != null &&
+        nowMs - lastRestart < kChartReconnectCooldown.inMilliseconds) {
+      return;
+    }
+    _lastStaleRestartMs = nowMs;
+    AppLog.warn(
+      _tag,
+      'Stale stream detected for $_symbol/$_timeframe '
+      '(no tick for ${elapsedMs}ms ≥ ${thresholdMs}ms) — restarting WS',
+    );
+    if (_status != ChartStatus.reconnecting) {
+      _setStatus(ChartStatus.reconnecting);
+    }
+    unawaited(_restartStream());
+  }
+
+  /// Tear down the current WS without re-running the REST backfill,
+  /// then attach a fresh one. Used by the stale-watchdog when the
+  /// existing subscription has gone silent — a full [load] would
+  /// pummel the REST endpoint on every reconnect attempt.
+  Future<void> _restartStream() async {
+    if (_disposed) return;
+    try {
+      await _detachStream();
+    } catch (e, st) {
+      AppLog.warn(_tag, 'Detach during stale-restart failed: $e', e, st);
+    }
+    if (_disposed) return;
+    try {
+      await _attachStream();
+    } catch (e, st) {
+      AppLog.warn(_tag, 'Reattach during stale-restart failed: $e', e, st);
+      // Keep the pill on `reconnecting` so the next watchdog tick
+      // (after the cooldown floor) takes another shot.
+    }
+  }
+
+  /// Pick a watchdog poll interval bounded to a sensible range. Tied
+  /// to the timeframe so 1m polls every minute (cheap) and 1d polls
+  /// at the kChartWatchdogMaxTick floor (so the daily chart still
+  /// notices a half-day outage without waking the timer every day).
+  Duration _watchdogTickInterval(String timeframe) {
+    final intervalMs = _timeframeToMs(timeframe);
+    final scaledMs = (intervalMs * kChartStaleCheckIntervalFactor).round();
+    if (scaledMs < kChartWatchdogMinTick.inMilliseconds) {
+      return kChartWatchdogMinTick;
+    }
+    if (scaledMs > kChartWatchdogMaxTick.inMilliseconds) {
+      return kChartWatchdogMaxTick;
+    }
+    return Duration(milliseconds: scaledMs);
+  }
+
+  /// Convert a Binance timeframe label to its candle duration in ms.
+  /// Falls back to 1 m on a malformed label so the watchdog can't
+  /// divide-by-zero its way into a tight loop.
+  static int _timeframeToMs(String timeframe) {
+    final match = RegExp(r'^(\d+)([smhdwM])$').firstMatch(timeframe);
+    if (match == null) return 60 * 1000;
+    final value = int.tryParse(match.group(1)!) ?? 1;
+    switch (match.group(2)!) {
+      case 's':
+        return value * 1000;
+      case 'm':
+        return value * 60 * 1000;
+      case 'h':
+        return value * 60 * 60 * 1000;
+      case 'd':
+        return value * 24 * 60 * 60 * 1000;
+      case 'w':
+        return value * 7 * 24 * 60 * 60 * 1000;
+      case 'M':
+        return value * 30 * 24 * 60 * 60 * 1000;
+      default:
+        return 60 * 1000;
+    }
   }
 
   void _recomputeIndicators() {
