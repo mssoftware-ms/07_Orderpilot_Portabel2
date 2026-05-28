@@ -297,6 +297,32 @@ void main() {
       p.dispose();
     });
 
+    test('setTimeframe(`30m`) wires the new Binance-supported interval',
+        () async {
+      // Welle P4C-H-1: '30m' replaced the unsupported '3h' slot.
+      // Pin the provider against accepting the new interval so a
+      // future regression in supportedTimeframes is caught here too.
+      final streams = <FakeBinanceKlineStream>[];
+      final rest = _ScriptedRest()..response = _makeBackfill(5);
+      final p = ChartProvider(
+        wsFactory: () {
+          final s = FakeBinanceKlineStream();
+          streams.add(s);
+          return s;
+        },
+        restFn: rest.call,
+      );
+
+      await p.load();
+      await p.setTimeframe('30m');
+
+      expect(p.timeframe, '30m');
+      expect(streams.last.lastInterval, '30m');
+      expect(rest.calls.last.interval, '30m');
+      expect(p.status, ChartStatus.live);
+      p.dispose();
+    });
+
     test(
       'setIndicatorParams() recomputes locally without restarting stream',
       () async {

@@ -17,10 +17,28 @@ class AppConstants {
   // Supported symbols
   static const List<String> supportedSymbols = ['BTCUSDT', 'ETHUSDT'];
 
-  // Supported timeframes
+  // Supported timeframes.
+  //
+  // Welle P4C-H-1: `'3h'` was removed because Binance Spot's kline
+  // endpoint has no 3h interval — selecting it left the chart frozen
+  // on a silent WS connect failure. `'30m'` takes its slot so the chip
+  // row keeps eight entries (no UI re-layout) and the whitelist stays
+  // a strict subset of Binance's documented kline intervals
+  // (`1s, 1m, 3m, 5m, 15m, 30m, 1h, 2h, 4h, 6h, 8h, 12h, 1d, 3d, 1w, 1M`).
   static const List<String> supportedTimeframes = [
-    '1m', '5m', '15m', '1h', '2h', '3h', '4h', '1d',
+    '1m', '5m', '15m', '30m', '1h', '2h', '4h', '1d',
   ];
+
+  /// Binance Spot kline-interval whitelist as documented at
+  /// <https://developers.binance.com/docs/binance-spot-api-docs/web-socket-streams#kline-candlestick-streams>.
+  /// Used by [AppConstantsAssertions] (see test) to pin
+  /// [supportedTimeframes] against the upstream set so future
+  /// additions can't repeat the `'3h'` mistake.
+  static const Set<String> binanceSpotKlineIntervals = {
+    '1s', '1m', '3m', '5m', '15m', '30m',
+    '1h', '2h', '4h', '6h', '8h', '12h',
+    '1d', '3d', '1w', '1M',
+  };
 
   // BB+RSI defaults
   static const int defaultBBPeriod = 20;
