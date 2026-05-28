@@ -71,7 +71,7 @@ enum SignalType { enterLong, enterShort, exit, moveStop, noAction }
 class RustSignal {
   final SignalType type;
   final double? sl;
-  final List<double> tp;
+  final double? tp;
   final double sizePct;
   final String? exitReason;
   final double? newSl;
@@ -79,7 +79,7 @@ class RustSignal {
   const RustSignal({
     required this.type,
     this.sl,
-    this.tp = const [],
+    this.tp,
     this.sizePct = 100.0,
     this.exitReason,
     this.newSl,
@@ -93,11 +93,11 @@ class RustSignal {
   static RustSignal noAction() =>
       const RustSignal(type: SignalType.noAction);
 
-  static RustSignal enterLong({double? sl, List<double>? tp, double sizePct = 100.0}) =>
-      RustSignal(type: SignalType.enterLong, sl: sl, tp: tp ?? [], sizePct: sizePct);
+  static RustSignal enterLong({double? sl, double? tp, double sizePct = 100.0}) =>
+      RustSignal(type: SignalType.enterLong, sl: sl, tp: tp, sizePct: sizePct);
 
-  static RustSignal enterShort({double? sl, List<double>? tp, double sizePct = 100.0}) =>
-      RustSignal(type: SignalType.enterShort, sl: sl, tp: tp ?? [], sizePct: sizePct);
+  static RustSignal enterShort({double? sl, double? tp, double sizePct = 100.0}) =>
+      RustSignal(type: SignalType.enterShort, sl: sl, tp: tp, sizePct: sizePct);
 
   static RustSignal exit(String reason) =>
       RustSignal(type: SignalType.exit, exitReason: reason);

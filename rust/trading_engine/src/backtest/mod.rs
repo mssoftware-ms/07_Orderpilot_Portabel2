@@ -15,7 +15,9 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::models::{BacktestMetrics, Candle, ClosedTrade, ExitReason, Position, PositionSide, Timeframe};
+use crate::models::{
+    BacktestMetrics, Candle, ClosedTrade, ExitReason, Position, PositionSide, Timeframe,
+};
 use crate::strategy::{Context, Signal, StrategyAddin};
 
 // ─── Configuration ───────────────────────────────────────────────────────────
@@ -194,7 +196,11 @@ impl BacktestEngine {
         // Reset strategy
         strategy.on_reset();
 
-        // Build context
+        // Build context. Engine config is authoritative for execution fees,
+        // so inject it into strategy params as well; otherwise strategy-level
+        // fee-aware sizing and engine fee accounting can silently diverge.
+        let mut params = params;
+        params.insert("fee_rate".to_string(), self.config.fee_rate);
         let mut ctx = Context::new(candles.to_vec(), self.config.timeframe, params);
 
         let num_candles = candles.len();
@@ -225,8 +231,11 @@ impl BacktestEngine {
             // "first in queue" — both engines apply the same rule so the
             // Dart↔Rust parity is preserved.
             if self.position.is_some() {
-                let tp_hit_first =
-                    self.position.as_ref().unwrap().is_tp_hit(candle.low, candle.high);
+                let tp_hit_first = self
+                    .position
+                    .as_ref()
+                    .unwrap()
+                    .is_tp_hit(candle.low, candle.high);
                 if tp_hit_first {
                     let tp_price = self.position.as_ref().unwrap().take_profit.unwrap();
                     self.close_position(tp_price, candle.timestamp, ExitReason::TakeProfit);
@@ -235,12 +244,8 @@ impl BacktestEngine {
                         if !pos.breakeven_applied {
                             if let Some(distance) = pos.initial_sl_distance {
                                 let reached = match pos.side {
-                                    PositionSide::Long => {
-                                        candle.high >= pos.entry_price + distance
-                                    }
-                                    PositionSide::Short => {
-                                        candle.low <= pos.entry_price - distance
-                                    }
+                                    PositionSide::Long => candle.high >= pos.entry_price + distance,
+                                    PositionSide::Short => candle.low <= pos.entry_price - distance,
                                 };
                                 if reached {
                                     pos.stop_loss = Some(pos.entry_price);
@@ -315,8 +320,7 @@ impl BacktestEngine {
         // annualized by sqrt(periods_per_year(timeframe)). Pass the equity
         // curve and timeframe so `from_trades` can do the canonical
         // calculation (matching the Dart engine).
-        let equity_series: Vec<f64> =
-            self.equity_curve.iter().map(|p| p.equity).collect();
+        let equity_series: Vec<f64> = self.equity_curve.iter().map(|p| p.equity).collect();
         let metrics = BacktestMetrics::from_trades(
             self.trades.clone(),
             self.config.initial_balance,
@@ -368,18 +372,16 @@ impl BacktestEngine {
                 self.pending_order = Some(PendingOrder::Exit { reason });
             }
             Signal::MoveStop { new_sl } if self.position.is_some() => {
-                // N-24: skip move if SL would cross to wrong side of entry.
-                if let Some(ref pos) = self.position {
-                    let valid = match pos.side {
-                        PositionSide::Long => new_sl < pos.entry_price,
-                        PositionSide::Short => new_sl > pos.entry_price,
-                    };
-                    if !valid {
-                        return;
-                    }
-                }
                 if let Some(ref mut pos) = self.position {
-                    pos.stop_loss = Some(new_sl);
+                    let tightens_or_locks_profit = match (pos.side, pos.stop_loss) {
+                        (PositionSide::Long, Some(current_sl)) => new_sl > current_sl,
+                        (PositionSide::Short, Some(current_sl)) => new_sl < current_sl,
+                        (PositionSide::Long, None) => new_sl < pos.entry_price,
+                        (PositionSide::Short, None) => new_sl > pos.entry_price,
+                    };
+                    if tightens_or_locks_profit {
+                        pos.stop_loss = Some(new_sl);
+                    }
                 }
             }
             _ => {} // ignore invalid combinations
@@ -434,13 +436,10 @@ impl BacktestEngine {
 
     /// Open a new position, deducting entry fee from balance.
     ///
-    /// The entry fee is a cost debited from the account but does NOT reduce
-    /// position size — quantity is based on the full allocation (N-13).  In
-    /// real futures trading, fees are balance charges, not notional dilution.
-    ///
-    /// When a stop-loss is set, the allocation is adjusted for both entry
-    /// AND exit fees (N-08, 0.06 % per side = 0.12 % round-trip on Bitunix
-    /// VIP0) so the total loss at SL stays within the risk budget.
+    /// `size_pct` is a notional allocation percentage of current balance.
+    /// Strategy-level risk sizing must convert its risk budget into this
+    /// percentage before emitting a signal; the engine must not reinterpret
+    /// `size_pct` as a risk budget or position sizes get inflated twice.
     fn open_position(
         &mut self,
         entry_price: f64,
@@ -476,32 +475,19 @@ impl BacktestEngine {
             }
         }
 
-        let raw_alloc = self.balance * (size_pct.clamp(0.0, 100.0) / 100.0);
-        if raw_alloc <= 0.0 {
-            return;
+        // N-23b: validate TP is on the profit side of the actual fill price.
+        // Signals are decided on the previous candle but filled at next-bar
+        // open, so gaps can invalidate brackets that looked valid at signal
+        // time. Skip rather than opening a trade with an immediately-wrong TP.
+        if let Some(tp_price) = tp {
+            match side {
+                PositionSide::Long if tp_price <= entry_price => return,
+                PositionSide::Short if tp_price >= entry_price => return,
+                _ => {}
+            }
         }
 
-        // Fee-adjusted allocation (N-08): the risk budget expressed by
-        // size_pct targets the total loss including entry + exit fees.
-        // Loss at SL = quantity * sl_dist + entry_fee + exit_fee_at_sl.
-        // Exit fee at SL = quantity * sl_price * fee_rate.
-        // Algebra: alloc = raw_alloc / (sl_dist/entry + fee*(1 + sl/entry)).
-        let alloc = if let Some(sl_price) = sl {
-            let sl_dist = (entry_price - sl_price).abs();
-            if sl_dist > 0.0 {
-                let fee_factor =
-                    sl_dist / entry_price + self.config.fee_rate * (1.0 + sl_price / entry_price);
-                if fee_factor > 0.0 {
-                    (raw_alloc / fee_factor).min(self.balance).max(0.0)
-                } else {
-                    raw_alloc
-                }
-            } else {
-                raw_alloc
-            }
-        } else {
-            raw_alloc
-        };
+        let alloc = self.balance * (size_pct.clamp(0.0, 100.0) / 100.0);
         if alloc <= 0.0 {
             return;
         }
@@ -597,11 +583,7 @@ impl BacktestEngine {
                 let entry_notional = pos.entry_price * pos.quantity;
                 let unrealized = pos.unrealized_pnl(current_price);
                 let est_exit_fee = pos.quantity * current_price * self.config.fee_rate;
-                self.balance
-                    + entry_notional
-                    + unrealized
-                    - self.current_entry_fee
-                    - est_exit_fee
+                self.balance + entry_notional + unrealized - self.current_entry_fee - est_exit_fee
             }
             None => self.balance,
         }
@@ -759,13 +741,16 @@ mod tests {
         let candles = vec![
             candle(1000, 100.0, 101.0, 99.0, 100.0),
             candle(2000, 100.0, 101.0, 99.0, 100.0), // entry
-            candle(3000, 99.0, 100.0, 94.0, 96.0),    // SL hit (low=94 < 95)
+            candle(3000, 99.0, 100.0, 94.0, 96.0),   // SL hit (low=94 < 95)
             candle(4000, 96.0, 97.0, 95.0, 96.0),
         ];
 
         let config = BacktestConfig::new(10_000.0, 0.0, Timeframe::H1);
         let mut engine = BacktestEngine::new(config);
-        let mut strategy = SlTpStrategy { sl: 95.0, tp: 110.0 };
+        let mut strategy = SlTpStrategy {
+            sl: 95.0,
+            tp: 110.0,
+        };
         let result = engine.run(&mut strategy, &candles, HashMap::new());
 
         assert_eq!(result.metrics.total_trades, 1);
@@ -786,7 +771,10 @@ mod tests {
 
         let config = BacktestConfig::new(10_000.0, 0.0, Timeframe::H1);
         let mut engine = BacktestEngine::new(config);
-        let mut strategy = SlTpStrategy { sl: 90.0, tp: 105.0 };
+        let mut strategy = SlTpStrategy {
+            sl: 90.0,
+            tp: 105.0,
+        };
         let result = engine.run(&mut strategy, &candles, HashMap::new());
 
         assert_eq!(result.metrics.total_trades, 1);
@@ -807,14 +795,14 @@ mod tests {
 
         let config = BacktestConfig::new(10_000.0, 0.0, Timeframe::H1);
         let mut engine = BacktestEngine::new(config);
-        let mut strategy = SlTpStrategy { sl: 80.0, tp: 200.0 }; // very wide SL/TP
+        let mut strategy = SlTpStrategy {
+            sl: 80.0,
+            tp: 200.0,
+        }; // very wide SL/TP
         let result = engine.run(&mut strategy, &candles, HashMap::new());
 
         assert_eq!(result.metrics.total_trades, 1);
-        assert_eq!(
-            result.metrics.trades[0].exit_reason,
-            ExitReason::EndOfData
-        );
+        assert_eq!(result.metrics.trades[0].exit_reason, ExitReason::EndOfData);
         assert_eq!(result.metrics.trades[0].exit_price, 101.0);
     }
 
@@ -824,14 +812,22 @@ mod tests {
         impl StrategyAddin for NoOpStrategy {
             fn manifest(&self) -> crate::strategy::AddinManifest {
                 crate::strategy::AddinManifest {
-                    id: "noop".into(), name: "NoOp".into(), version: "0.1.0".into(),
-                    author: "test".into(), description: "test".into(),
+                    id: "noop".into(),
+                    name: "NoOp".into(),
+                    version: "0.1.0".into(),
+                    author: "test".into(),
+                    description: "test".into(),
                     category: crate::strategy::StrategyCategory::Custom,
-                    timeframes: vec![Timeframe::H1], parameters: vec![],
+                    timeframes: vec![Timeframe::H1],
+                    parameters: vec![],
                 }
             }
-            fn required_inputs(&self) -> Vec<crate::strategy::InputSpec> { vec![] }
-            fn on_candle(&mut self, _ctx: &mut Context, _candle: &Candle) -> Option<Signal> { None }
+            fn required_inputs(&self) -> Vec<crate::strategy::InputSpec> {
+                vec![]
+            }
+            fn on_candle(&mut self, _ctx: &mut Context, _candle: &Candle) -> Option<Signal> {
+                None
+            }
             fn on_reset(&mut self) {}
         }
 
@@ -856,34 +852,56 @@ mod tests {
     #[test]
     fn test_equity_curve_drawdown() {
         // Two trades: first a loss, then a win
-        struct TwoTradeStrategy { trade_num: usize }
+        struct TwoTradeStrategy {
+            trade_num: usize,
+        }
         impl StrategyAddin for TwoTradeStrategy {
             fn manifest(&self) -> crate::strategy::AddinManifest {
                 crate::strategy::AddinManifest {
-                    id: "two".into(), name: "Two".into(), version: "0.1.0".into(),
-                    author: "test".into(), description: "test".into(),
+                    id: "two".into(),
+                    name: "Two".into(),
+                    version: "0.1.0".into(),
+                    author: "test".into(),
+                    description: "test".into(),
                     category: crate::strategy::StrategyCategory::Custom,
-                    timeframes: vec![Timeframe::H1], parameters: vec![],
+                    timeframes: vec![Timeframe::H1],
+                    parameters: vec![],
                 }
             }
-            fn required_inputs(&self) -> Vec<crate::strategy::InputSpec> { vec![] }
+            fn required_inputs(&self) -> Vec<crate::strategy::InputSpec> {
+                vec![]
+            }
             fn on_candle(&mut self, ctx: &mut Context, _candle: &Candle) -> Option<Signal> {
                 let i = ctx.index();
                 match i {
                     1 if !ctx.in_position => {
                         self.trade_num += 1;
-                        Some(Signal::EnterLong { sl: None, tp: None, size_pct: 100.0 })
+                        Some(Signal::EnterLong {
+                            sl: None,
+                            tp: None,
+                            size_pct: 100.0,
+                        })
                     }
-                    2 if ctx.in_position => Some(Signal::Exit { reason: ExitReason::Signal("exit1".into()) }),
+                    2 if ctx.in_position => Some(Signal::Exit {
+                        reason: ExitReason::Signal("exit1".into()),
+                    }),
                     3 if !ctx.in_position => {
                         self.trade_num += 1;
-                        Some(Signal::EnterLong { sl: None, tp: None, size_pct: 100.0 })
+                        Some(Signal::EnterLong {
+                            sl: None,
+                            tp: None,
+                            size_pct: 100.0,
+                        })
                     }
-                    4 if ctx.in_position => Some(Signal::Exit { reason: ExitReason::Signal("exit2".into()) }),
+                    4 if ctx.in_position => Some(Signal::Exit {
+                        reason: ExitReason::Signal("exit2".into()),
+                    }),
                     _ => None,
                 }
             }
-            fn on_reset(&mut self) { self.trade_num = 0; }
+            fn on_reset(&mut self) {
+                self.trade_num = 0;
+            }
         }
 
         // F-04: signals execute at next-bar OPEN. The strategy signals
@@ -896,10 +914,10 @@ mod tests {
         // fixture, just sourced from different OHLC slots.
         let candles = vec![
             candle(1000, 100.0, 101.0, 99.0, 100.0),
-            candle(2000, 100.0, 101.0, 99.0, 100.0),  // trade 1 entry @ open=100
-            candle(3000, 100.0, 101.0, 99.0, 100.0),  // signal Exit
-            candle(4000, 98.0, 99.0, 97.0, 98.0),     // trade 1 exit @ open=98 (loss); signal Enter
-            candle(5000, 98.0, 99.0, 97.0, 98.0),     // trade 2 entry @ open=98; signal Exit
+            candle(2000, 100.0, 101.0, 99.0, 100.0), // trade 1 entry @ open=100
+            candle(3000, 100.0, 101.0, 99.0, 100.0), // signal Exit
+            candle(4000, 98.0, 99.0, 97.0, 98.0),    // trade 1 exit @ open=98 (loss); signal Enter
+            candle(5000, 98.0, 99.0, 97.0, 98.0),    // trade 2 entry @ open=98; signal Exit
             candle(6000, 105.0, 106.0, 104.0, 105.0), // trade 2 exit @ open=105 (win)
         ];
 
@@ -923,17 +941,29 @@ mod tests {
         impl StrategyAddin for ShortStrategy {
             fn manifest(&self) -> crate::strategy::AddinManifest {
                 crate::strategy::AddinManifest {
-                    id: "short".into(), name: "Short".into(), version: "0.1.0".into(),
-                    author: "test".into(), description: "test".into(),
+                    id: "short".into(),
+                    name: "Short".into(),
+                    version: "0.1.0".into(),
+                    author: "test".into(),
+                    description: "test".into(),
                     category: crate::strategy::StrategyCategory::Custom,
-                    timeframes: vec![Timeframe::H1], parameters: vec![],
+                    timeframes: vec![Timeframe::H1],
+                    parameters: vec![],
                 }
             }
-            fn required_inputs(&self) -> Vec<crate::strategy::InputSpec> { vec![] }
+            fn required_inputs(&self) -> Vec<crate::strategy::InputSpec> {
+                vec![]
+            }
             fn on_candle(&mut self, ctx: &mut Context, _candle: &Candle) -> Option<Signal> {
                 match ctx.index() {
-                    1 => Some(Signal::EnterShort { sl: None, tp: None, size_pct: 100.0 }),
-                    3 => Some(Signal::Exit { reason: ExitReason::Signal("close short".into()) }),
+                    1 => Some(Signal::EnterShort {
+                        sl: None,
+                        tp: None,
+                        size_pct: 100.0,
+                    }),
+                    3 => Some(Signal::Exit {
+                        reason: ExitReason::Signal("close short".into()),
+                    }),
                     _ => None,
                 }
             }
@@ -944,7 +974,7 @@ mod tests {
             candle(1000, 100.0, 101.0, 99.0, 100.0),
             candle(2000, 100.0, 101.0, 99.0, 100.0), // enter short at 100
             candle(3000, 99.0, 100.0, 98.0, 99.0),
-            candle(4000, 97.0, 98.0, 96.0, 97.0),     // exit at 97 (win for short)
+            candle(4000, 97.0, 98.0, 96.0, 97.0), // exit at 97 (win for short)
         ];
 
         let config = BacktestConfig::new(10_000.0, 0.0, Timeframe::H1);
@@ -953,7 +983,10 @@ mod tests {
         let result = engine.run(&mut strategy, &candles, HashMap::new());
 
         assert_eq!(result.metrics.total_trades, 1);
-        assert!(result.metrics.total_pnl > 0.0, "Short at 100 exit 97 should be profitable");
+        assert!(
+            result.metrics.total_pnl > 0.0,
+            "Short at 100 exit 97 should be profitable"
+        );
     }
 
     #[test]
@@ -986,12 +1019,157 @@ mod tests {
         // gross_pnl = 0.19988 * (52000 - 50000) = 399.76
         // net_pnl = 399.76 - 6 - 6.23626 ≈ 387.52
         let trade = &result.metrics.trades[0];
-        assert!(trade.pnl > 380.0 && trade.pnl < 395.0,
-            "Expected net PnL ~387.5, got {}", trade.pnl);
+        assert!(
+            trade.pnl > 380.0 && trade.pnl < 395.0,
+            "Expected net PnL ~387.5, got {}",
+            trade.pnl
+        );
 
         // Total fees should be ~12.24
-        assert!(result.total_fees > 12.0 && result.total_fees < 13.0,
-            "Expected total fees ~12.24, got {}", result.total_fees);
+        assert!(
+            result.total_fees > 12.0 && result.total_fees < 13.0,
+            "Expected total fees ~12.24, got {}",
+            result.total_fees
+        );
+    }
+
+    #[test]
+    fn test_engine_injects_config_fee_rate_into_strategy_context() {
+        struct FeeEchoSizingStrategy;
+
+        impl StrategyAddin for FeeEchoSizingStrategy {
+            fn manifest(&self) -> crate::strategy::AddinManifest {
+                crate::strategy::AddinManifest {
+                    id: "fee_echo".into(),
+                    name: "Fee Echo".into(),
+                    version: "0.1.0".into(),
+                    author: "test".into(),
+                    description: "test".into(),
+                    category: crate::strategy::StrategyCategory::Custom,
+                    timeframes: vec![Timeframe::H1],
+                    parameters: vec![],
+                }
+            }
+
+            fn required_inputs(&self) -> Vec<crate::strategy::InputSpec> {
+                vec![]
+            }
+
+            fn on_candle(&mut self, ctx: &mut Context, _candle: &Candle) -> Option<Signal> {
+                if ctx.index() == 0 {
+                    let fee_rate = ctx.param_or("fee_rate", -1.0);
+                    let size_pct = if (fee_rate - 0.001).abs() < 1e-12 {
+                        50.0
+                    } else {
+                        10.0
+                    };
+                    Some(Signal::EnterLong {
+                        sl: Some(90.0),
+                        tp: None,
+                        size_pct,
+                    })
+                } else {
+                    None
+                }
+            }
+
+            fn on_reset(&mut self) {}
+        }
+
+        let candles = vec![
+            candle(0, 100.0, 101.0, 99.0, 100.0),
+            candle(1, 100.0, 101.0, 90.0, 95.0),
+        ];
+        let mut engine = BacktestEngine::new(BacktestConfig::new(10_000.0, 0.001, Timeframe::H1));
+        let mut strategy = FeeEchoSizingStrategy;
+        let mut params = HashMap::new();
+        // Deliberately stale/wrong user param: engine config must win because
+        // it is the fee rate that will actually be charged at execution.
+        params.insert("fee_rate".to_string(), 0.0);
+
+        let result = engine.run(&mut strategy, &candles, params);
+        assert_eq!(result.metrics.trades.len(), 1);
+        let trade = &result.metrics.trades[0];
+        assert!(
+            (trade.quantity - 50.0).abs() < 1e-12,
+            "strategy must size from config fee_rate injected into Context; got qty {}",
+            trade.quantity
+        );
+    }
+
+    #[test]
+    fn test_size_pct_remains_notional_allocation_not_risk_budget() {
+        struct FixedSizeSlStrategy;
+        impl StrategyAddin for FixedSizeSlStrategy {
+            fn manifest(&self) -> crate::strategy::AddinManifest {
+                crate::strategy::AddinManifest {
+                    id: "fixed_size_sl".into(),
+                    name: "Fixed Size SL".into(),
+                    version: "0.1.0".into(),
+                    author: "test".into(),
+                    description: "test".into(),
+                    category: crate::strategy::StrategyCategory::Custom,
+                    timeframes: vec![Timeframe::H1],
+                    parameters: vec![],
+                }
+            }
+            fn required_inputs(&self) -> Vec<crate::strategy::InputSpec> {
+                vec![]
+            }
+            fn on_candle(&mut self, ctx: &mut Context, _candle: &Candle) -> Option<Signal> {
+                match ctx.index() {
+                    1 => Some(Signal::EnterLong {
+                        sl: Some(90.0),
+                        tp: None,
+                        size_pct: 10.0,
+                    }),
+                    _ => None,
+                }
+            }
+            fn on_reset(&mut self) {}
+        }
+
+        let candles = vec![
+            candle(1000, 100.0, 101.0, 99.0, 100.0),
+            candle(2000, 100.0, 101.0, 99.0, 100.0),
+            candle(3000, 100.0, 101.0, 89.0, 90.0),
+        ];
+        let fee_rate = 0.0006;
+        let mut engine =
+            BacktestEngine::new(BacktestConfig::new(10_000.0, fee_rate, Timeframe::H1));
+        let result = engine.run(&mut FixedSizeSlStrategy, &candles, HashMap::new());
+
+        assert_eq!(result.metrics.total_trades, 1);
+        let trade = &result.metrics.trades[0];
+        let expected_alloc = 1_000.0;
+        let expected_qty = expected_alloc / 100.0;
+        let expected_loss = expected_qty * (100.0 - 90.0)
+            + expected_alloc * fee_rate
+            + expected_qty * 90.0 * fee_rate;
+        assert!(
+            (trade.pnl + expected_loss).abs() < 1e-9,
+            "size_pct must mean notional allocation; expected pnl=-{}, got {}",
+            expected_loss,
+            trade.pnl
+        );
+    }
+
+    #[test]
+    fn test_invalid_take_profit_side_skips_entry() {
+        let candles = vec![
+            candle(1000, 100.0, 101.0, 99.0, 100.0),
+            candle(2000, 100.0, 101.0, 99.0, 100.0),
+            candle(3000, 100.0, 101.0, 99.0, 100.0),
+        ];
+        let config = BacktestConfig::new(10_000.0, 0.0, Timeframe::H1);
+        let mut engine = BacktestEngine::new(config);
+        let mut strategy = SlTpStrategy { sl: 90.0, tp: 99.0 };
+        let result = engine.run(&mut strategy, &candles, HashMap::new());
+
+        assert_eq!(
+            result.metrics.total_trades, 0,
+            "long TP below entry must be rejected"
+        );
     }
 
     #[test]
@@ -1012,16 +1190,26 @@ mod tests {
         impl StrategyAddin for MoveStopStrategy {
             fn manifest(&self) -> crate::strategy::AddinManifest {
                 crate::strategy::AddinManifest {
-                    id: "ms".into(), name: "MoveStop".into(), version: "0.1.0".into(),
-                    author: "test".into(), description: "test".into(),
+                    id: "ms".into(),
+                    name: "MoveStop".into(),
+                    version: "0.1.0".into(),
+                    author: "test".into(),
+                    description: "test".into(),
                     category: crate::strategy::StrategyCategory::Custom,
-                    timeframes: vec![Timeframe::H1], parameters: vec![],
+                    timeframes: vec![Timeframe::H1],
+                    parameters: vec![],
                 }
             }
-            fn required_inputs(&self) -> Vec<crate::strategy::InputSpec> { vec![] }
+            fn required_inputs(&self) -> Vec<crate::strategy::InputSpec> {
+                vec![]
+            }
             fn on_candle(&mut self, ctx: &mut Context, _candle: &Candle) -> Option<Signal> {
                 match ctx.index() {
-                    1 => Some(Signal::EnterLong { sl: Some(90.0), tp: None, size_pct: 100.0 }),
+                    1 => Some(Signal::EnterLong {
+                        sl: Some(90.0),
+                        tp: None,
+                        size_pct: 100.0,
+                    }),
                     2 => Some(Signal::MoveStop { new_sl: 99.0 }), // tighten stop
                     _ => None,
                 }
@@ -1034,7 +1222,7 @@ mod tests {
             candle(1000, 100.0, 101.0, 99.0, 100.0),
             candle(2000, 100.0, 101.0, 99.0, 100.0), // enter, SL=90
             candle(3000, 101.0, 102.0, 100.0, 101.0), // move SL to 99
-            candle(4000, 100.0, 101.0, 98.0, 99.0),   // low=98 < SL=99 → hit
+            candle(4000, 100.0, 101.0, 98.0, 99.0),  // low=98 < SL=99 → hit
         ];
 
         let config = BacktestConfig::new(10_000.0, 0.0, Timeframe::H1);
@@ -1048,6 +1236,63 @@ mod tests {
         assert_eq!(trade.exit_price, 99.0);
     }
 
+    #[test]
+    fn test_move_stop_allows_breakeven_and_profit_lock_but_rejects_loosening() {
+        struct MoveStopPolicyStrategy;
+        impl StrategyAddin for MoveStopPolicyStrategy {
+            fn manifest(&self) -> crate::strategy::AddinManifest {
+                crate::strategy::AddinManifest {
+                    id: "move_stop_policy".into(),
+                    name: "MoveStop Policy".into(),
+                    version: "0.1.0".into(),
+                    author: "test".into(),
+                    description: "test".into(),
+                    category: crate::strategy::StrategyCategory::Custom,
+                    timeframes: vec![Timeframe::H1],
+                    parameters: vec![],
+                }
+            }
+            fn required_inputs(&self) -> Vec<crate::strategy::InputSpec> {
+                vec![]
+            }
+            fn on_candle(&mut self, ctx: &mut Context, _candle: &Candle) -> Option<Signal> {
+                match ctx.index() {
+                    1 => Some(Signal::EnterLong {
+                        sl: Some(90.0),
+                        tp: None,
+                        size_pct: 100.0,
+                    }),
+                    2 => Some(Signal::MoveStop { new_sl: 100.0 }),
+                    3 => Some(Signal::MoveStop { new_sl: 105.0 }),
+                    4 => Some(Signal::MoveStop { new_sl: 95.0 }),
+                    _ => None,
+                }
+            }
+            fn on_reset(&mut self) {}
+        }
+
+        let candles = vec![
+            candle(1000, 100.0, 101.0, 99.0, 100.0),
+            candle(2000, 100.0, 101.0, 99.0, 100.0),
+            candle(3000, 101.0, 102.0, 100.5, 101.0),
+            candle(4000, 106.0, 107.0, 105.5, 106.0),
+            candle(5000, 106.0, 107.0, 105.5, 106.0),
+            candle(6000, 106.0, 107.0, 104.0, 105.0),
+        ];
+
+        let mut engine = BacktestEngine::new(BacktestConfig::new(10_000.0, 0.0, Timeframe::H1));
+        let result = engine.run(&mut MoveStopPolicyStrategy, &candles, HashMap::new());
+
+        assert_eq!(result.metrics.total_trades, 1);
+        let trade = &result.metrics.trades[0];
+        assert_eq!(trade.exit_reason, ExitReason::StopLoss);
+        assert_eq!(trade.exit_price, 105.0);
+        assert!(
+            trade.pnl > 0.0,
+            "profit-lock stop must preserve a winning trade"
+        );
+    }
+
     /// D-08 fixture-driven strategy used by the BE-trail regression tests.
     /// Emits a single long entry on bar 1 with the SL/TP passed at
     /// construction. Mirrors the SlTpStrategy helper but parametrises both
@@ -1059,14 +1304,19 @@ mod tests {
     impl StrategyAddin for EnterOnceLong {
         fn manifest(&self) -> crate::strategy::AddinManifest {
             crate::strategy::AddinManifest {
-                id: "be_test".into(), name: "BE Test".into(),
-                version: "0.1.0".into(), author: "test".into(),
+                id: "be_test".into(),
+                name: "BE Test".into(),
+                version: "0.1.0".into(),
+                author: "test".into(),
                 description: "test".into(),
                 category: crate::strategy::StrategyCategory::Custom,
-                timeframes: vec![Timeframe::H1], parameters: vec![],
+                timeframes: vec![Timeframe::H1],
+                parameters: vec![],
             }
         }
-        fn required_inputs(&self) -> Vec<crate::strategy::InputSpec> { vec![] }
+        fn required_inputs(&self) -> Vec<crate::strategy::InputSpec> {
+            vec![]
+        }
         fn on_candle(&mut self, ctx: &mut Context, _candle: &Candle) -> Option<Signal> {
             if ctx.index() == 1 && !ctx.in_position {
                 Some(Signal::EnterLong {
@@ -1099,7 +1349,10 @@ mod tests {
 
         let config = BacktestConfig::new(10_000.0, 0.0, Timeframe::H1);
         let mut engine = BacktestEngine::new(config);
-        let mut strategy = EnterOnceLong { sl: 90.0, tp: 200.0 };
+        let mut strategy = EnterOnceLong {
+            sl: 90.0,
+            tp: 200.0,
+        };
         let result = engine.run(&mut strategy, &candles, HashMap::new());
 
         assert_eq!(result.metrics.total_trades, 1);
@@ -1134,7 +1387,10 @@ mod tests {
 
         let config = BacktestConfig::new(10_000.0, 0.0, Timeframe::H1);
         let mut engine = BacktestEngine::new(config);
-        let mut strategy = EnterOnceLong { sl: 90.0, tp: 200.0 };
+        let mut strategy = EnterOnceLong {
+            sl: 90.0,
+            tp: 200.0,
+        };
         let result = engine.run(&mut strategy, &candles, HashMap::new());
 
         assert_eq!(result.metrics.total_trades, 1);
@@ -1165,7 +1421,10 @@ mod tests {
 
         let config = BacktestConfig::new(10_000.0, 0.0, Timeframe::H1);
         let mut engine = BacktestEngine::new(config);
-        let mut strategy = EnterOnceLong { sl: 90.0, tp: 120.0 };
+        let mut strategy = EnterOnceLong {
+            sl: 90.0,
+            tp: 120.0,
+        };
         let result = engine.run(&mut strategy, &candles, HashMap::new());
 
         assert_eq!(result.metrics.total_trades, 1);

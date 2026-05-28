@@ -355,12 +355,8 @@ mod tests {
         // Malformed candles JSON must surface as a structured error
         // rather than panicking — same contract as run_bb_rsi_backtest
         // and run_ut_bot_backtest.
-        let result = run_ichimoku_backtest(
-            "not json".to_string(),
-            "{}".to_string(),
-            10_000.0,
-            0.0006,
-        );
+        let result =
+            run_ichimoku_backtest("not json".to_string(), "{}".to_string(), 10_000.0, 0.0006);
         assert!(
             result.contains("\"error\""),
             "expected error JSON, got: {}",
@@ -393,8 +389,7 @@ mod tests {
         let candles_json = serde_json::to_string(&candles).unwrap();
         let params_json = "{}".to_string(); // strict-spec defaults
 
-        let result =
-            run_ichimoku_backtest(candles_json, params_json, 10_000.0, 0.0006);
+        let result = run_ichimoku_backtest(candles_json, params_json, 10_000.0, 0.0006);
         assert!(
             !result.contains("\"error\""),
             "backtest must not error on the uptrend fixture, got: {}",
@@ -415,12 +410,8 @@ mod tests {
     fn test_run_ut_bot_backtest_bad_json_returns_error() {
         // Malformed candles JSON must surface as a structured error rather
         // than panicking — same contract as run_bb_rsi_backtest.
-        let result = run_ut_bot_backtest(
-            "not json".to_string(),
-            "{}".to_string(),
-            10_000.0,
-            0.0006,
-        );
+        let result =
+            run_ut_bot_backtest("not json".to_string(), "{}".to_string(), 10_000.0, 0.0006);
         assert!(
             result.contains("\"error\""),
             "expected error JSON, got: {}",

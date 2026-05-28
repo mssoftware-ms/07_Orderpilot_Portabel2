@@ -61,7 +61,11 @@ pub struct BollingerBands {
 /// Calculate Bollinger Bands from a series of close prices using SMA basis.
 ///
 /// Returns `None` if there are fewer data points than `period`.
-pub fn calc_bollinger_bands(closes: &[f64], period: usize, num_stddev: f64) -> Option<BollingerBands> {
+pub fn calc_bollinger_bands(
+    closes: &[f64],
+    period: usize,
+    num_stddev: f64,
+) -> Option<BollingerBands> {
     if closes.len() < period {
         return None;
     }
@@ -163,25 +167,40 @@ pub fn swing_high(highs: &[f64]) -> Option<f64> {
     Some(highs.iter().copied().fold(f64::NEG_INFINITY, f64::max))
 }
 
-/// Convert the spec §8 risk-2 % sizing rule into a percentage of equity
-/// that the engine's `open_position` can consume directly (Diff D-09).
+/// Convert a price-risk budget into a notional percentage of equity.
 ///
-/// Derivation: the spec defines
-///   `qty = (equity * risk_per_trade) / sl_distance`
-/// and the engine builds the position via
-///   `alloc = balance * size_pct / 100`,
-///   `qty = (alloc - alloc * fee_rate) / entry_price`.
-/// Solving for `size_pct` (ignoring the second-order `(1 - fee_rate)`
-/// term — fee_rate is bounded by 0.001 in the BB+RSI configs the
-/// strategy ships with, so the residual is < 0.1 % of the target risk):
-///   `size_pct = 100 * risk_per_trade * entry_price / sl_distance`.
-/// Clamped to `[0, 100]` because the engine treats `size_pct > 100` the
-/// same as 100 — spec §8 calls this the "naive full-balance clamp".
+/// `Signal.size_pct` is a notional-allocation percentage consumed directly
+/// by the backtest engine.  Fee-aware risk sizing therefore happens here at
+/// signal construction time, before the engine opens the position.
 ///
-/// `sl_distance` must be strictly positive; the caller is expected to
-/// have already enforced this via the degenerate-swing check.
-/// `entry_price` is the signal-bar close (entry-price proxy) to keep
-/// the calculation parity-locked across Dart and Rust at signal time.
+/// Net SL loss per unit is:
+/// `abs(entry - sl) + fee_rate * (entry + sl)`.
+/// Solving for notional allocation as a percentage of equity gives:
+/// `100 * risk_per_trade / (sl_dist / entry + fee_rate * (1 + sl / entry))`.
+///
+/// The result is clamped to `[0, 100]` because this engine does not model
+/// leveraged notional above full-balance allocation.
+pub fn position_size_pct_fee_aware(
+    entry_price: f64,
+    sl_price: f64,
+    risk_per_trade: f64,
+    fee_rate: f64,
+) -> f64 {
+    if entry_price <= 0.0 || sl_price <= 0.0 || risk_per_trade <= 0.0 || fee_rate < 0.0 {
+        return 0.0;
+    }
+    let sl_distance = (entry_price - sl_price).abs();
+    if sl_distance <= 0.0 {
+        return 0.0;
+    }
+    let denominator = sl_distance / entry_price + fee_rate * (1.0 + sl_price / entry_price);
+    if denominator <= 0.0 || !denominator.is_finite() {
+        return 0.0;
+    }
+    (100.0 * risk_per_trade / denominator).clamp(0.0, 100.0)
+}
+
+/// Legacy no-fee sizing helper retained for tests and zero-fee comparisons.
 pub fn position_size_pct(entry_price: f64, sl_distance: f64, risk_per_trade: f64) -> f64 {
     if sl_distance <= 0.0 || entry_price <= 0.0 || risk_per_trade <= 0.0 {
         return 0.0;
@@ -204,9 +223,8 @@ pub fn calc_rsi(closes: &[f64], period: usize) -> Option<f64> {
     let changes: Vec<f64> = closes.windows(2).map(|w| w[1] - w[0]).collect();
 
     // First average gain / loss over the initial `period` bars
-    let (initial_gain_sum, initial_loss_sum) = changes[..period]
-        .iter()
-        .fold((0.0, 0.0), |(g, l), &c| {
+    let (initial_gain_sum, initial_loss_sum) =
+        changes[..period].iter().fold((0.0, 0.0), |(g, l), &c| {
             if c > 0.0 {
                 (g + c, l)
             } else {
@@ -284,7 +302,7 @@ impl StrategyAddin for BbRsiStrategy {
     fn required_inputs(&self) -> Vec<InputSpec> {
         vec![
             InputSpec::OhlcvTimeframe(Timeframe::H1),
-            InputSpec::MinCandles(50), // minimum reasonable candles for BB + RSI
+            InputSpec::MinCandles(200), // default BB period dominates warm-up
             InputSpec::Indicator("BB".to_string()),
             InputSpec::Indicator("RSI".to_string()),
         ]
@@ -306,6 +324,7 @@ impl StrategyAddin for BbRsiStrategy {
         let swing_lookback = ctx.param_or("swing_lookback_bars", 20.0) as usize;
         let tp_rr_ratio = ctx.param_or("tp_rr_ratio", 3.0);
         let risk_per_trade = ctx.param_or("risk_per_trade", 0.02);
+        let fee_rate = ctx.param_or("fee_rate", 0.0006);
         // Welle R2-2 ADX regime filter. Default disabled → no ADX
         // compute, no behaviour change vs pre-R2. Threshold + period +
         // DI-confluence toggle mirror the BB+RSI / UT-Bot / Ichimoku
@@ -313,8 +332,7 @@ impl StrategyAddin for BbRsiStrategy {
         let adx_filter_enabled = ctx.param_or("adx_filter_enabled", 0.0) >= 0.5;
         let adx_threshold = ctx.param_or("adx_threshold", 25.0);
         let adx_period = ctx.param_or("adx_period", 14.0) as usize;
-        let adx_use_di_confluence =
-            ctx.param_or("adx_use_di_confluence", 0.0) >= 0.5;
+        let adx_use_di_confluence = ctx.param_or("adx_use_di_confluence", 0.0) >= 0.5;
         // Session filter — default OFF for backward compatibility.
         // When enabled, entries only fire during [start, end) local time.
         let session_enabled = ctx.param_or("session_filter_enabled", 0.0) >= 0.5;
@@ -393,10 +411,10 @@ impl StrategyAddin for BbRsiStrategy {
         let pre_signal = &ctx.all_candles()[ctx.index() - swing_lookback..ctx.index()];
         let pre_lows: Vec<f64> = pre_signal.iter().map(|c| c.low).collect();
         let pre_highs: Vec<f64> = pre_signal.iter().map(|c| c.high).collect();
-        let swing_low_price = swing_low(&pre_lows)
-            .expect("swing_lookback warm-up guarantees non-empty pre_lows");
-        let swing_high_price = swing_high(&pre_highs)
-            .expect("swing_lookback warm-up guarantees non-empty pre_highs");
+        let swing_low_price =
+            swing_low(&pre_lows).expect("swing_lookback warm-up guarantees non-empty pre_lows");
+        let swing_high_price =
+            swing_high(&pre_highs).expect("swing_lookback warm-up guarantees non-empty pre_highs");
 
         // ── Welle R2-2 ADX regime snapshot ──────────────────────────────
         // Only computed when the filter is enabled — keeps the disabled
@@ -476,7 +494,12 @@ impl StrategyAddin for BbRsiStrategy {
                     }
                     let sl_distance = price - swing_low_price;
                     let tp_price = price + tp_rr_ratio * sl_distance;
-                    let size_pct = position_size_pct(price, sl_distance, risk_per_trade);
+                    let size_pct = position_size_pct_fee_aware(
+                        price,
+                        swing_low_price,
+                        risk_per_trade,
+                        fee_rate,
+                    );
                     ctx.in_position = true;
                     return Some(Signal::EnterLong {
                         sl: Some(swing_low_price),
@@ -495,7 +518,12 @@ impl StrategyAddin for BbRsiStrategy {
                     }
                     let sl_distance = swing_high_price - price;
                     let tp_price = price - tp_rr_ratio * sl_distance;
-                    let size_pct = position_size_pct(price, sl_distance, risk_per_trade);
+                    let size_pct = position_size_pct_fee_aware(
+                        price,
+                        swing_high_price,
+                        risk_per_trade,
+                        fee_rate,
+                    );
                     ctx.in_position = true;
                     return Some(Signal::EnterShort {
                         sl: Some(swing_high_price),
@@ -520,14 +548,8 @@ impl StrategyAddin for BbRsiStrategy {
             }
         }
         // N-11: cross-parameter validation — oversold must be below overbought.
-        let oversold = params
-            .get("rsi_oversold")
-            .copied()
-            .unwrap_or(30.0);
-        let overbought = params
-            .get("rsi_overbought")
-            .copied()
-            .unwrap_or(70.0);
+        let oversold = params.get("rsi_oversold").copied().unwrap_or(30.0);
+        let overbought = params.get("rsi_overbought").copied().unwrap_or(70.0);
         if oversold >= overbought {
             return Err(format!(
                 "rsi_oversold ({}) must be less than rsi_overbought ({})",
@@ -545,10 +567,9 @@ pub fn bb_rsi_manifest() -> AddinManifest {
         name: "Bollinger Bands + RSI Trend Following".to_string(),
         version: "1.0.0".to_string(),
         author: "Trading App Team".to_string(),
-        description:
-            "Trend-following strategy: price beyond BB marks trend direction, \
+        description: "Trend-following strategy: price beyond BB marks trend direction, \
              RSI cross-back provides pullback re-entry, swing-based SL/TP (1:3)."
-                .to_string(),
+            .to_string(),
         category: StrategyCategory::Trend,
         timeframes: vec![Timeframe::M15, Timeframe::H1, Timeframe::H4],
         parameters: vec![
@@ -578,26 +599,12 @@ pub fn bb_rsi_manifest() -> AddinManifest {
             // Diff D-06: TP distance as a multiple of the swing-derived
             // SL distance, measured from the signal-bar close (entry-price
             // proxy). Default 3.0 matches the spec §5 R:R 1:3 contract.
-            ParameterSchema::new(
-                "tp_rr_ratio",
-                "TP R:R Ratio",
-                3.0,
-                0.5,
-                10.0,
-                0.1,
-            ),
+            ParameterSchema::new("tp_rr_ratio", "TP R:R Ratio", 3.0, 0.5, 10.0, 0.1),
             // Diff D-09: fraction of equity risked per trade (spec §8 =
             // 2 %). The strategy converts this into a per-signal
             // `size_pct` via `position_size_pct` so the engine's
             // `open_position` can consume it directly.
-            ParameterSchema::new(
-                "risk_per_trade",
-                "Risk Per Trade",
-                0.02,
-                0.001,
-                1.0,
-                0.001,
-            ),
+            ParameterSchema::new("risk_per_trade", "Risk Per Trade", 0.02, 0.001, 1.0, 0.001),
             // ── Session filter (Spec §7) ───────────────────────────────
             // Default OFF: pre-Phase-2.5 backtests remain byte-identical.
             // When enabled, entries fire only during [start, end) local
@@ -652,25 +659,11 @@ pub fn bb_rsi_manifest() -> AddinManifest {
             // Wilder's textbook chop/trend boundary is 25; 20–30 is the
             // commonly cited band. Range allows the Welle-R3 sweep to
             // explore 15..40 without re-touching the manifest.
-            ParameterSchema::new(
-                "adx_threshold",
-                "ADX Threshold",
-                25.0,
-                0.0,
-                100.0,
-                1.0,
-            ),
+            ParameterSchema::new("adx_threshold", "ADX Threshold", 25.0, 0.0, 100.0, 1.0),
             // Wilder default = 14. Range bracketed to keep the helper
             // tractable on 1h fixtures while leaving headroom for
             // higher-TF experiments.
-            ParameterSchema::new(
-                "adx_period",
-                "ADX Period",
-                14.0,
-                2.0,
-                100.0,
-                1.0,
-            ),
+            ParameterSchema::new("adx_period", "ADX Period", 14.0, 2.0, 100.0, 1.0),
             ParameterSchema::new(
                 "adx_use_di_confluence",
                 "ADX +DI/-DI Confluence (0/1)",
@@ -921,6 +914,37 @@ mod tests {
     }
 
     #[test]
+    fn test_position_size_pct_fee_aware_budgets_round_trip_sl_loss() {
+        // Entry=100, SL=90, risk=2%, fee=0.06% per side:
+        // notional allocation must be lower than the no-fee 20% so that
+        // price loss + entry fee + SL-exit fee totals exactly 2% equity.
+        let got = position_size_pct_fee_aware(100.0, 90.0, 0.02, 0.0006);
+        let expected = 100.0 * 0.02 / (0.10 + 0.0006 * (1.0 + 0.90));
+        assert!(
+            (got - expected).abs() < 1e-12,
+            "got={got}, expected={expected}"
+        );
+        assert!(got < position_size_pct(100.0, 10.0, 0.02));
+    }
+
+    #[test]
+    fn test_bb_rsi_required_inputs_cover_default_warmup() {
+        let strategy = BbRsiStrategy::new();
+        let min_candles = strategy
+            .required_inputs()
+            .into_iter()
+            .find_map(|input| match input {
+                InputSpec::MinCandles(n) => Some(n),
+                _ => None,
+            })
+            .expect("BB+RSI must declare MinCandles");
+        assert!(
+            min_candles >= 200,
+            "default bb_period=200 requires MinCandles >= 200, got {min_candles}"
+        );
+    }
+
+    #[test]
     fn test_position_size_pct_zero_or_negative_inputs_yield_zero() {
         assert_eq!(position_size_pct(100.0, 0.0, 0.02), 0.0);
         assert_eq!(position_size_pct(100.0, -1.0, 0.02), 0.0);
@@ -1033,18 +1057,12 @@ mod tests {
         // adx_use_di_confluence) = 13.
         assert_eq!(manifest.parameters.len(), 17); // +4 session params (S-01)
         assert_eq!(manifest.category, StrategyCategory::Trend);
-        assert!(manifest
-            .parameters
-            .iter()
-            .any(|p| p.name == "bb_ma_type"));
+        assert!(manifest.parameters.iter().any(|p| p.name == "bb_ma_type"));
         assert!(manifest
             .parameters
             .iter()
             .any(|p| p.name == "swing_lookback_bars"));
-        assert!(manifest
-            .parameters
-            .iter()
-            .any(|p| p.name == "tp_rr_ratio"));
+        assert!(manifest.parameters.iter().any(|p| p.name == "tp_rr_ratio"));
         assert!(manifest
             .parameters
             .iter()
@@ -1095,11 +1113,7 @@ mod tests {
     /// expected direction at some bar during the walk. Robust to the
     /// intermediate state where the BB-middle exit might fire on the
     /// very next bar (D-11 cleanup is in a later commit).
-    fn assert_entry_direction(
-        candles: &[Candle],
-        expect_long: bool,
-        params: HashMap<String, f64>,
-    ) {
+    fn assert_entry_direction(candles: &[Candle], expect_long: bool, params: HashMap<String, f64>) {
         let mut strategy = BbRsiStrategy::new();
         let mut ctx = Context::new(candles.to_vec(), Timeframe::M1, params);
         let mut seen_long = false;
@@ -1158,9 +1172,7 @@ mod tests {
         let candles: Vec<Candle> = closes
             .iter()
             .enumerate()
-            .map(|(i, &c)| {
-                Candle::new(i as i64 * 60000, c, c + 0.5, c - 0.5, c, 100.0)
-            })
+            .map(|(i, &c)| Candle::new(i as i64 * 60000, c, c + 0.5, c - 0.5, c, 100.0))
             .collect();
         assert_entry_direction(&candles, true, phase1_pinned_params());
     }
@@ -1178,9 +1190,7 @@ mod tests {
         let candles: Vec<Candle> = closes
             .iter()
             .enumerate()
-            .map(|(i, &c)| {
-                Candle::new(i as i64 * 60000, c, c + 0.5, c - 0.5, c, 100.0)
-            })
+            .map(|(i, &c)| Candle::new(i as i64 * 60000, c, c + 0.5, c - 0.5, c, 100.0))
             .collect();
         assert_entry_direction(&candles, false, phase1_pinned_params());
     }
@@ -1204,14 +1214,11 @@ mod tests {
         let candles: Vec<Candle> = closes
             .iter()
             .enumerate()
-            .map(|(i, &c)| {
-                Candle::new(i as i64 * 60000, c, c + 0.5, c - 0.5, c, 100.0)
-            })
+            .map(|(i, &c)| Candle::new(i as i64 * 60000, c, c + 0.5, c - 0.5, c, 100.0))
             .collect();
 
         let mut strategy = BbRsiStrategy::new();
-        let mut ctx =
-            Context::new(candles.clone(), Timeframe::M1, phase1_pinned_params());
+        let mut ctx = Context::new(candles.clone(), Timeframe::M1, phase1_pinned_params());
         let mut captured_sl: Option<f64> = None;
         for (i, candle) in candles.iter().enumerate() {
             ctx.set_index(i);
@@ -1240,14 +1247,11 @@ mod tests {
         let candles: Vec<Candle> = closes
             .iter()
             .enumerate()
-            .map(|(i, &c)| {
-                Candle::new(i as i64 * 60000, c, c + 0.5, c - 0.5, c, 100.0)
-            })
+            .map(|(i, &c)| Candle::new(i as i64 * 60000, c, c + 0.5, c - 0.5, c, 100.0))
             .collect();
 
         let mut strategy = BbRsiStrategy::new();
-        let mut ctx =
-            Context::new(candles.clone(), Timeframe::M1, phase1_pinned_params());
+        let mut ctx = Context::new(candles.clone(), Timeframe::M1, phase1_pinned_params());
         let mut captured_sl: Option<f64> = None;
         for (i, candle) in candles.iter().enumerate() {
             ctx.set_index(i);
@@ -1282,14 +1286,11 @@ mod tests {
         let candles: Vec<Candle> = closes
             .iter()
             .enumerate()
-            .map(|(i, &c)| {
-                Candle::new(i as i64 * 60000, c, c + 0.5, c - 0.5, c, 100.0)
-            })
+            .map(|(i, &c)| Candle::new(i as i64 * 60000, c, c + 0.5, c - 0.5, c, 100.0))
             .collect();
 
         let mut strategy = BbRsiStrategy::new();
-        let mut ctx =
-            Context::new(candles.clone(), Timeframe::M1, phase1_pinned_params());
+        let mut ctx = Context::new(candles.clone(), Timeframe::M1, phase1_pinned_params());
         let mut captured_tp: Option<f64> = None;
         for (i, candle) in candles.iter().enumerate() {
             ctx.set_index(i);
@@ -1323,14 +1324,11 @@ mod tests {
         let candles: Vec<Candle> = closes
             .iter()
             .enumerate()
-            .map(|(i, &c)| {
-                Candle::new(i as i64 * 60000, c, c + 0.5, c - 0.5, c, 100.0)
-            })
+            .map(|(i, &c)| Candle::new(i as i64 * 60000, c, c + 0.5, c - 0.5, c, 100.0))
             .collect();
 
         let mut strategy = BbRsiStrategy::new();
-        let mut ctx =
-            Context::new(candles.clone(), Timeframe::M1, phase1_pinned_params());
+        let mut ctx = Context::new(candles.clone(), Timeframe::M1, phase1_pinned_params());
         let mut captured_tp: Option<f64> = None;
         for (i, candle) in candles.iter().enumerate() {
             ctx.set_index(i);
@@ -1349,12 +1347,13 @@ mod tests {
 
     #[test]
     fn test_strategy_long_size_pct_matches_risk_2_percent_formula() {
-        // Diff D-09: long entry on the 20-flat + 14-decline + surge
-        // fixture. signal-bar close=120, swing_low=71.5, sl_distance=48.5.
-        // With risk_per_trade=0.02:
-        //   size_pct = 100 * 0.02 * 120 / 48.5 ≈ 4.9484536...
-        // The emitted signal must carry this value (NOT 100.0 — that was
-        // the legacy full-balance default).
+        // Diff D-09 + post-renovation audit: long entry on the 20-flat +
+        // 14-decline + surge fixture. Signal-bar close=120, swing_low=71.5.
+        // With risk_per_trade=0.02 and default fee_rate=0.0006:
+        //   size_pct = 100 * risk / (sl_dist/entry + fee*(1 + sl/entry))
+        //            ≈ 4.936758...
+        // The emitted signal must carry the fee-aware notional allocation
+        // (NOT 100.0 and NOT the older no-fee formula).
         let mut closes = vec![100.0; 20];
         for i in 0..14 {
             closes.push(100.0 - (i as f64 + 1.0) * 2.0);
@@ -1363,26 +1362,21 @@ mod tests {
         let candles: Vec<Candle> = closes
             .iter()
             .enumerate()
-            .map(|(i, &c)| {
-                Candle::new(i as i64 * 60000, c, c + 0.5, c - 0.5, c, 100.0)
-            })
+            .map(|(i, &c)| Candle::new(i as i64 * 60000, c, c + 0.5, c - 0.5, c, 100.0))
             .collect();
 
         let mut strategy = BbRsiStrategy::new();
-        let mut ctx =
-            Context::new(candles.clone(), Timeframe::M1, phase1_pinned_params());
+        let mut ctx = Context::new(candles.clone(), Timeframe::M1, phase1_pinned_params());
         let mut captured_pct: Option<f64> = None;
         for (i, candle) in candles.iter().enumerate() {
             ctx.set_index(i);
-            if let Some(Signal::EnterLong { size_pct, .. }) =
-                strategy.on_candle(&mut ctx, candle)
-            {
+            if let Some(Signal::EnterLong { size_pct, .. }) = strategy.on_candle(&mut ctx, candle) {
                 captured_pct = Some(size_pct);
                 break;
             }
         }
         let got = captured_pct.expect("expected EnterLong with size_pct");
-        let expected = 100.0 * 0.02 * 120.0 / 48.5;
+        let expected = position_size_pct_fee_aware(120.0, 71.5, 0.02, 0.0006);
         assert!(
             (got - expected).abs() < 1e-12,
             "risk-sized size_pct: expected {} got {}",

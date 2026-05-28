@@ -29,7 +29,10 @@ pub trait StrategyAddin: Send + Sync {
 
     /// Optional: Validate parameters before execution.
     /// Default implementation accepts all parameters.
-    fn validate_params(&self, _params: &std::collections::HashMap<String, f64>) -> Result<(), String> {
+    fn validate_params(
+        &self,
+        _params: &std::collections::HashMap<String, f64>,
+    ) -> Result<(), String> {
         Ok(())
     }
 }

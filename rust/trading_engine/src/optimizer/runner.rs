@@ -41,11 +41,8 @@ pub fn run_optimization_trial(
     let initial_balance = base_config.initial_balance;
     // Engine API consumes HashMap; TrialParams uses BTreeMap for stable
     // JSON serialization. Copy keys/values at this single boundary.
-    let params_map: HashMap<String, f64> = params
-        .values
-        .iter()
-        .map(|(k, v)| (k.clone(), *v))
-        .collect();
+    let params_map: HashMap<String, f64> =
+        params.values.iter().map(|(k, v)| (k.clone(), *v)).collect();
     let result = run_strategy(strategy, candles, base_config, params_map);
     let metrics = extract_metrics(&result, initial_balance);
     let score = score_trial(&metrics, constraints);

@@ -53,8 +53,7 @@ fn repo_root() -> PathBuf {
 }
 
 fn load_candles(path: &Path) -> Result<Vec<Candle>> {
-    let file = File::open(path)
-        .with_context(|| format!("open candles file {}", path.display()))?;
+    let file = File::open(path).with_context(|| format!("open candles file {}", path.display()))?;
     let candles: Vec<Candle> = serde_json::from_reader(BufReader::new(file))
         .with_context(|| format!("parse candles JSON {}", path.display()))?;
     Ok(candles)
@@ -146,8 +145,7 @@ fn bench_one(job: &StrategyJob) -> Result<BenchResult> {
 
     let elapsed_secs = elapsed.as_secs_f64();
     let ms_per_trial = elapsed.as_secs_f64() * 1000.0 / BENCH_TRIALS as f64;
-    let eta_1000_hours =
-        (ms_per_trial * TARGET_TRIALS as f64) / 1000.0 / 3600.0;
+    let eta_1000_hours = (ms_per_trial * TARGET_TRIALS as f64) / 1000.0 / 3600.0;
 
     let verdict = if eta_1000_hours > job.eta_stop_hours {
         "STOP"
@@ -204,7 +202,10 @@ fn main() -> Result<()> {
 
     let total_eta: f64 = results.iter().map(|r| r.eta_1000_hours).sum();
     println!();
-    println!("Total ETA at full 1000 trials per strategy: {:.2} h", total_eta);
+    println!(
+        "Total ETA at full 1000 trials per strategy: {:.2} h",
+        total_eta
+    );
     println!(
         "Brief's overall compute envelope (Welle O2): 4–12 h. \
          See spec MD for the actual trial-count plan."

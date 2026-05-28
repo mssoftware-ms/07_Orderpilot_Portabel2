@@ -284,9 +284,8 @@ fn parse_args_from(raw: &[String]) -> Result<CliArgs> {
         let key = raw[i].as_str();
         let mut consume_value = true;
         let val = raw.get(i + 1).map(String::as_str);
-        let need = || -> Result<&str> {
-            val.with_context(|| format!("flag '{}' requires a value", key))
-        };
+        let need =
+            || -> Result<&str> { val.with_context(|| format!("flag '{}' requires a value", key)) };
         match key {
             "--study" => study_db = Some(PathBuf::from(need()?)),
             "--strategy" => strategy = Some(parse_strategy(need()?)?),
@@ -303,19 +302,17 @@ fn parse_args_from(raw: &[String]) -> Result<CliArgs> {
                     .with_context(|| "--validate-bars must be usize")?
             }
             "--step-bars" => {
-                step_bars = need()?.parse().with_context(|| "--step-bars must be usize")?
+                step_bars = need()?
+                    .parse()
+                    .with_context(|| "--step-bars must be usize")?
             }
             "--stability-penalty" => {
                 stability_penalty = need()?
                     .parse()
                     .with_context(|| "--stability-penalty must be f64")?
             }
-            "--stability-method" => {
-                stability_method = Some(StabilityMethodArg::parse(need()?)?)
-            }
-            "--trim-pct" => {
-                trim_pct = need()?.parse().with_context(|| "--trim-pct must be f64")?
-            }
+            "--stability-method" => stability_method = Some(StabilityMethodArg::parse(need()?)?),
+            "--trim-pct" => trim_pct = need()?.parse().with_context(|| "--trim-pct must be f64")?,
             "--output-csv" => output_csv = Some(PathBuf::from(need()?)),
             "--output-db" => output_db = Some(PathBuf::from(need()?)),
             "--seed" => seed = need()?.parse().with_context(|| "--seed must be u64")?,
@@ -387,8 +384,7 @@ fn parse_args_from(raw: &[String]) -> Result<CliArgs> {
 // ─── IO helpers ──────────────────────────────────────────────────────────────
 
 fn load_candles(path: &Path) -> Result<Vec<Candle>> {
-    let file =
-        File::open(path).with_context(|| format!("open candles {}", path.display()))?;
+    let file = File::open(path).with_context(|| format!("open candles {}", path.display()))?;
     let candles: Vec<Candle> = serde_json::from_reader(BufReader::new(file))
         .with_context(|| format!("parse candles {}", path.display()))?;
     Ok(candles)
@@ -420,10 +416,7 @@ fn load_qualified_trials(
     // partitioned without a second SQL query. `top_n_trials` returns
     // descending score; NEG_INFINITY rows sort last.
     let pool = storage.top_n_trials(target.id, 1_000_000)?;
-    let qualified: Vec<TrialResult> = pool
-        .into_iter()
-        .filter(|t| t.score.is_finite())
-        .collect();
+    let qualified: Vec<TrialResult> = pool.into_iter().filter(|t| t.score.is_finite()).collect();
 
     if qualified.is_empty() {
         bail!(
@@ -458,8 +451,7 @@ fn write_walk_forward_csv(
     path: &Path,
     survivor_criteria: Option<&SurvivorCriteria>,
 ) -> Result<()> {
-    let mut file =
-        File::create(path).with_context(|| format!("create CSV {}", path.display()))?;
+    let mut file = File::create(path).with_context(|| format!("create CSV {}", path.display()))?;
     let mut param_keys: Vec<&String> = results
         .first()
         .map(|r| r.params.values.keys().collect())
@@ -528,8 +520,11 @@ fn main() -> Result<()> {
     let merged_criteria = args
         .survivor_overrides
         .merge_into(SurvivorCriteria::default());
-    let survivor_criteria_for_output =
-        if args.survivor_filter { Some(&merged_criteria) } else { None };
+    let survivor_criteria_for_output = if args.survivor_filter {
+        Some(&merged_criteria)
+    } else {
+        None
+    };
 
     let (study_id, n_expected) = if args.skip_replay {
         run_skip_replay(&args)?
@@ -598,14 +593,13 @@ fn run_full_replay(args: &CliArgs) -> Result<(i64, usize)> {
 
     if let Some(parent) = args.output_db.parent() {
         if !parent.as_os_str().is_empty() {
-            create_dir_all(parent)
-                .with_context(|| format!("mkdir {}", parent.display()))?;
+            create_dir_all(parent).with_context(|| format!("mkdir {}", parent.display()))?;
         }
     }
     let storage = StudyStorage::open(&args.output_db)
         .with_context(|| format!("open output DB {}", args.output_db.display()))?;
-    let search_space_yaml = read_to_string(repo_search_space_path(args.strategy))
-        .unwrap_or_else(|_| {
+    let search_space_yaml =
+        read_to_string(repo_search_space_path(args.strategy)).unwrap_or_else(|_| {
             format!(
                 "# search space yaml unavailable for strategy {}",
                 args.strategy.as_str()
@@ -618,11 +612,8 @@ fn run_full_replay(args: &CliArgs) -> Result<(i64, usize)> {
         args.seed,
         REPLAY_DATE,
     );
-    let new_study_id = storage.create_study(
-        &new_study_name,
-        args.strategy.as_str(),
-        &search_space_yaml,
-    )?;
+    let new_study_id =
+        storage.create_study(&new_study_name, args.strategy.as_str(), &search_space_yaml)?;
     println!(
         "[wf-replay] output study '{}' (id={}) in {}",
         new_study_name,
@@ -780,15 +771,15 @@ fn run_skip_replay(args: &CliArgs) -> Result<(i64, usize)> {
 fn print_top_table(top_all: &[WalkForwardResult], survivor_criteria: Option<&SurvivorCriteria>) {
     println!();
     if survivor_criteria.is_some() {
-        println!("Top-5 Walk-Forward (sorted by aggregated_score, survives = does row meet criteria):");
+        println!(
+            "Top-5 Walk-Forward (sorted by aggregated_score, survives = does row meet criteria):"
+        );
         println!(
             " rank trial_id  aggregated  mean_oos  std_oos  worst_oos  mean_is  is_oos_decay  survives"
         );
     } else {
         println!("Top-5 Walk-Forward (sorted by aggregated_score):");
-        println!(
-            " rank trial_id  aggregated  mean_oos  std_oos  worst_oos  mean_is  is_oos_decay"
-        );
+        println!(" rank trial_id  aggregated  mean_oos  std_oos  worst_oos  mean_is  is_oos_decay");
     }
     for (i, r) in top_all.iter().enumerate().take(5) {
         let prefix = format!(
@@ -853,10 +844,22 @@ fn print_survivor_summary(top_all: &[WalkForwardResult], criteria: &SurvivorCrit
         .filter(|r| r.worst_oos_pf < criteria.min_worst_oos_pf)
         .count();
     println!("  per-gate fail counts:");
-    println!("    mean_oos_pf  < {:.3}: {}", criteria.min_mean_oos_pf, n_fail_mean);
-    println!("    std_oos_pf   > {:.3}: {}", criteria.max_std_oos_pf, n_fail_std);
-    println!("    is_oos_decay > {:.3}: {}", criteria.max_is_oos_decay, n_fail_decay);
-    println!("    worst_oos_pf < {:.3}: {}", criteria.min_worst_oos_pf, n_fail_worst);
+    println!(
+        "    mean_oos_pf  < {:.3}: {}",
+        criteria.min_mean_oos_pf, n_fail_mean
+    );
+    println!(
+        "    std_oos_pf   > {:.3}: {}",
+        criteria.max_std_oos_pf, n_fail_std
+    );
+    println!(
+        "    is_oos_decay > {:.3}: {}",
+        criteria.max_is_oos_decay, n_fail_decay
+    );
+    println!(
+        "    worst_oos_pf < {:.3}: {}",
+        criteria.min_worst_oos_pf, n_fail_worst
+    );
 }
 
 /// Locate the canonical search-space YAML for `strategy` relative to the
@@ -950,8 +953,7 @@ mod tests {
             let storage = StudyStorage::open(db.path()).unwrap();
             seed_study(&storage, StrategyKind::Ichimoku, 50, 5);
         }
-        let (trials, _, _) =
-            load_qualified_trials(db.path(), StrategyKind::Ichimoku, 3).unwrap();
+        let (trials, _, _) = load_qualified_trials(db.path(), StrategyKind::Ichimoku, 3).unwrap();
         assert_eq!(trials.len(), 3, "must truncate to requested top-n");
         // All disqualified rows excluded.
         assert!(trials.iter().all(|t| t.score.is_finite()));
@@ -973,8 +975,7 @@ mod tests {
             // proportion on a tiny scale.
             seed_study(&storage, StrategyKind::Ichimoku, 12, 3);
         }
-        let (trials, _, _) =
-            load_qualified_trials(db.path(), StrategyKind::Ichimoku, 200).unwrap();
+        let (trials, _, _) = load_qualified_trials(db.path(), StrategyKind::Ichimoku, 200).unwrap();
         assert_eq!(
             trials.len(),
             12,
@@ -1005,29 +1006,27 @@ mod tests {
         params.insert("kijun_period", 26.0);
         params.insert("tenkan_period", 9.0);
         params.insert("senkou_b_period", 52.0);
-        let splits = vec![
-            WalkForwardSplitResult {
-                split_index: 0,
-                train_metrics: TrialMetrics {
-                    total_trades: 30,
-                    total_pnl: 50.0,
-                    win_rate: 55.0,
-                    sharpe_ratio: 1.0,
-                    max_drawdown_pct: 8.0,
-                    profit_factor: 1.5,
-                    final_equity: 10_050.0,
-                },
-                validate_metrics: TrialMetrics {
-                    total_trades: 10,
-                    total_pnl: 20.0,
-                    win_rate: 60.0,
-                    sharpe_ratio: 0.9,
-                    max_drawdown_pct: 6.0,
-                    profit_factor: 1.7,
-                    final_equity: 10_020.0,
-                },
+        let splits = vec![WalkForwardSplitResult {
+            split_index: 0,
+            train_metrics: TrialMetrics {
+                total_trades: 30,
+                total_pnl: 50.0,
+                win_rate: 55.0,
+                sharpe_ratio: 1.0,
+                max_drawdown_pct: 8.0,
+                profit_factor: 1.5,
+                final_equity: 10_050.0,
             },
-        ];
+            validate_metrics: TrialMetrics {
+                total_trades: 10,
+                total_pnl: 20.0,
+                win_rate: 60.0,
+                sharpe_ratio: 0.9,
+                max_drawdown_pct: 6.0,
+                profit_factor: 1.7,
+                final_equity: 10_020.0,
+            },
+        }];
         let result = WalkForwardResult {
             trial_id: 515,
             params,
@@ -1096,12 +1095,7 @@ mod tests {
 
         let csv_path = NamedTempFile::new().unwrap().into_temp_path();
         let criteria = SurvivorCriteria::default();
-        write_walk_forward_csv(
-            &[surviving, failing],
-            csv_path.as_ref(),
-            Some(&criteria),
-        )
-        .unwrap();
+        write_walk_forward_csv(&[surviving, failing], csv_path.as_ref(), Some(&criteria)).unwrap();
 
         let content = read_to_string(&csv_path).unwrap();
         let mut lines = content.lines();
@@ -1187,10 +1181,7 @@ mod tests {
             .stability_method
             .unwrap()
             .into_method(args.stability_penalty, args.trim_pct);
-        assert_eq!(
-            method,
-            StabilityScoreMethod::MedianIqr { iqr_penalty: 0.3 },
-        );
+        assert_eq!(method, StabilityScoreMethod::MedianIqr { iqr_penalty: 0.3 },);
     }
 
     #[test]
@@ -1213,10 +1204,7 @@ mod tests {
             .stability_method
             .unwrap()
             .into_method(args.stability_penalty, args.trim_pct);
-        assert_eq!(
-            method,
-            StabilityScoreMethod::TrimmedMean { trim_pct: 0.25 },
-        );
+        assert_eq!(method, StabilityScoreMethod::TrimmedMean { trim_pct: 0.25 },);
     }
 
     #[test]

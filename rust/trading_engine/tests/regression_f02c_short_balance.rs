@@ -47,7 +47,9 @@ impl StrategyAddin for OneShotShort {
             parameters: vec![],
         }
     }
-    fn required_inputs(&self) -> Vec<InputSpec> { vec![] }
+    fn required_inputs(&self) -> Vec<InputSpec> {
+        vec![]
+    }
     fn on_candle(&mut self, ctx: &mut Context, _candle: &Candle) -> Option<Signal> {
         match ctx.index() {
             1 if !ctx.in_position => Some(Signal::EnterShort {
@@ -82,7 +84,9 @@ impl StrategyAddin for LongThenShort {
             parameters: vec![],
         }
     }
-    fn required_inputs(&self) -> Vec<InputSpec> { vec![] }
+    fn required_inputs(&self) -> Vec<InputSpec> {
+        vec![]
+    }
     fn on_candle(&mut self, ctx: &mut Context, _candle: &Candle) -> Option<Signal> {
         match ctx.index() {
             1 if !ctx.in_position => Some(Signal::EnterLong {

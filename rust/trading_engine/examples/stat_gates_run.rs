@@ -146,9 +146,8 @@ fn parse_args_from(raw: &[String]) -> Result<CliArgs> {
     while i < raw.len() {
         let key = raw[i].as_str();
         let val = raw.get(i + 1).map(String::as_str);
-        let need = || -> Result<&str> {
-            val.with_context(|| format!("flag '{}' requires a value", key))
-        };
+        let need =
+            || -> Result<&str> { val.with_context(|| format!("flag '{}' requires a value", key)) };
         match key {
             "--tpe-db" => tpe_db = Some(PathBuf::from(need()?)),
             "--w3a-db" => w3a_db = Some(PathBuf::from(need()?)),
@@ -212,20 +211,14 @@ struct PoolEntry {
 /// Load every walk_forward_trials row for the most-recent
 /// `strategy`-matching study in `db_path`.
 fn load_all_wf_results(db_path: &Path, strategy: StrategyKind) -> Result<Vec<WalkForwardResult>> {
-    let storage = StudyStorage::open(db_path)
-        .with_context(|| format!("open {}", db_path.display()))?;
+    let storage =
+        StudyStorage::open(db_path).with_context(|| format!("open {}", db_path.display()))?;
     let studies = storage.list_studies()?;
     let target = studies
         .iter()
         .filter(|s| s.strategy == strategy.as_str())
         .max_by_key(|s| s.id)
-        .with_context(|| {
-            format!(
-                "no '{}' study in {}",
-                strategy.as_str(),
-                db_path.display()
-            )
-        })?;
+        .with_context(|| format!("no '{}' study in {}", strategy.as_str(), db_path.display()))?;
     let n = storage.count_walk_forward_trials(target.id)? as usize;
     if n == 0 {
         bail!(
@@ -518,13 +511,8 @@ fn pbo_robustness_label(r: PboRobustness) -> &'static str {
     }
 }
 
-fn write_union_pool_csv(
-    path: &Path,
-    pool_pbo: &PboResult,
-    rows: &[TrialRow],
-) -> Result<()> {
-    let mut file = File::create(path)
-        .with_context(|| format!("create CSV {}", path.display()))?;
+fn write_union_pool_csv(path: &Path, pool_pbo: &PboResult, rows: &[TrialRow]) -> Result<()> {
+    let mut file = File::create(path).with_context(|| format!("create CSV {}", path.display()))?;
     writeln!(
         file,
         "rank,source_db,trial_id,mean_oos_pf,std_oos_pf,worst_oos_pf,\
@@ -618,12 +606,7 @@ fn persist_results(
                 Utc::now().to_rfc3339(),
             ],
         )
-        .with_context(|| {
-            format!(
-                "insert stat_gates_trial {}/{}",
-                r.source_db, r.trial_id
-            )
-        })?;
+        .with_context(|| format!("insert stat_gates_trial {}/{}", r.source_db, r.trial_id))?;
     }
     Ok(pool_id)
 }
@@ -739,8 +722,14 @@ fn main() -> Result<()> {
     );
 
     let pool = build_union_pool(tpe_filtered, w3a_top, w3a_default);
-    let n_tpe = pool.iter().filter(|p| p.source_db == TPE_SOURCE_LABEL).count();
-    let n_w3a = pool.iter().filter(|p| p.source_db == W3A_SOURCE_LABEL).count();
+    let n_tpe = pool
+        .iter()
+        .filter(|p| p.source_db == TPE_SOURCE_LABEL)
+        .count();
+    let n_w3a = pool
+        .iter()
+        .filter(|p| p.source_db == W3A_SOURCE_LABEL)
+        .count();
     println!(
         "[stat-gates] union pool: {} trials  ({} TPE + {} W3a)",
         pool.len(),
@@ -789,8 +778,7 @@ fn main() -> Result<()> {
 
     if let Some(parent) = args.output_csv.parent() {
         if !parent.as_os_str().is_empty() {
-            create_dir_all(parent)
-                .with_context(|| format!("mkdir {}", parent.display()))?;
+            create_dir_all(parent).with_context(|| format!("mkdir {}", parent.display()))?;
         }
     }
     write_union_pool_csv(&args.output_csv, &pool_pbo, &rows)?;
@@ -798,17 +786,13 @@ fn main() -> Result<()> {
 
     if let Some(parent) = args.output_db.parent() {
         if !parent.as_os_str().is_empty() {
-            create_dir_all(parent)
-                .with_context(|| format!("mkdir {}", parent.display()))?;
+            create_dir_all(parent).with_context(|| format!("mkdir {}", parent.display()))?;
         }
     }
     let conn = Connection::open(&args.output_db)
         .with_context(|| format!("open --output-db {}", args.output_db.display()))?;
     ensure_output_schema(&conn)?;
-    let pool_name = format!(
-        "union_pool_ichimoku_w4_seed{}_{}",
-        args.seed, REPLAY_DATE,
-    );
+    let pool_name = format!("union_pool_ichimoku_w4_seed{}_{}", args.seed, REPLAY_DATE,);
     let pool_id = persist_results(&conn, &pool_name, args.seed, &pool_pbo, &rows)?;
     println!(
         "[stat-gates] persisted pool '{}' (id={}) + {} per-trial rows to {}",
@@ -977,10 +961,7 @@ mod tests {
     #[test]
     fn parse_args_w3a_default_survivors_off_disables_pool() {
         let mut raw = min_args();
-        raw.extend([
-            "--include-w3a-default-survivors".into(),
-            "off".into(),
-        ]);
+        raw.extend(["--include-w3a-default-survivors".into(), "off".into()]);
         let a = parse_args_from(&raw).unwrap();
         assert!(!a.include_w3a_default_survivors);
     }
@@ -1048,7 +1029,11 @@ mod tests {
     fn build_union_pool_dedupes_w3a_top_and_default_survivors() {
         let r = synth_wf(99, &[2.0; 6], &[0.5; 6], 1.5);
         let pool = build_union_pool(Vec::new(), vec![r.clone()], vec![r]);
-        assert_eq!(pool.len(), 1, "same W3a trial in both selectors must collapse");
+        assert_eq!(
+            pool.len(),
+            1,
+            "same W3a trial in both selectors must collapse"
+        );
         assert_eq!(pool[0].source_db, W3A_SOURCE_LABEL);
         assert_eq!(pool[0].result.trial_id, 99);
     }
@@ -1166,7 +1151,11 @@ mod tests {
         let content = std::fs::read_to_string(&csv).unwrap();
         let mut lines = content.lines();
         let header = lines.next().unwrap();
-        assert!(header.starts_with("rank,source_db,trial_id"), "got {}", header);
+        assert!(
+            header.starts_with("rank,source_db,trial_id"),
+            "got {}",
+            header
+        );
         let data_lines: Vec<&str> = lines.collect();
         assert_eq!(data_lines.len(), rows.len());
 

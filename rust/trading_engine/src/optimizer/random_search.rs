@@ -30,9 +30,7 @@ use crate::models::Candle;
 
 use super::runner::run_optimization_trial;
 use super::scoring::StrategyKind;
-use super::{
-    ParameterSpec, ScoreConstraints, SearchSpace, StudyStorage, TrialParams, TrialResult,
-};
+use super::{ParameterSpec, ScoreConstraints, SearchSpace, StudyStorage, TrialParams, TrialResult};
 
 /// Seedable random-search engine.
 pub struct RandomSearchEngine {
@@ -289,7 +287,11 @@ mod tests {
         for _ in 0..200 {
             let p = engine.sample(&space);
             let v = p.get_or("lr", f64::NAN);
-            assert!((1e-4..=1e-1).contains(&v), "log-uniform escaped bounds: {}", v);
+            assert!(
+                (1e-4..=1e-1).contains(&v),
+                "log-uniform escaped bounds: {}",
+                v
+            );
         }
     }
 }

@@ -18,8 +18,8 @@ sealed class Signal with _$Signal {
     /// Stop loss price (absolute).
     double? sl,
 
-    /// Take profit price levels (absolute).
-    required Float64List tp,
+    /// Take profit price (absolute).
+    double? tp,
 
     /// Position size as a percentage of available capital (0.0 - 100.0).
     required double sizePct,
@@ -30,8 +30,8 @@ sealed class Signal with _$Signal {
     /// Stop loss price (absolute).
     double? sl,
 
-    /// Take profit price levels (absolute).
-    required Float64List tp,
+    /// Take profit price (absolute).
+    double? tp,
 
     /// Position size as a percentage of available capital (0.0 - 100.0).
     required double sizePct,

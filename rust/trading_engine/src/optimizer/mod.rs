@@ -96,10 +96,7 @@ impl ParameterSpec {
                     return Err(format!("Float min ({}) must be < max ({})", min, max));
                 }
                 if *log && *min <= 0.0 {
-                    return Err(format!(
-                        "log-uniform Float requires min > 0 (got {})",
-                        min
-                    ));
+                    return Err(format!("log-uniform Float requires min > 0 (got {})", min));
                 }
                 Ok(())
             }
@@ -150,7 +147,8 @@ impl SearchSpace {
             return Err("search space must define at least one parameter".to_string());
         }
         for (name, spec) in &self.parameters {
-            spec.validate().map_err(|e| format!("param '{}': {}", name, e))?;
+            spec.validate()
+                .map_err(|e| format!("param '{}': {}", name, e))?;
         }
         // Disallow same name in `parameters` and `fixed` — caller error.
         for name in self.fixed.keys() {

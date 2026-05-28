@@ -128,7 +128,9 @@ impl WalkForwardConfig {
     /// legacy Welle-W1/W2 contract for any deserialized pre-W3 config.
     pub fn stability_method(&self) -> StabilityScoreMethod {
         self.stability_method
-            .unwrap_or(StabilityScoreMethod::MeanStdPenalty { penalty: self.stability_penalty })
+            .unwrap_or(StabilityScoreMethod::MeanStdPenalty {
+                penalty: self.stability_penalty,
+            })
     }
 }
 
@@ -168,10 +170,7 @@ pub struct WalkForwardSplit {
 /// # Why an inclusive split count formula
 /// `count = ⌊(total - train - validate) / step⌋ + 1` (when feasible).
 /// The `+ 1` reflects that `k = 0` is already a valid split.
-pub fn generate_splits(
-    config: &WalkForwardConfig,
-    total_bars: usize,
-) -> Vec<WalkForwardSplit> {
+pub fn generate_splits(config: &WalkForwardConfig, total_bars: usize) -> Vec<WalkForwardSplit> {
     if config.step_bars == 0 {
         return Vec::new();
     }
@@ -342,10 +341,7 @@ const TRIMMED_STD_PENALTY: f64 = 0.5;
 /// Returns `f64::NEG_INFINITY` for the empty slice to keep the
 /// sentinel convention consistent with the rest of the optimizer
 /// (disqualified trials sort to the bottom of any Top-N query).
-pub fn compute_aggregated_score(
-    oos_pfs: &[f64],
-    method: &StabilityScoreMethod,
-) -> f64 {
+pub fn compute_aggregated_score(oos_pfs: &[f64], method: &StabilityScoreMethod) -> f64 {
     if oos_pfs.is_empty() {
         return f64::NEG_INFINITY;
     }
@@ -413,11 +409,7 @@ pub fn aggregate_walk_forward_with_method(
         .collect();
 
     let mean_oos = oos_pfs.iter().sum::<f64>() / n;
-    let variance_oos = oos_pfs
-        .iter()
-        .map(|x| (x - mean_oos).powi(2))
-        .sum::<f64>()
-        / n;
+    let variance_oos = oos_pfs.iter().map(|x| (x - mean_oos).powi(2)).sum::<f64>() / n;
     let std_oos = variance_oos.sqrt();
     let worst_oos = oos_pfs.iter().copied().fold(f64::INFINITY, f64::min);
     let mean_is = is_pfs.iter().sum::<f64>() / n;
@@ -783,11 +775,7 @@ mod tests {
 
     #[test]
     fn aggregate_score_constant_oos_zero_std_means_score_equals_mean() {
-        let splits = vec![
-            split(0, 1.5, 1.5),
-            split(1, 1.5, 1.5),
-            split(2, 1.5, 1.5),
-        ];
+        let splits = vec![split(0, 1.5, 1.5), split(1, 1.5, 1.5), split(2, 1.5, 1.5)];
         let result = aggregate_walk_forward(0, TrialParams::new(), splits, 0.5);
         assert!((result.aggregated_score - 1.5).abs() < 1e-12);
         assert!((result.mean_oos_pf - 1.5).abs() < 1e-12);
@@ -802,9 +790,7 @@ mod tests {
         // Acceptance: stability wins.
         let a_splits: Vec<_> = (0..6).map(|i| split(i, 1.5, 1.5)).collect();
         let b_pfs = [3.0, 0.1, 3.0, 0.1, 3.0, 0.1];
-        let b_splits: Vec<_> = (0..6)
-            .map(|i| split(i, 1.5, b_pfs[i]))
-            .collect();
+        let b_splits: Vec<_> = (0..6).map(|i| split(i, 1.5, b_pfs[i])).collect();
         let a = aggregate_walk_forward(1, TrialParams::new(), a_splits, 0.5);
         let b = aggregate_walk_forward(2, TrialParams::new(), b_splits, 0.5);
         assert!(
@@ -818,7 +804,11 @@ mod tests {
             b.std_oos_pf,
         );
         // Pinned numerical sanity: B aggregated ≈ 0.825 (precise per formula)
-        assert!((b.aggregated_score - 0.825).abs() < 1e-9, "b={}", b.aggregated_score);
+        assert!(
+            (b.aggregated_score - 0.825).abs() < 1e-9,
+            "b={}",
+            b.aggregated_score
+        );
     }
 
     #[test]
@@ -845,7 +835,11 @@ mod tests {
         ];
         let result = aggregate_walk_forward(0, TrialParams::new(), splits, 0.5);
         assert!(result.aggregated_score.is_finite());
-        assert!((result.mean_oos_pf - 1.5).abs() < 1e-9, "mean={}", result.mean_oos_pf);
+        assert!(
+            (result.mean_oos_pf - 1.5).abs() < 1e-9,
+            "mean={}",
+            result.mean_oos_pf
+        );
         let expected_std = 0.75f64.sqrt();
         assert!(
             (result.std_oos_pf - expected_std).abs() < 1e-9,
@@ -1107,11 +1101,7 @@ mod tests {
         // The Welle-W1/W2 callsites pass `stability_penalty: f64` and
         // expect bit-identical aggregated scores. The shim must produce
         // the same number as the new method-based path.
-        let splits = vec![
-            split(0, 1.5, 2.0),
-            split(1, 1.5, 1.0),
-            split(2, 1.5, 1.5),
-        ];
+        let splits = vec![split(0, 1.5, 2.0), split(1, 1.5, 1.0), split(2, 1.5, 1.5)];
         let legacy = aggregate_walk_forward(0, TrialParams::new(), splits.clone(), 0.5);
         let via_method = aggregate_walk_forward_with_method(
             0,
@@ -1168,12 +1158,8 @@ mod tests {
             StabilityScoreMethod::MedianIqr { iqr_penalty: 0.5 },
             StabilityScoreMethod::TrimmedMean { trim_pct: 0.2 },
         ] {
-            let res = aggregate_walk_forward_with_method(
-                0,
-                TrialParams::new(),
-                splits.clone(),
-                &method,
-            );
+            let res =
+                aggregate_walk_forward_with_method(0, TrialParams::new(), splits.clone(), &method);
             assert!(
                 res.aggregated_score.is_infinite() && res.aggregated_score < 0.0,
                 "method {:?} must keep NEG_INFINITY sentinel, got {}",
@@ -1365,7 +1351,10 @@ mod tests {
             h1_base_config(),
             &permissive_constraints(),
         );
-        assert!(result.is_err(), "240 candles must Err under train=200+validate=50");
+        assert!(
+            result.is_err(),
+            "240 candles must Err under train=200+validate=50"
+        );
     }
 
     #[test]
@@ -1426,9 +1415,15 @@ mod tests {
         for (sa, sb) in a.splits.iter().zip(b.splits.iter()) {
             assert_eq!(sa.split_index, sb.split_index);
             assert_eq!(sa.train_metrics.total_trades, sb.train_metrics.total_trades);
-            assert_eq!(sa.validate_metrics.total_trades, sb.validate_metrics.total_trades);
+            assert_eq!(
+                sa.validate_metrics.total_trades,
+                sb.validate_metrics.total_trades
+            );
             assert_eq!(sa.train_metrics.final_equity, sb.train_metrics.final_equity);
-            assert_eq!(sa.validate_metrics.final_equity, sb.validate_metrics.final_equity);
+            assert_eq!(
+                sa.validate_metrics.final_equity,
+                sb.validate_metrics.final_equity
+            );
         }
         // Aggregated fields are sanitized → no NaN risk in equality.
         assert_eq!(a.mean_oos_pf, b.mean_oos_pf);

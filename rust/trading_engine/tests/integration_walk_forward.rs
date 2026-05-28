@@ -27,8 +27,8 @@ use tempfile::NamedTempFile;
 use trading_engine::backtest::BacktestConfig;
 use trading_engine::models::{Candle, Timeframe};
 use trading_engine::optimizer::{
-    aggregate_walk_forward, run_walk_forward_trial, ScoreConstraints, StrategyKind,
-    StudyStorage, TrialMetrics, TrialParams, WalkForwardConfig, WalkForwardSplitResult,
+    aggregate_walk_forward, run_walk_forward_trial, ScoreConstraints, StrategyKind, StudyStorage,
+    TrialMetrics, TrialParams, WalkForwardConfig, WalkForwardSplitResult,
 };
 
 // ─── Fixtures ────────────────────────────────────────────────────────────────
@@ -139,7 +139,12 @@ fn walk_forward_smoke_persists_six_splits_for_ichimoku_default() {
     )
     .expect("smoke run must succeed on 500 candles");
 
-    assert_eq!(result.splits.len(), 6, "expected 6 splits, got {}", result.splits.len());
+    assert_eq!(
+        result.splits.len(),
+        6,
+        "expected 6 splits, got {}",
+        result.splits.len()
+    );
     assert_eq!(result.trial_id, 515);
 
     // Persist + read back.
@@ -170,9 +175,7 @@ fn walk_forward_smoke_persists_six_splits_for_ichimoku_default() {
 fn stability_score_ranks_flat_trial_above_volatile_with_same_mean() {
     let a_splits: Vec<_> = (0..6).map(|i| handcraft_split(i, 1.5, 1.5)).collect();
     let b_pfs = [3.0, 0.1, 3.0, 0.1, 3.0, 0.1];
-    let b_splits: Vec<_> = (0..6)
-        .map(|i| handcraft_split(i, 1.5, b_pfs[i]))
-        .collect();
+    let b_splits: Vec<_> = (0..6).map(|i| handcraft_split(i, 1.5, b_pfs[i])).collect();
 
     let a = aggregate_walk_forward(101, TrialParams::new(), a_splits, 0.5);
     let b = aggregate_walk_forward(202, TrialParams::new(), b_splits, 0.5);
@@ -180,7 +183,10 @@ fn stability_score_ranks_flat_trial_above_volatile_with_same_mean() {
     // Mean check: B's mean (1.55) is marginally higher, so a pure
     // mean-based ranking would prefer B — confirming the stability
     // penalty is what flips the order.
-    assert!(b.mean_oos_pf > a.mean_oos_pf, "B's raw mean must exceed A's");
+    assert!(
+        b.mean_oos_pf > a.mean_oos_pf,
+        "B's raw mean must exceed A's"
+    );
     assert!(
         a.aggregated_score > b.aggregated_score,
         "stability must win: a_agg={} (mean={}, std={}) vs b_agg={} (mean={}, std={})",
@@ -195,10 +201,16 @@ fn stability_score_ranks_flat_trial_above_volatile_with_same_mean() {
     // Persisted ordering must mirror the in-memory ranking.
     let db = NamedTempFile::new().unwrap();
     let storage = StudyStorage::open(db.path()).unwrap();
-    let study_id = storage.create_study("wf_stability", "ichimoku", "yaml").unwrap();
+    let study_id = storage
+        .create_study("wf_stability", "ichimoku", "yaml")
+        .unwrap();
     let config = wf_config(200, 50, 50);
-    storage.insert_walk_forward_trial(study_id, &a, &config).unwrap();
-    storage.insert_walk_forward_trial(study_id, &b, &config).unwrap();
+    storage
+        .insert_walk_forward_trial(study_id, &a, &config)
+        .unwrap();
+    storage
+        .insert_walk_forward_trial(study_id, &b, &config)
+        .unwrap();
 
     let top = storage.top_n_walk_forward(study_id, 5).unwrap();
     assert_eq!(top[0].trial_id, 101, "A must rank first");
@@ -247,9 +259,15 @@ fn run_walk_forward_trial_is_bit_reproducible_for_identical_inputs() {
     for (sa, sb) in a.splits.iter().zip(b.splits.iter()) {
         assert_eq!(sa.split_index, sb.split_index);
         assert_eq!(sa.train_metrics.total_trades, sb.train_metrics.total_trades);
-        assert_eq!(sa.validate_metrics.total_trades, sb.validate_metrics.total_trades);
+        assert_eq!(
+            sa.validate_metrics.total_trades,
+            sb.validate_metrics.total_trades
+        );
         assert_eq!(sa.train_metrics.final_equity, sb.train_metrics.final_equity);
-        assert_eq!(sa.validate_metrics.final_equity, sb.validate_metrics.final_equity);
+        assert_eq!(
+            sa.validate_metrics.final_equity,
+            sb.validate_metrics.final_equity
+        );
     }
 }
 
@@ -293,7 +311,9 @@ fn persisted_walk_forward_result_matches_recomputed_after_reopen() {
         study_id = storage
             .create_study("wf_xprocess", "ichimoku", "yaml-placeholder")
             .unwrap();
-        storage.insert_walk_forward_trial(study_id, &live, &config).unwrap();
+        storage
+            .insert_walk_forward_trial(study_id, &live, &config)
+            .unwrap();
     }
     // Connection dropped — reopen.
     let storage = StudyStorage::open(db.path()).unwrap();
@@ -327,7 +347,10 @@ fn persisted_walk_forward_result_matches_recomputed_after_reopen() {
     for (rs, ls) in restored.splits.iter().zip(live.splits.iter()) {
         assert_eq!(rs.split_index, ls.split_index);
         assert_eq!(rs.train_metrics.total_trades, ls.train_metrics.total_trades);
-        assert_eq!(rs.validate_metrics.total_trades, ls.validate_metrics.total_trades);
+        assert_eq!(
+            rs.validate_metrics.total_trades,
+            ls.validate_metrics.total_trades
+        );
         assert!(
             approx_eq(rs.train_metrics.final_equity, ls.train_metrics.final_equity),
             "train final_equity ULP-drift: {} vs {}",
@@ -335,7 +358,10 @@ fn persisted_walk_forward_result_matches_recomputed_after_reopen() {
             ls.train_metrics.final_equity,
         );
         assert!(
-            approx_eq(rs.validate_metrics.final_equity, ls.validate_metrics.final_equity),
+            approx_eq(
+                rs.validate_metrics.final_equity,
+                ls.validate_metrics.final_equity
+            ),
             "validate final_equity ULP-drift: {} vs {}",
             rs.validate_metrics.final_equity,
             ls.validate_metrics.final_equity,
@@ -351,7 +377,9 @@ fn persisted_walk_forward_result_matches_recomputed_after_reopen() {
     let study_id_b = storage_b
         .create_study("wf_xprocess_b", "ichimoku", "yaml-placeholder")
         .unwrap();
-    storage_b.insert_walk_forward_trial(study_id_b, &live, &config).unwrap();
+    storage_b
+        .insert_walk_forward_trial(study_id_b, &live, &config)
+        .unwrap();
 
     let bytes_a = read_splits_json_bytes(db.path(), study_id);
     let bytes_b = read_splits_json_bytes(db_b.path(), study_id_b);
@@ -413,6 +441,9 @@ fn trial_params_json_independent_of_insertion_order() {
     // BTreeMap iteration order.
     let a_back: TrialParams = serde_json::from_str(&json_a).unwrap();
     let b_back: TrialParams = serde_json::from_str(&json_b).unwrap();
-    assert_eq!(a_back.values.keys().collect::<Vec<_>>(), b_back.values.keys().collect::<Vec<_>>());
+    assert_eq!(
+        a_back.values.keys().collect::<Vec<_>>(),
+        b_back.values.keys().collect::<Vec<_>>()
+    );
     let _: &BTreeMap<String, f64> = &a_back.values;
 }

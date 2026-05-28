@@ -32,8 +32,8 @@ fn build_two_regime_candles() -> Vec<Candle> {
     // Oscillating second half around the level reached at i=29 (= 143.5).
     let base = *closes.last().unwrap();
     let osc = [
-        2.0, -2.0, 1.5, -1.8, 2.2, -1.5, 1.7, -2.1, 1.9, -1.6,
-        2.0, -1.8, 1.5, -2.0, 1.9, -1.7, 2.2, -1.9, 1.6, -2.0,
+        2.0, -2.0, 1.5, -1.8, 2.2, -1.5, 1.7, -2.1, 1.9, -1.6, 2.0, -1.8, 1.5, -2.0, 1.9, -1.7,
+        2.2, -1.9, 1.6, -2.0,
     ];
     for d in osc {
         closes.push(closes.last().copied().unwrap_or(base) + d);

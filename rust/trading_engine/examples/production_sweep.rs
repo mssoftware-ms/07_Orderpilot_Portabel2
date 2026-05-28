@@ -245,8 +245,7 @@ fn repo_root() -> PathBuf {
 }
 
 fn load_candles(path: &Path) -> Result<Vec<Candle>> {
-    let file = File::open(path)
-        .with_context(|| format!("open candles {}", path.display()))?;
+    let file = File::open(path).with_context(|| format!("open candles {}", path.display()))?;
     let candles: Vec<Candle> = serde_json::from_reader(BufReader::new(file))
         .with_context(|| format!("parse candles {}", path.display()))?;
     Ok(candles)
@@ -269,12 +268,7 @@ fn parse_strategy(arg: &str) -> Result<StrategyKind> {
 /// 8-bucket histogram between `min` and `max` (inclusive). Values
 /// outside the range clamp into edge buckets. Returns
 /// `[(bucket_min, bucket_max, count), ...]` for pretty printing.
-fn histogram(
-    values: &[f64],
-    min: f64,
-    max: f64,
-    buckets: usize,
-) -> Vec<(f64, f64, usize)> {
+fn histogram(values: &[f64], min: f64, max: f64, buckets: usize) -> Vec<(f64, f64, usize)> {
     if buckets == 0 || values.is_empty() || max <= min {
         return Vec::new();
     }
@@ -291,7 +285,13 @@ fn histogram(
         counts[idx] += 1;
     }
     (0..buckets)
-        .map(|i| (min + i as f64 * width, min + (i + 1) as f64 * width, counts[i]))
+        .map(|i| {
+            (
+                min + i as f64 * width,
+                min + (i + 1) as f64 * width,
+                counts[i],
+            )
+        })
         .collect()
 }
 
@@ -328,14 +328,11 @@ impl BandCheck {
         let wr = trial.metrics.win_rate;
         let pf = trial.metrics.profit_factor;
         let dd = trial.metrics.max_drawdown_pct;
-        let profit_pct = (trial.metrics.final_equity - INITIAL_BALANCE)
-            / INITIAL_BALANCE
-            * 100.0;
+        let profit_pct = (trial.metrics.final_equity - INITIAL_BALANCE) / INITIAL_BALANCE * 100.0;
         BandCheck {
             trades_ok: trades >= cfg.trades_band.0 && trades <= cfg.trades_band.1,
             win_rate_ok: wr >= cfg.win_rate_band_pct.0 && wr <= cfg.win_rate_band_pct.1,
-            profit_factor_ok: pf >= cfg.profit_factor_band.0
-                && pf <= cfg.profit_factor_band.1,
+            profit_factor_ok: pf >= cfg.profit_factor_band.0 && pf <= cfg.profit_factor_band.1,
             max_drawdown_ok: dd < cfg.max_drawdown_cap_pct,
             profit_pct_ok: profit_pct >= cfg.profit_pct_band.0
                 && profit_pct <= cfg.profit_pct_band.1,
@@ -359,8 +356,7 @@ impl BandCheck {
 // ─── CSV + MD Writers ────────────────────────────────────────────────────────
 
 fn write_top10_csv(top: &[TrialResult], path: &Path) -> Result<()> {
-    let mut file = File::create(path)
-        .with_context(|| format!("create CSV {}", path.display()))?;
+    let mut file = File::create(path).with_context(|| format!("create CSV {}", path.display()))?;
     // Discover param keys from the first available trial — every trial
     // in one study carries the same param schema regardless of whether
     // the score gate passed.
@@ -369,7 +365,10 @@ fn write_top10_csv(top: &[TrialResult], path: &Path) -> Result<()> {
         .map(|t| t.params.values.keys().collect())
         .unwrap_or_default();
     param_keys.sort();
-    write!(file, "rank,trial_id,score,profit_factor,sharpe,trades,win_rate_pct,max_dd_pct,final_equity")?;
+    write!(
+        file,
+        "rank,trial_id,score,profit_factor,sharpe,trades,win_rate_pct,max_dd_pct,final_equity"
+    )?;
     for k in &param_keys {
         write!(file, ",p_{}", k)?;
     }
@@ -409,17 +408,17 @@ fn write_report_md(
     top_n: &[TrialResult],
     constraints: &ScoreConstraints,
 ) -> Result<()> {
-    let qualified: Vec<&TrialResult> = all_trials
-        .iter()
-        .filter(|t| t.score.is_finite())
-        .collect();
+    let qualified: Vec<&TrialResult> = all_trials.iter().filter(|t| t.score.is_finite()).collect();
     let qualified_count = qualified.len();
     let disq_count = all_trials.len() - qualified_count;
 
     // Histograms on qualified trials only — disq trials have score=-inf
     // and uninteresting metric clusters at 0.
     let pfs: Vec<f64> = qualified.iter().map(|t| t.metrics.profit_factor).collect();
-    let dds: Vec<f64> = qualified.iter().map(|t| t.metrics.max_drawdown_pct).collect();
+    let dds: Vec<f64> = qualified
+        .iter()
+        .map(|t| t.metrics.max_drawdown_pct)
+        .collect();
     let trades: Vec<f64> = qualified
         .iter()
         .map(|t| t.metrics.total_trades as f64)
@@ -492,8 +491,7 @@ fn write_report_md(
     md.push_str("| Rank | Trial | Score | PF | Sharpe | Trades | WR % | MaxDD % | profit % | final equity |\n");
     md.push_str("|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n");
     for (i, t) in top_n.iter().enumerate().take(10) {
-        let profit_pct =
-            (t.metrics.final_equity - INITIAL_BALANCE) / INITIAL_BALANCE * 100.0;
+        let profit_pct = (t.metrics.final_equity - INITIAL_BALANCE) / INITIAL_BALANCE * 100.0;
         md.push_str(&format!(
             "| {} | {} | {:.4} | {:.3} | {:+.3} | {} | {:.2} | {:.2} | {:+.2} | {:.2} |\n",
             i + 1,
@@ -512,10 +510,7 @@ fn write_report_md(
 
     // ─── XLSX Band Check Top-5 ──────────────────────────────────────────
     md.push_str("## 3. XLSX-Band-Check (Top-5)\n\n");
-    md.push_str(&format!(
-        "XLSX-Targets ({}):  \n",
-        cfg.kind.as_str()
-    ));
+    md.push_str(&format!("XLSX-Targets ({}):  \n", cfg.kind.as_str()));
     md.push_str(&format!(
         "- Trade-Count ∈ [{}, {}]  \n",
         cfg.trades_band.0, cfg.trades_band.1
@@ -528,10 +523,7 @@ fn write_report_md(
         "- PF ∈ [{}, {}]  \n",
         cfg.profit_factor_band.0, cfg.profit_factor_band.1
     ));
-    md.push_str(&format!(
-        "- MaxDD < {} %  \n",
-        cfg.max_drawdown_cap_pct
-    ));
+    md.push_str(&format!("- MaxDD < {} %  \n", cfg.max_drawdown_cap_pct));
     md.push_str(&format!(
         "- profit % ∈ [+{} %, +{} %]\n\n",
         cfg.profit_pct_band.0, cfg.profit_pct_band.1
@@ -589,8 +581,8 @@ fn write_report_md(
         Utc::now().to_rfc3339(),
     ));
 
-    let mut file = File::create(path)
-        .with_context(|| format!("create report {}", path.display()))?;
+    let mut file =
+        File::create(path).with_context(|| format!("create report {}", path.display()))?;
     file.write_all(md.as_bytes())?;
     Ok(())
 }
@@ -694,8 +686,7 @@ fn main() -> Result<()> {
     println!("Top-5:");
     println!("rank trial_id    score     PF   Sharpe trades   WR%  MaxDD%   profit%   final_eq");
     for (i, t) in top_all.iter().enumerate().take(5) {
-        let profit_pct =
-            (t.metrics.final_equity - INITIAL_BALANCE) / INITIAL_BALANCE * 100.0;
+        let profit_pct = (t.metrics.final_equity - INITIAL_BALANCE) / INITIAL_BALANCE * 100.0;
         println!(
             "  {}  {:>7}  {:>7.3}  {:>5.3} {:>+6.3} {:>6} {:>5.2} {:>6.2}  {:>+7.2}  {:>9.2}",
             i + 1,
@@ -717,9 +708,12 @@ fn main() -> Result<()> {
     println!("wrote {}", csv_path.display());
 
     // ─── Write Report MD ───────────────────────────────────────────────
-    let report_path = root
-        .join("01_Projectplan/specs")
-        .join(format!("{}{}_sweep_{}.md", strategy.as_str(), marker, SWEEP_DATE));
+    let report_path = root.join("01_Projectplan/specs").join(format!(
+        "{}{}_sweep_{}.md",
+        strategy.as_str(),
+        marker,
+        SWEEP_DATE
+    ));
     write_report_md(
         &report_path,
         &cfg,

@@ -23,9 +23,7 @@
 
 use std::collections::BTreeMap;
 
-use trading_engine::optimizer::{
-    ParameterSpec, RandomSearchEngine, SearchSpace, TrialParams,
-};
+use trading_engine::optimizer::{ParameterSpec, RandomSearchEngine, SearchSpace, TrialParams};
 
 fn extract_sequence(space: &SearchSpace, seed: u64, n: usize) -> Vec<TrialParams> {
     let mut engine = RandomSearchEngine::new(seed);
@@ -89,7 +87,10 @@ fn sample_sequence_independent_of_insertion_order() {
         fixed: fixed_b,
     };
 
-    assert_eq!(space_a, space_b, "BTreeMap equality should be insertion-order-independent");
+    assert_eq!(
+        space_a, space_b,
+        "BTreeMap equality should be insertion-order-independent"
+    );
 
     let seq_a = extract_sequence(&space_a, 42, 50);
     let seq_b = extract_sequence(&space_b, 42, 50);
@@ -152,13 +153,20 @@ fn sample_zero_at_seed_42_is_pinned() {
     let alpha = first.get_or("alpha", f64::NAN);
     let beta = first.get_or("beta", f64::NAN);
     let zeta = first.get_or("zeta", f64::NAN);
-    eprintln!("seed-42 first draws: alpha={} beta={} zeta={}", alpha, beta, zeta);
+    eprintln!(
+        "seed-42 first draws: alpha={} beta={} zeta={}",
+        alpha, beta, zeta
+    );
     // Pinned tail-values of `rand 0.8 + StdRng` at seed 42 with BTreeMap
     // iteration order [alpha, beta]. If `rand` is ever bumped to a semver
     // that perturbs the StdRng stream, these values change — the test
     // failure surfaces the change immediately so downstream sweep DB
     // hashes are re-validated rather than silently shifting.
-    assert_eq!(alpha, 52.0, "alpha must be the pinned first draw, got {}", alpha);
+    assert_eq!(
+        alpha, 52.0,
+        "alpha must be the pinned first draw, got {}",
+        alpha
+    );
     assert!(
         (beta - 0.5427252099031441).abs() < 1e-12,
         "beta must be the pinned second draw, got {} (delta {:.3e})",

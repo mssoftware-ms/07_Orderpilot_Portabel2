@@ -122,12 +122,7 @@ pub struct AdxOutput {
 /// values from index `period - 1` onward, but the `adx` vec stays
 /// entirely NaN — useful for callers that need DI exposure without
 /// waiting for the full ADX warm-up.
-pub fn calc_adx(
-    highs: &[f64],
-    lows: &[f64],
-    closes: &[f64],
-    period: usize,
-) -> Option<AdxOutput> {
+pub fn calc_adx(highs: &[f64], lows: &[f64], closes: &[f64], period: usize) -> Option<AdxOutput> {
     if period == 0 {
         return None;
     }
@@ -498,10 +493,8 @@ mod tests {
         // User R1-1 test #3: mirror of the uptrend test for the short
         // side. Linear downtrend → only -DM fires.
         let n = 80;
-        let highs: Vec<f64> =
-            (0..n).map(|i| 200.0 - i as f64 + 0.5).collect();
-        let lows: Vec<f64> =
-            (0..n).map(|i| 200.0 - i as f64 - 0.5).collect();
+        let highs: Vec<f64> = (0..n).map(|i| 200.0 - i as f64 + 0.5).collect();
+        let lows: Vec<f64> = (0..n).map(|i| 200.0 - i as f64 - 0.5).collect();
         let closes: Vec<f64> = (0..n).map(|i| 200.0 - i as f64).collect();
         let period = 14;
         let out = calc_adx(&highs, &lows, &closes, period).unwrap();
@@ -769,9 +762,30 @@ mod tests {
         // is intentional — a raw `<` comparison with NaN is always false
         // and would let downstream `if use_di_confluence` logic run on
         // garbage data.
-        assert!(!regime_passes_filter(f64::NAN, 30.0, 10.0, 25.0, true, false));
-        assert!(!regime_passes_filter(40.0, f64::NAN, 10.0, 25.0, true, true));
-        assert!(!regime_passes_filter(40.0, 30.0, f64::NAN, 25.0, false, true));
+        assert!(!regime_passes_filter(
+            f64::NAN,
+            30.0,
+            10.0,
+            25.0,
+            true,
+            false
+        ));
+        assert!(!regime_passes_filter(
+            40.0,
+            f64::NAN,
+            10.0,
+            25.0,
+            true,
+            true
+        ));
+        assert!(!regime_passes_filter(
+            40.0,
+            30.0,
+            f64::NAN,
+            25.0,
+            false,
+            true
+        ));
     }
 
     #[test]

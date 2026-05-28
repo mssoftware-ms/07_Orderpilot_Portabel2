@@ -20,7 +20,13 @@ use trading_engine::models::{annualized_sharpe, periods_per_year, Timeframe};
 fn construct_returns(mean: f64, delta: f64, n: usize) -> Vec<f64> {
     assert!(n.is_multiple_of(2), "n must be even for exact sample stats");
     (0..n)
-        .map(|i| if i % 2 == 0 { mean + delta } else { mean - delta })
+        .map(|i| {
+            if i % 2 == 0 {
+                mean + delta
+            } else {
+                mean - delta
+            }
+        })
         .collect()
 }
 
@@ -44,7 +50,11 @@ fn h1_annualization_matches_closed_form() {
 
     // Sanity: constructed sample stats are exact
     let sample_mean = returns.iter().sum::<f64>() / n as f64;
-    let sample_var = returns.iter().map(|r| (r - sample_mean).powi(2)).sum::<f64>() / n as f64;
+    let sample_var = returns
+        .iter()
+        .map(|r| (r - sample_mean).powi(2))
+        .sum::<f64>()
+        / n as f64;
     let sample_stdev = sample_var.sqrt();
     assert!((sample_mean - mean).abs() < 1e-15);
     assert!((sample_stdev - delta).abs() < 1e-15);

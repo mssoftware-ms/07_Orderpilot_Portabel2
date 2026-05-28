@@ -65,10 +65,8 @@ fn base_config() -> BacktestConfig {
 /// Acceptance gate #1: 50 trials run, all 50 persisted, Top-5 retrievable.
 #[test]
 fn mini_sweep_persists_all_trials_and_returns_top_five() {
-    let space = parse_search_space(
-        &repo_root().join("01_Projectplan/search_spaces/bb_rsi.yaml"),
-    )
-    .expect("bb_rsi.yaml must parse");
+    let space = parse_search_space(&repo_root().join("01_Projectplan/search_spaces/bb_rsi.yaml"))
+        .expect("bb_rsi.yaml must parse");
     let candles = synthetic_candles(200);
     let constraints = ScoreConstraints {
         max_drawdown_cap_pct: 100.0, // relax for tiny fixture
@@ -118,10 +116,8 @@ fn mini_sweep_persists_all_trials_and_returns_top_five() {
 /// depend.
 #[test]
 fn mini_sweep_with_seed_42_is_reproducible_across_runs() {
-    let space = parse_search_space(
-        &repo_root().join("01_Projectplan/search_spaces/bb_rsi.yaml"),
-    )
-    .unwrap();
+    let space =
+        parse_search_space(&repo_root().join("01_Projectplan/search_spaces/bb_rsi.yaml")).unwrap();
     let candles = synthetic_candles(200);
     let constraints = ScoreConstraints {
         max_drawdown_cap_pct: 100.0,
@@ -175,10 +171,8 @@ fn mini_sweep_with_seed_42_is_reproducible_across_runs() {
 /// can qualify, so every Top-5 score is `f64::NEG_INFINITY`.
 #[test]
 fn impossible_min_trades_constraint_disqualifies_every_trial() {
-    let space = parse_search_space(
-        &repo_root().join("01_Projectplan/search_spaces/bb_rsi.yaml"),
-    )
-    .unwrap();
+    let space =
+        parse_search_space(&repo_root().join("01_Projectplan/search_spaces/bb_rsi.yaml")).unwrap();
     let candles = synthetic_candles(200);
     let strict = ScoreConstraints {
         max_drawdown_cap_pct: 100.0,

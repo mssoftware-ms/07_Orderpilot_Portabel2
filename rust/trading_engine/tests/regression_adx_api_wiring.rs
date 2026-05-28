@@ -17,9 +17,7 @@
 //! filter baseline only in the toggle-off case.
 
 use serde_json::{json, Value};
-use trading_engine::api::{
-    run_bb_rsi_backtest, run_ichimoku_backtest, run_ut_bot_backtest,
-};
+use trading_engine::api::{run_bb_rsi_backtest, run_ichimoku_backtest, run_ut_bot_backtest};
 use trading_engine::models::Candle;
 
 const INITIAL_BALANCE: f64 = 10_000.0;
@@ -35,11 +33,7 @@ fn total_trades(resp: &str) -> i64 {
         .expect("metrics.total_trades must be present and integer")
 }
 
-fn invoke(
-    api: fn(String, String, f64, f64) -> String,
-    candles: &[Candle],
-    params: Value,
-) -> i64 {
+fn invoke(api: fn(String, String, f64, f64) -> String, candles: &[Candle], params: Value) -> i64 {
     let candles_json = serde_json::to_string(candles).unwrap();
     let params_json = serde_json::to_string(&params).unwrap();
     total_trades(&api(candles_json, params_json, INITIAL_BALANCE, FEE_RATE))
@@ -189,7 +183,7 @@ fn ut_bot_adx_filter_unreachable_threshold_blocks_all_entries() {
 /// needs *some* baseline signal to verify the filter shuts it off.
 fn ichimoku_long_trend_fixture() -> Vec<Candle> {
     let mut closes: Vec<f64> = vec![100.0; 110]; // 110 flat bars for warm-up
-    // 80-bar upward ramp pushing price decisively above the cloud
+                                                 // 80-bar upward ramp pushing price decisively above the cloud
     for i in 0..80 {
         closes.push(100.0 + i as f64);
     }

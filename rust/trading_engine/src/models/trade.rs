@@ -217,8 +217,7 @@ impl BacktestMetrics {
         // walked settled trade PnL only, which silently ignored open-position
         // intra-trade equity excursions and diverged from Dart by ~30x on
         // the parity fixture (28.75 vs 951.47). See Plan-rev3 §3.4 F-03c.
-        let (max_dd, max_drawdown_percent) =
-            max_drawdown_from_equity_curve(equity_curve);
+        let (max_dd, max_drawdown_percent) = max_drawdown_from_equity_curve(equity_curve);
 
         // Sharpe ratio (F-03): annualized over equity-curve returns,
         // NOT trade-PnL percentages. Identical formula to the Dart engine.
@@ -236,10 +235,7 @@ impl BacktestMetrics {
             .iter()
             .map(|t| t.pnl)
             .fold(f64::NEG_INFINITY, f64::max);
-        let mut largest_loss = trades
-            .iter()
-            .map(|t| t.pnl)
-            .fold(f64::INFINITY, f64::min);
+        let mut largest_loss = trades.iter().map(|t| t.pnl).fold(f64::INFINITY, f64::min);
         if !largest_win.is_finite() {
             largest_win = 0.0; // N-17: no wins → no largest win
         }

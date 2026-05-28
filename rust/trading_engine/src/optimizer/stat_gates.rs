@@ -158,7 +158,11 @@ pub fn calculate_pbo(input: &PboInput) -> Result<PboResult> {
     let matrix: Vec<Vec<f64>> = input
         .matrix
         .iter()
-        .map(|row| row.iter().map(|&v| if v.is_finite() { v } else { 0.0 }).collect())
+        .map(|row| {
+            row.iter()
+                .map(|&v| if v.is_finite() { v } else { 0.0 })
+                .collect()
+        })
         .collect();
 
     let all_splits: Vec<usize> = (0..n_splits).collect();
@@ -333,8 +337,7 @@ pub fn calculate_dsr(input: &DsrInput) -> Result<DsrResult> {
     // Mertens 2002 variance denominator. (γ_4 - 1)/4 uses RAW kurtosis;
     // for normal returns this collapses to 0.5 · SR², matching Lo (2002).
     let sr = input.trial_sharpe;
-    let var_factor =
-        1.0 - input.skew * sr + ((input.kurtosis - 1.0) / 4.0) * sr * sr;
+    let var_factor = 1.0 - input.skew * sr + ((input.kurtosis - 1.0) / 4.0) * sr * sr;
     if var_factor <= 0.0 {
         bail!(
             "calculate_dsr: degenerate Mertens variance factor = {:.6e} ≤ 0 \
@@ -554,9 +557,7 @@ mod tests {
         // Φ^{-1}(0.975) ≈ 1.95996
         assert!((inverse_standard_normal_cdf(0.975) - 1.959_963_984_540_054).abs() < 1e-6);
         // Φ^{-1}(0.025) ≈ -1.95996
-        assert!(
-            (inverse_standard_normal_cdf(0.025) + 1.959_963_984_540_054).abs() < 1e-6
-        );
+        assert!((inverse_standard_normal_cdf(0.025) + 1.959_963_984_540_054).abs() < 1e-6);
         // Φ^{-1}(0.99) ≈ 2.3263
         assert!((inverse_standard_normal_cdf(0.99) - 2.326_347_874_040_842).abs() < 1e-5);
         assert!(inverse_standard_normal_cdf(0.0).is_infinite());
@@ -630,7 +631,11 @@ mod tests {
         };
         let r = calculate_pbo(&input).unwrap();
         assert_eq!(r.n_combinations, 20);
-        assert!(r.pbo_score.abs() < 1e-12, "PBO = {}, expected 0.0", r.pbo_score);
+        assert!(
+            r.pbo_score.abs() < 1e-12,
+            "PBO = {}, expected 0.0",
+            r.pbo_score
+        );
         assert_eq!(r.robustness_indicator, PboRobustness::Robust);
     }
 
@@ -909,7 +914,11 @@ mod tests {
             kurtosis: 3.0,
             n_observations: 100,
         };
-        assert!(calculate_dsr(&DsrInput { n_trials: 0, ..base }).is_err());
+        assert!(calculate_dsr(&DsrInput {
+            n_trials: 0,
+            ..base
+        })
+        .is_err());
         assert!(calculate_dsr(&DsrInput {
             n_observations: 1,
             ..base

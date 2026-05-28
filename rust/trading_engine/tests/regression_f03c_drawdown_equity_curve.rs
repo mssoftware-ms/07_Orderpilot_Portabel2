@@ -25,8 +25,7 @@ fn drawdown_finds_largest_peak_to_trough_excursion() {
     // A later excursion (11_000 → 10_200, dd = 800) is smaller and must not
     // overwrite the result.
     let equity = [
-        10_000.0, 10_500.0, 10_800.0, 9_500.0, 9_800.0, 11_000.0, 10_200.0,
-        11_500.0,
+        10_000.0, 10_500.0, 10_800.0, 9_500.0, 9_800.0, 11_000.0, 10_200.0, 11_500.0,
     ];
     let (max_dd, _max_dd_pct) = max_drawdown_from_equity_curve(&equity);
     assert!(

@@ -700,13 +700,13 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       case 0:
         return Signal_EnterLong(
           sl: dco_decode_opt_box_autoadd_f_64(raw[1]),
-          tp: dco_decode_list_prim_f_64_strict(raw[2]),
+          tp: dco_decode_opt_box_autoadd_f_64(raw[2]),
           sizePct: dco_decode_f_64(raw[3]),
         );
       case 1:
         return Signal_EnterShort(
           sl: dco_decode_opt_box_autoadd_f_64(raw[1]),
-          tp: dco_decode_list_prim_f_64_strict(raw[2]),
+          tp: dco_decode_opt_box_autoadd_f_64(raw[2]),
           sizePct: dco_decode_f_64(raw[3]),
         );
       case 2:
@@ -861,12 +861,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     switch (tag_) {
       case 0:
         var var_sl = sse_decode_opt_box_autoadd_f_64(deserializer);
-        var var_tp = sse_decode_list_prim_f_64_strict(deserializer);
+        var var_tp = sse_decode_opt_box_autoadd_f_64(deserializer);
         var var_sizePct = sse_decode_f_64(deserializer);
         return Signal_EnterLong(sl: var_sl, tp: var_tp, sizePct: var_sizePct);
       case 1:
         var var_sl = sse_decode_opt_box_autoadd_f_64(deserializer);
-        var var_tp = sse_decode_list_prim_f_64_strict(deserializer);
+        var var_tp = sse_decode_opt_box_autoadd_f_64(deserializer);
         var var_sizePct = sse_decode_f_64(deserializer);
         return Signal_EnterShort(sl: var_sl, tp: var_tp, sizePct: var_sizePct);
       case 2:
@@ -1019,7 +1019,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       case Signal_EnterLong(sl: final sl, tp: final tp, sizePct: final sizePct):
         sse_encode_i_32(0, serializer);
         sse_encode_opt_box_autoadd_f_64(sl, serializer);
-        sse_encode_list_prim_f_64_strict(tp, serializer);
+        sse_encode_opt_box_autoadd_f_64(tp, serializer);
         sse_encode_f_64(sizePct, serializer);
       case Signal_EnterShort(
         sl: final sl,
@@ -1028,7 +1028,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       ):
         sse_encode_i_32(1, serializer);
         sse_encode_opt_box_autoadd_f_64(sl, serializer);
-        sse_encode_list_prim_f_64_strict(tp, serializer);
+        sse_encode_opt_box_autoadd_f_64(tp, serializer);
         sse_encode_f_64(sizePct, serializer);
       case Signal_Exit(reason: final reason):
         sse_encode_i_32(2, serializer);

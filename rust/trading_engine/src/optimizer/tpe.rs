@@ -45,9 +45,7 @@ use crate::models::Candle;
 
 use super::runner::run_optimization_trial;
 use super::scoring::StrategyKind;
-use super::{
-    ParameterSpec, ScoreConstraints, SearchSpace, StudyStorage, TrialParams, TrialResult,
-};
+use super::{ParameterSpec, ScoreConstraints, SearchSpace, StudyStorage, TrialParams, TrialResult};
 
 // ─── Constants ──────────────────────────────────────────────────────────────
 
@@ -167,13 +165,8 @@ impl TpeEngine {
                 .iter()
                 .filter_map(|t| t.params.values.get(name).copied())
                 .collect();
-            let suggested = suggest_param(
-                &mut self.rng,
-                spec,
-                &l_vals,
-                &g_vals,
-                self.n_ei_candidates,
-            );
+            let suggested =
+                suggest_param(&mut self.rng, spec, &l_vals, &g_vals, self.n_ei_candidates);
             params.insert(name.clone(), suggested);
         }
         for (name, &value) in &space.fixed {
@@ -277,9 +270,7 @@ fn suggest_param(
         ParameterSpec::Float { min, max, log } => {
             suggest_float(rng, *min, *max, *log, l_vals, g_vals, n_ei)
         }
-        ParameterSpec::Int { min, max } => {
-            suggest_int(rng, *min, *max, l_vals, g_vals, n_ei)
-        }
+        ParameterSpec::Int { min, max } => suggest_int(rng, *min, *max, l_vals, g_vals, n_ei),
         ParameterSpec::Bool => suggest_bool(rng, l_vals, g_vals),
         ParameterSpec::Categorical { values } => {
             suggest_categorical(rng, values.len(), l_vals, g_vals)
@@ -442,7 +433,10 @@ pub fn gaussian_kde_log_pdf(x: f64, samples: &[f64], bw: f64) -> f64 {
         })
         .collect();
     // log-sum-exp for numerical stability
-    let max = log_components.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    let max = log_components
+        .iter()
+        .copied()
+        .fold(f64::NEG_INFINITY, f64::max);
     if !max.is_finite() {
         return f64::NEG_INFINITY;
     }
@@ -489,9 +483,7 @@ fn random_sample_one(rng: &mut StdRng, spec: &ParameterSpec) -> f64 {
                 Uniform::new_inclusive(*min, *max).sample(rng)
             }
         }
-        ParameterSpec::Int { min, max } => {
-            Uniform::new_inclusive(*min, *max).sample(rng) as f64
-        }
+        ParameterSpec::Int { min, max } => Uniform::new_inclusive(*min, *max).sample(rng) as f64,
         ParameterSpec::Bool => {
             if rng.gen_bool(0.5) {
                 1.0
@@ -725,7 +717,10 @@ mod tests {
                 break;
             }
         }
-        assert!(differ, "two distinct seeds must diverge within 10 suggestions");
+        assert!(
+            differ,
+            "two distinct seeds must diverge within 10 suggestions"
+        );
     }
 
     // ─── Engine: warm-start biases toward survivor cluster ──────────────────
@@ -795,10 +790,8 @@ mod tests {
                 score,
             });
         }
-        let first_half_mean: f64 =
-            scores.iter().take(40).copied().sum::<f64>() / 40.0;
-        let second_half_mean: f64 =
-            scores.iter().skip(40).copied().sum::<f64>() / 40.0;
+        let first_half_mean: f64 = scores.iter().take(40).copied().sum::<f64>() / 40.0;
+        let second_half_mean: f64 = scores.iter().skip(40).copied().sum::<f64>() / 40.0;
         assert!(
             second_half_mean > first_half_mean,
             "second-half mean ({}) must exceed first-half mean ({}) — TPE failed to improve",
@@ -806,10 +799,7 @@ mod tests {
             first_half_mean,
         );
         // The best score recorded must be close to 0 (the optimum).
-        let best = scores
-            .iter()
-            .copied()
-            .fold(f64::NEG_INFINITY, f64::max);
+        let best = scores.iter().copied().fold(f64::NEG_INFINITY, f64::max);
         assert!(
             best > -1.0,
             "best score over 80 trials ({}) must come within 1.0 of the optimum (= 0.0)",
@@ -822,10 +812,7 @@ mod tests {
     #[test]
     fn suggest_handles_int_bool_categorical_and_fixed_params() {
         let mut params: BTreeMap<String, ParameterSpec> = BTreeMap::new();
-        params.insert(
-            "x_int".into(),
-            ParameterSpec::Int { min: 0, max: 100 },
-        );
+        params.insert("x_int".into(), ParameterSpec::Int { min: 0, max: 100 });
         params.insert("flag".into(), ParameterSpec::Bool);
         params.insert(
             "mode".into(),

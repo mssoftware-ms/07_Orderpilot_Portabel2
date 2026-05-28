@@ -17,14 +17,14 @@ use crate::models::Timeframe;
 /// natural extension so callers using the full `Timeframe` enum compile.
 pub fn periods_per_year(tf: Timeframe) -> f64 {
     match tf {
-        Timeframe::M1 => 525_600.0,  // 365 * 24 * 60
-        Timeframe::M5 => 105_120.0,  // 525600 / 5
-        Timeframe::M15 => 35_040.0,  // 525600 / 15
-        Timeframe::M30 => 17_520.0,  // 525600 / 30
-        Timeframe::H1 => 8_760.0,    // 365 * 24
-        Timeframe::H4 => 2_190.0,    // 8760 / 4
+        Timeframe::M1 => 525_600.0, // 365 * 24 * 60
+        Timeframe::M5 => 105_120.0, // 525600 / 5
+        Timeframe::M15 => 35_040.0, // 525600 / 15
+        Timeframe::M30 => 17_520.0, // 525600 / 30
+        Timeframe::H1 => 8_760.0,   // 365 * 24
+        Timeframe::H4 => 2_190.0,   // 8760 / 4
         Timeframe::D1 => 365.0,
-        Timeframe::W1 => 52.0,       // 365 / 7, rounded down
+        Timeframe::W1 => 52.0, // 365 / 7, rounded down
     }
 }
 

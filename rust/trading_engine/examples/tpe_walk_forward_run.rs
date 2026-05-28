@@ -54,8 +54,8 @@ use trading_engine::models::{Candle, Timeframe};
 use trading_engine::optimizer::{
     parse_search_space_str, run_walk_forward_trial, score_constraints_for_strategy, survives,
     ScoreConstraints, SearchSpace, StabilityScoreMethod, StrategyKind, StudyStorage,
-    SurvivorCriteria, TpeEngine, TrialMetrics, TrialResult, WalkForwardConfig,
-    WalkForwardResult, DEFAULT_GAMMA, DEFAULT_N_EI_CANDIDATES, MIN_HISTORY_FOR_TPE,
+    SurvivorCriteria, TpeEngine, TrialMetrics, TrialResult, WalkForwardConfig, WalkForwardResult,
+    DEFAULT_GAMMA, DEFAULT_N_EI_CANDIDATES, MIN_HISTORY_FOR_TPE,
 };
 
 // ─── Constants ───────────────────────────────────────────────────────────────
@@ -207,16 +207,13 @@ fn parse_args_from(raw: &[String]) -> Result<CliArgs> {
     while i < raw.len() {
         let key = raw[i].as_str();
         let val = raw.get(i + 1).map(String::as_str);
-        let need = || -> Result<&str> {
-            val.with_context(|| format!("flag '{}' requires a value", key))
-        };
+        let need =
+            || -> Result<&str> { val.with_context(|| format!("flag '{}' requires a value", key)) };
         match key {
             "--wf-study" => wf_study = Some(PathBuf::from(need()?)),
             "--candles" => candles_path = Some(PathBuf::from(need()?)),
             "--search-space" => search_space_path = Some(PathBuf::from(need()?)),
-            "--n-trials" => {
-                n_trials = need()?.parse().with_context(|| "--n-trials must be u32")?
-            }
+            "--n-trials" => n_trials = need()?.parse().with_context(|| "--n-trials must be u32")?,
             "--train-bars" => {
                 train_bars = need()?
                     .parse()
@@ -228,19 +225,17 @@ fn parse_args_from(raw: &[String]) -> Result<CliArgs> {
                     .with_context(|| "--validate-bars must be usize")?
             }
             "--step-bars" => {
-                step_bars = need()?.parse().with_context(|| "--step-bars must be usize")?
+                step_bars = need()?
+                    .parse()
+                    .with_context(|| "--step-bars must be usize")?
             }
-            "--stability-method" => {
-                stability_method = StabilityMethodArg::parse(need()?)?
-            }
+            "--stability-method" => stability_method = StabilityMethodArg::parse(need()?)?,
             "--stability-penalty" => {
                 stability_penalty = need()?
                     .parse()
                     .with_context(|| "--stability-penalty must be f64")?
             }
-            "--trim-pct" => {
-                trim_pct = need()?.parse().with_context(|| "--trim-pct must be f64")?
-            }
+            "--trim-pct" => trim_pct = need()?.parse().with_context(|| "--trim-pct must be f64")?,
             "--warm-start-criteria-min-mean-oos-pf" => {
                 warm_start_criteria.min_mean_oos_pf = need()?
                     .parse()
@@ -313,8 +308,7 @@ fn parse_args_from(raw: &[String]) -> Result<CliArgs> {
 // ─── IO helpers ──────────────────────────────────────────────────────────────
 
 fn load_candles(path: &Path) -> Result<Vec<Candle>> {
-    let file =
-        File::open(path).with_context(|| format!("open candles {}", path.display()))?;
+    let file = File::open(path).with_context(|| format!("open candles {}", path.display()))?;
     let candles: Vec<Candle> = serde_json::from_reader(BufReader::new(file))
         .with_context(|| format!("parse candles {}", path.display()))?;
     Ok(candles)
@@ -371,8 +365,7 @@ fn wf_to_trial_result(wf: &WalkForwardResult) -> TrialResult {
 // ─── CSV writer ──────────────────────────────────────────────────────────────
 
 fn write_tpe_csv(results: &[WalkForwardResult], path: &Path) -> Result<()> {
-    let mut file =
-        File::create(path).with_context(|| format!("create CSV {}", path.display()))?;
+    let mut file = File::create(path).with_context(|| format!("create CSV {}", path.display()))?;
     let mut param_keys: Vec<&String> = results
         .first()
         .map(|r| r.params.values.keys().collect())
@@ -480,8 +473,7 @@ fn run_tpe_walk_forward(
         bail!("--n-trials must be > 0");
     }
 
-    let warm_start_history: Vec<TrialResult> =
-        warm_start.iter().map(wf_to_trial_result).collect();
+    let warm_start_history: Vec<TrialResult> = warm_start.iter().map(wf_to_trial_result).collect();
 
     let mut engine = TpeEngine::new(cfg.seed)
         .with_gamma(cfg.tpe_gamma)
@@ -581,8 +573,7 @@ fn run_tpe_walk_forward(
     }
     let batch_secs = batch_start.elapsed().as_secs_f64();
 
-    let trials_persisted =
-        output_storage.count_walk_forward_trials(study_id)? as usize;
+    let trials_persisted = output_storage.count_walk_forward_trials(study_id)? as usize;
     if trials_persisted != cfg.n_trials as usize {
         bail!(
             "persistence audit: expected {} rows, found {} in walk_forward_trials",
@@ -665,8 +656,7 @@ fn main() -> Result<()> {
 
     if let Some(parent) = args.output_db.parent() {
         if !parent.as_os_str().is_empty() {
-            create_dir_all(parent)
-                .with_context(|| format!("mkdir {}", parent.display()))?;
+            create_dir_all(parent).with_context(|| format!("mkdir {}", parent.display()))?;
         }
     }
     let mut output_storage = StudyStorage::open(&args.output_db)
@@ -725,8 +715,7 @@ fn main() -> Result<()> {
          best agg={:.4} at trial #{}",
         summary.trials_persisted,
         fmt_duration_secs(summary.batch_secs + summary.sanity_secs),
-        (summary.batch_secs + summary.sanity_secs)
-            / summary.trials_persisted.max(1) as f64,
+        (summary.batch_secs + summary.sanity_secs) / summary.trials_persisted.max(1) as f64,
         summary.best_aggregated_score,
         summary.best_trial_index,
     );
@@ -759,9 +748,7 @@ fn main() -> Result<()> {
 fn print_top_table(label: &str, top: &[WalkForwardResult]) {
     println!();
     println!("{}:", label);
-    println!(
-        " rank trial_id  aggregated  mean_oos  std_oos  worst_oos  mean_is  is_oos_decay"
-    );
+    println!(" rank trial_id  aggregated  mean_oos  std_oos  worst_oos  mean_is  is_oos_decay");
     for (i, r) in top.iter().enumerate().take(5) {
         println!(
             "  {:>3}  {:>7}    {:>7.4}   {:>6.3}   {:>6.3}    {:>6.3}   {:>6.3}      {:>+6.3}",
@@ -889,9 +876,15 @@ fixed:
                 let mut p = TrialParams::new();
                 p.insert("tenkan_period", (9.0 + (i as f64) * 0.3).round().min(13.0));
                 p.insert("kijun_period", (26.0 + (i as f64) * 0.7).round().min(39.0));
-                p.insert("senkou_b_period", (52.0 + (i as f64) * 1.0).round().min(69.0));
+                p.insert(
+                    "senkou_b_period",
+                    (52.0 + (i as f64) * 1.0).round().min(69.0),
+                );
                 p.insert("shift", (26.0 + (i as f64) * 0.2).round().min(30.0));
-                p.insert("score_threshold", (50.0 + (i as f64) * 0.3).round().min(60.0));
+                p.insert(
+                    "score_threshold",
+                    (50.0 + (i as f64) * 0.3).round().min(60.0),
+                );
                 p.insert("tp_rr_ratio", 1.8 + ((i as f64) * 0.05).min(0.7));
                 p.insert("risk_per_trade", 0.012 + ((i as f64) * 0.0005).min(0.011));
                 p.insert("adx_threshold", 30.0 + ((i as f64) * 0.4).min(7.0));
@@ -1203,9 +1196,7 @@ fixed:
 
         let run_once = || {
             let (_db, mut storage) = temp_storage();
-            let study_id = storage
-                .create_study("repro", "ichimoku", "yaml")
-                .unwrap();
+            let study_id = storage.create_study("repro", "ichimoku", "yaml").unwrap();
             run_tpe_walk_forward(
                 &candles,
                 warm_start.clone(),

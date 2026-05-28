@@ -40,12 +40,7 @@
 /// Returns `None` if `period == 0`, if the input slices have mismatched
 /// lengths, or if there are fewer than `period` candles. Otherwise the
 /// returned `Vec<f64>` has the same length as `closes`.
-pub fn calc_atr(
-    highs: &[f64],
-    lows: &[f64],
-    closes: &[f64],
-    period: usize,
-) -> Option<Vec<f64>> {
+pub fn calc_atr(highs: &[f64], lows: &[f64], closes: &[f64], period: usize) -> Option<Vec<f64>> {
     if period == 0 {
         return None;
     }
@@ -195,11 +190,9 @@ pub fn calc_smi(
 
     // Step 2: double-EMA smooth both series.
     let diff_k = ema_series_from(&diff, k_smoothing, length - 1);
-    let diff_kd =
-        ema_series_from(&diff_k, d_smoothing, length - 1 + k_smoothing - 1);
+    let diff_kd = ema_series_from(&diff_k, d_smoothing, length - 1 + k_smoothing - 1);
     let rng_k = ema_series_from(&rng, k_smoothing, length - 1);
-    let rng_kd =
-        ema_series_from(&rng_k, d_smoothing, length - 1 + k_smoothing - 1);
+    let rng_kd = ema_series_from(&rng_k, d_smoothing, length - 1 + k_smoothing - 1);
 
     // Step 3: SMI = 200 * diff_kd / rng_kd, NaN-safe.
     let mut smi = vec![f64::NAN; n];
@@ -373,8 +366,16 @@ pub fn detect_entry(
     let smi_below_zero = smi_now < 0.0 && signal_now < 0.0;
     let smi_above_zero = smi_now > 0.0 && signal_now > 0.0;
     // Zero-line gate per mode — strict ↦ below/above, relaxed ↦ above/below.
-    let smi_long_ok = if cross_above_zero { smi_above_zero } else { smi_below_zero };
-    let smi_short_ok = if cross_above_zero { smi_below_zero } else { smi_above_zero };
+    let smi_long_ok = if cross_above_zero {
+        smi_above_zero
+    } else {
+        smi_below_zero
+    };
+    let smi_short_ok = if cross_above_zero {
+        smi_below_zero
+    } else {
+        smi_above_zero
+    };
     UtBotEntrySignal {
         long: price > ema && flip_up && smi_cross_up && smi_long_ok,
         short: price < ema && flip_down && smi_cross_down && smi_short_ok,
@@ -387,11 +388,10 @@ use std::collections::HashMap;
 
 use crate::models::{Candle, Timeframe};
 use crate::strategy::{
-    AddinManifest, Context, InputSpec, ParameterSchema, Signal, StrategyAddin,
-    StrategyCategory,
+    AddinManifest, Context, InputSpec, ParameterSchema, Signal, StrategyAddin, StrategyCategory,
 };
 
-use super::bb_rsi::{calc_ema, position_size_pct, swing_high, swing_low};
+use super::bb_rsi::{calc_ema, position_size_pct_fee_aware, swing_high, swing_low};
 use super::common::{calc_adx, regime_passes_filter, within_session};
 
 /// UT Bot Alerts (verbesserte Variante) strategy add-in.
@@ -439,6 +439,7 @@ impl StrategyAddin for UtBotStrategy {
         let swing_lookback = ctx.param_or("swing_lookback_bars", 20.0) as usize;
         let tp_rr_ratio = ctx.param_or("tp_rr_ratio", 2.0);
         let risk_per_trade = ctx.param_or("risk_per_trade", 0.02);
+        let fee_rate = ctx.param_or("fee_rate", 0.0006);
         let session_enabled = ctx.param_or("session_filter_enabled", 0.0) >= 0.5;
         let session_start = ctx.param_or("session_start_hour_local", 9.0) as u32;
         let session_end = ctx.param_or("session_end_hour_local", 23.0) as u32;
@@ -454,16 +455,16 @@ impl StrategyAddin for UtBotStrategy {
         let adx_filter_enabled = ctx.param_or("adx_filter_enabled", 0.0) >= 0.5;
         let adx_threshold = ctx.param_or("adx_threshold", 25.0);
         let adx_period = ctx.param_or("adx_period", 14.0) as usize;
-        let adx_use_di_confluence =
-            ctx.param_or("adx_use_di_confluence", 0.0) >= 0.5;
+        let adx_use_di_confluence = ctx.param_or("adx_use_di_confluence", 0.0) >= 0.5;
 
         // Warm-up: SMI signal needs `(length - 1) + (k - 1) + (d - 1) + (d - 1)`
         // bars; we also need at least one prior bar for the SMI cross and
         // direction-flip detection. EMA needs `ema_period`. Swing-lookback
         // needs that many bars BEFORE the signal bar.
-        let smi_signal_warmup =
-            smi_length.saturating_sub(1) + smi_k.saturating_sub(1)
-                + smi_d.saturating_sub(1) + smi_d.saturating_sub(1);
+        let smi_signal_warmup = smi_length.saturating_sub(1)
+            + smi_k.saturating_sub(1)
+            + smi_d.saturating_sub(1)
+            + smi_d.saturating_sub(1);
         let start_idx = ema_period
             .max(atr_period)
             .max(smi_signal_warmup + 1)
@@ -499,8 +500,7 @@ impl StrategyAddin for UtBotStrategy {
 
         let ema = calc_ema(&closes, ema_period)?;
         let atr_series = calc_atr(&highs, &lows, &closes, atr_period)?;
-        let (_trail, direction_series) =
-            calc_ut_bot_trail(&closes, &atr_series, key_value)?;
+        let (_trail, direction_series) = calc_ut_bot_trail(&closes, &atr_series, key_value)?;
         let (smi_series, signal_series) =
             calc_smi(&highs, &lows, &closes, smi_length, smi_k, smi_d)?;
 
@@ -563,7 +563,7 @@ impl StrategyAddin for UtBotStrategy {
                 let sl_dist = current_close - swing;
                 let tp = current_close + tp_rr_ratio * sl_dist;
                 let size_pct =
-                    position_size_pct(current_close, sl_dist, risk_per_trade);
+                    position_size_pct_fee_aware(current_close, swing, risk_per_trade, fee_rate);
                 ctx.in_position = true;
                 return Some(Signal::EnterLong {
                     sl: Some(swing),
@@ -582,7 +582,7 @@ impl StrategyAddin for UtBotStrategy {
                 let sl_dist = swing - current_close;
                 let tp = current_close - tp_rr_ratio * sl_dist;
                 let size_pct =
-                    position_size_pct(current_close, sl_dist, risk_per_trade);
+                    position_size_pct_fee_aware(current_close, swing, risk_per_trade, fee_rate);
                 ctx.in_position = true;
                 return Some(Signal::EnterShort {
                     sl: Some(swing),
@@ -617,11 +617,10 @@ pub fn ut_bot_manifest() -> AddinManifest {
         name: "UT Bot Alerts (verbesserte Variante)".to_string(),
         version: "1.0.0".to_string(),
         author: "Trading App Team".to_string(),
-        description:
-            "Trend-following strategy: EMA(200) bias, UT-Bot ATR-trail direction \
+        description: "Trend-following strategy: EMA(200) bias, UT-Bot ATR-trail direction \
              flip, Stochastic Momentum Index cross trigger, swing-low/high SL, \
              R:R 1:2 with engine-side break-even trail."
-                .to_string(),
+            .to_string(),
         category: StrategyCategory::Trend,
         timeframes: vec![Timeframe::M5, Timeframe::M15, Timeframe::H1],
         parameters: vec![
@@ -709,22 +708,8 @@ pub fn ut_bot_manifest() -> AddinManifest {
                 1.0,
                 1.0,
             ),
-            ParameterSchema::new(
-                "adx_threshold",
-                "ADX Threshold",
-                25.0,
-                0.0,
-                100.0,
-                1.0,
-            ),
-            ParameterSchema::new(
-                "adx_period",
-                "ADX Period",
-                14.0,
-                2.0,
-                100.0,
-                1.0,
-            ),
+            ParameterSchema::new("adx_threshold", "ADX Threshold", 25.0, 0.0, 100.0, 1.0),
+            ParameterSchema::new("adx_period", "ADX Period", 14.0, 2.0, 100.0, 1.0),
             ParameterSchema::new(
                 "adx_use_di_confluence",
                 "ADX +DI/-DI Confluence (0/1)",
@@ -855,7 +840,11 @@ mod tests {
         for v in atr.iter().take(period - 1) {
             assert!(v.is_nan());
         }
-        assert!((atr[period - 1] - 1.4).abs() < 1e-12, "got {}", atr[period - 1]);
+        assert!(
+            (atr[period - 1] - 1.4).abs() < 1e-12,
+            "got {}",
+            atr[period - 1]
+        );
     }
 
     #[test]
@@ -930,8 +919,7 @@ mod tests {
         let highs: Vec<f64> = (0..n).map(|i| 100.0 + i as f64 + 0.5).collect();
         let lows: Vec<f64> = (0..n).map(|i| 100.0 + i as f64 - 0.5).collect();
         let closes: Vec<f64> = (0..n).map(|i| 100.0 + i as f64).collect();
-        let (smi, _signal) =
-            calc_smi(&highs, &lows, &closes, 10, 5, 3).unwrap();
+        let (smi, _signal) = calc_smi(&highs, &lows, &closes, 10, 5, 3).unwrap();
         // smi_start = 9+4+2 = 15. After 15 the SMI must settle positive.
         // Allow a small tolerance for the initial Wilder ramp.
         for (i, &v) in smi.iter().enumerate().skip(30) {
@@ -943,13 +931,10 @@ mod tests {
     fn test_smi_negative_in_downtrend() {
         // Monotonically falling closes → mirror of the uptrend test.
         let n = 50;
-        let highs: Vec<f64> =
-            (0..n).map(|i| 200.0 - i as f64 + 0.5).collect();
-        let lows: Vec<f64> =
-            (0..n).map(|i| 200.0 - i as f64 - 0.5).collect();
+        let highs: Vec<f64> = (0..n).map(|i| 200.0 - i as f64 + 0.5).collect();
+        let lows: Vec<f64> = (0..n).map(|i| 200.0 - i as f64 - 0.5).collect();
         let closes: Vec<f64> = (0..n).map(|i| 200.0 - i as f64).collect();
-        let (smi, _signal) =
-            calc_smi(&highs, &lows, &closes, 10, 5, 3).unwrap();
+        let (smi, _signal) = calc_smi(&highs, &lows, &closes, 10, 5, 3).unwrap();
         for (i, &v) in smi.iter().enumerate().skip(30) {
             assert!(v < 0.0, "SMI at {} expected < 0, got {}", i, v);
         }
@@ -994,7 +979,13 @@ mod tests {
         // computed below by walking the double-EMA chain by hand. See
         // commit message for the full derivation.
         let closes: Vec<f64> = (0..10)
-            .map(|i| if i <= 4 { 100.0 + i as f64 } else { 100.0 + (8 - i) as f64 })
+            .map(|i| {
+                if i <= 4 {
+                    100.0 + i as f64
+                } else {
+                    100.0 + (8 - i) as f64
+                }
+            })
             .collect();
         let highs: Vec<f64> = closes.iter().map(|c| c + 1.0).collect();
         let lows: Vec<f64> = closes.iter().map(|c| c - 1.0).collect();
@@ -1033,7 +1024,11 @@ mod tests {
         for v in signal.iter().take(5) {
             assert!(v.is_nan());
         }
-        assert!((signal[5] - 34.375).abs() < 1e-9, "signal[5] = {}", signal[5]);
+        assert!(
+            (signal[5] - 34.375).abs() < 1e-9,
+            "signal[5] = {}",
+            signal[5]
+        );
         assert!(
             (signal[6] - (-0.541_666_666_666_666_5)).abs() < 1e-9,
             "signal[6] = {}",
@@ -1064,8 +1059,7 @@ mod tests {
         let highs: Vec<f64> = (0..n).map(|i| 100.0 + i as f64 + 0.5).collect();
         let lows: Vec<f64> = (0..n).map(|i| 100.0 + i as f64 - 0.5).collect();
         let closes: Vec<f64> = (0..n).map(|i| 100.0 + i as f64).collect();
-        let (smi, signal) =
-            calc_smi(&highs, &lows, &closes, 10, 5, 3).unwrap();
+        let (smi, signal) = calc_smi(&highs, &lows, &closes, 10, 5, 3).unwrap();
         // After the warm-up plus a few bars of ramp, signal should be
         // consistently below smi in this monotonic uptrend.
         for i in 30..n {
@@ -1131,9 +1125,13 @@ mod tests {
         assert!((trail[0] - 99.0).abs() < 1e-12);
         assert_eq!(direction[0], 1);
         for i in 1..n {
-            assert!(trail[i] >= trail[i - 1] - 1e-12,
+            assert!(
+                trail[i] >= trail[i - 1] - 1e-12,
                 "trail must be monotone non-decreasing in uptrend at {}: {} → {}",
-                i, trail[i - 1], trail[i]);
+                i,
+                trail[i - 1],
+                trail[i]
+            );
             assert_eq!(direction[i], 1, "direction must stay +1 in uptrend");
         }
     }
@@ -1159,9 +1157,13 @@ mod tests {
         assert_eq!(direction[1], -1);
         // After the flip, trail must be monotone non-increasing.
         for i in 2..n {
-            assert!(trail[i] <= trail[i - 1] + 1e-12,
+            assert!(
+                trail[i] <= trail[i - 1] + 1e-12,
                 "trail must be monotone non-increasing in downtrend at {}: {} → {}",
-                i, trail[i - 1], trail[i]);
+                i,
+                trail[i - 1],
+                trail[i]
+            );
             assert_eq!(direction[i], -1, "direction must stay -1 in downtrend");
         }
     }
@@ -1240,18 +1242,21 @@ mod tests {
         //      trail = max(103.5, 104-1.5=102.5) = 103.5, dir = +1
         let closes = vec![100.0, 102.0, 101.0, 103.0, 99.0, 100.0, 105.0, 104.0];
         let atr = vec![1.0; 8];
-        let (trail, direction) =
-            calc_ut_bot_trail(&closes, &atr, 1.5).unwrap();
+        let (trail, direction) = calc_ut_bot_trail(&closes, &atr, 1.5).unwrap();
         let expected_trail = [98.5, 100.5, 100.5, 101.5, 100.5, 100.5, 103.5, 103.5];
         let expected_dir = [1i8, 1, 1, 1, -1, -1, 1, 1];
         for (i, &want) in expected_trail.iter().enumerate() {
             assert!(
                 (trail[i] - want).abs() < 1e-12,
-                "trail[{}] expected {} got {}", i, want, trail[i],
+                "trail[{}] expected {} got {}",
+                i,
+                want,
+                trail[i],
             );
             assert_eq!(
                 direction[i], expected_dir[i],
-                "direction[{}] expected {} got {}", i, expected_dir[i], direction[i],
+                "direction[{}] expected {} got {}",
+                i, expected_dir[i], direction[i],
             );
         }
     }
@@ -1279,15 +1284,9 @@ mod tests {
         // price > ema, direction flipped −1→+1, SMI crossed up while
         // both lines still negative.
         let r = detect_entry(
-            /* price */ 105.0,
-            /* ema */ 100.0,
-            /* dir_prev */ -1,
-            /* dir_now */ 1,
-            /* smi_prev */ -50.0,
-            /* sig_prev */ -40.0,
-            /* smi_now */ -20.0,
-            /* sig_now */ -30.0,
-            /* cross_above_zero */ false,
+            /* price */ 105.0, /* ema */ 100.0, /* dir_prev */ -1,
+            /* dir_now */ 1, /* smi_prev */ -50.0, /* sig_prev */ -40.0,
+            /* smi_now */ -20.0, /* sig_now */ -30.0, /* cross_above_zero */ false,
         );
         assert!(r.long);
         assert!(!r.short);
@@ -1296,15 +1295,9 @@ mod tests {
     #[test]
     fn test_detect_entry_short_when_all_three_conditions_met_mirrored() {
         let r = detect_entry(
-            /* price */ 95.0,
-            /* ema */ 100.0,
-            /* dir_prev */ 1,
-            /* dir_now */ -1,
-            /* smi_prev */ 50.0,
-            /* sig_prev */ 40.0,
-            /* smi_now */ 20.0,
-            /* sig_now */ 30.0,
-            /* cross_above_zero */ false,
+            /* price */ 95.0, /* ema */ 100.0, /* dir_prev */ 1,
+            /* dir_now */ -1, /* smi_prev */ 50.0, /* sig_prev */ 40.0,
+            /* smi_now */ 20.0, /* sig_now */ 30.0, /* cross_above_zero */ false,
         );
         assert!(!r.long);
         assert!(r.short);
@@ -1353,10 +1346,12 @@ mod tests {
         // below zero) MUST be suppressed in cross_above_zero mode — the
         // gate is now "above zero" for long.
         let r = detect_entry(
-            105.0, 100.0, -1, 1, -50.0, -40.0, -20.0, -30.0,
-            /* cross_above_zero */ true,
+            105.0, 100.0, -1, 1, -50.0, -40.0, -20.0, -30.0, /* cross_above_zero */ true,
         );
-        assert!(!r.long, "strict-mode long must NOT fire in cross_above_zero mode");
+        assert!(
+            !r.long,
+            "strict-mode long must NOT fire in cross_above_zero mode"
+        );
         assert!(!r.short);
     }
 
@@ -1364,13 +1359,14 @@ mod tests {
     fn test_detect_entry_cross_above_zero_fires_long_when_smi_positive() {
         // Long requires SMI cross-up while above zero in the relaxed mode.
         let r = detect_entry(
-            105.0, 100.0,
-            /* dir_prev */ -1, /* dir_now */ 1,
-            /* smi_prev */ 10.0, /* sig_prev */ 20.0,
-            /* smi_now */ 30.0, /* sig_now */ 25.0,
+            105.0, 100.0, /* dir_prev */ -1, /* dir_now */ 1, /* smi_prev */ 10.0,
+            /* sig_prev */ 20.0, /* smi_now */ 30.0, /* sig_now */ 25.0,
             /* cross_above_zero */ true,
         );
-        assert!(r.long, "cross_above_zero mode must fire long on above-zero cross");
+        assert!(
+            r.long,
+            "cross_above_zero mode must fire long on above-zero cross"
+        );
         assert!(!r.short);
     }
 
@@ -1379,14 +1375,15 @@ mod tests {
         // Mirror — short requires SMI cross-down while below zero in
         // the relaxed mode.
         let r = detect_entry(
-            95.0, 100.0,
-            /* dir_prev */ 1, /* dir_now */ -1,
-            /* smi_prev */ -10.0, /* sig_prev */ -20.0,
-            /* smi_now */ -30.0, /* sig_now */ -25.0,
+            95.0, 100.0, /* dir_prev */ 1, /* dir_now */ -1, /* smi_prev */ -10.0,
+            /* sig_prev */ -20.0, /* smi_now */ -30.0, /* sig_now */ -25.0,
             /* cross_above_zero */ true,
         );
         assert!(!r.long);
-        assert!(r.short, "cross_above_zero mode must fire short on below-zero cross");
+        assert!(
+            r.short,
+            "cross_above_zero mode must fire short on below-zero cross"
+        );
     }
 
     // ── Strategy integration tests ──────────────────────────────────────
@@ -1426,7 +1423,8 @@ mod tests {
         ] {
             assert!(
                 m.parameters.iter().any(|p| p.name == required),
-                "manifest missing parameter '{}'", required,
+                "manifest missing parameter '{}'",
+                required,
             );
         }
         // Default key_value = 2.0 per QA F2 = C.
@@ -1440,7 +1438,11 @@ mod tests {
             .unwrap();
         assert_eq!(sess.default, 0.0);
         // Default tp_rr_ratio = 2.0 per Spec §5.
-        let tp = m.parameters.iter().find(|p| p.name == "tp_rr_ratio").unwrap();
+        let tp = m
+            .parameters
+            .iter()
+            .find(|p| p.name == "tp_rr_ratio")
+            .unwrap();
         assert_eq!(tp.default, 2.0);
     }
 
@@ -1596,7 +1598,8 @@ mod tests {
             if let Some(sig) = s.on_candle(&mut ctx, candle) {
                 assert!(
                     !matches!(sig, Signal::EnterLong { .. } | Signal::EnterShort { .. }),
-                    "session filter must block entries at off-hours bar {}", i,
+                    "session filter must block entries at off-hours bar {}",
+                    i,
                 );
             }
         }

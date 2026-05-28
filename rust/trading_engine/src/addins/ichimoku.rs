@@ -85,11 +85,7 @@ pub fn rolling_min(values: &[f64], end_idx: usize, period: usize) -> f64 {
 /// period, or fewer candles than `period`). Otherwise the result has
 /// the same length as the inputs with `NaN` for the warm-up region
 /// (`i < period - 1`) and the midpoint for `i >= period - 1`.
-fn calc_midpoint_series(
-    highs: &[f64],
-    lows: &[f64],
-    period: usize,
-) -> Option<Vec<f64>> {
+fn calc_midpoint_series(highs: &[f64], lows: &[f64], period: usize) -> Option<Vec<f64>> {
     if period == 0 || highs.len() != lows.len() {
         return None;
     }
@@ -125,11 +121,7 @@ fn calc_midpoint_series(
 /// Returned `Vec<f64>` has the same length as `highs`; indices
 /// `0..period - 1` are `NaN` (warm-up). Returns `None` on mismatched
 /// `highs`/`lows` lengths, `period == 0`, or fewer than `period` candles.
-pub fn calc_tenkan_sen(
-    highs: &[f64],
-    lows: &[f64],
-    period: usize,
-) -> Option<Vec<f64>> {
+pub fn calc_tenkan_sen(highs: &[f64], lows: &[f64], period: usize) -> Option<Vec<f64>> {
     calc_midpoint_series(highs, lows, period)
 }
 
@@ -140,11 +132,7 @@ pub fn calc_tenkan_sen(
 /// (rather than one parameterised helper) keep the strategy call sites
 /// self-documenting and let future overrides (e.g. spec-§13 sensitivity
 /// runs) diverge without touching shared code.
-pub fn calc_kijun_sen(
-    highs: &[f64],
-    lows: &[f64],
-    period: usize,
-) -> Option<Vec<f64>> {
+pub fn calc_kijun_sen(highs: &[f64], lows: &[f64], period: usize) -> Option<Vec<f64>> {
     calc_midpoint_series(highs, lows, period)
 }
 
@@ -191,11 +179,7 @@ pub fn calc_senkou_span_a(tenkan: &[f64], kijun: &[f64]) -> Option<Vec<f64>> {
 /// the canonical 52-bar window (Spec §1.1 default `period = 52`).
 /// Storage convention is identical to [`calc_senkou_span_a`] — no
 /// future-shift in storage; reads go through the explicit helpers.
-pub fn calc_senkou_span_b(
-    highs: &[f64],
-    lows: &[f64],
-    period: usize,
-) -> Option<Vec<f64>> {
+pub fn calc_senkou_span_b(highs: &[f64], lows: &[f64], period: usize) -> Option<Vec<f64>> {
     calc_midpoint_series(highs, lows, period)
 }
 
@@ -259,14 +243,11 @@ pub fn past_senkou_at_i_minus_26(span: &[f64], i: usize) -> Option<f64> {
 
 // ─── Chikou-Span (lagging line) ────────────────────────────────────────────
 
-/// Compute the **Chikou-Span** (Lagging Line) series.
-///
-/// Definition (Spec §1.1): Chikou-Span is the close price, visualized
-/// **shifted 26 bars backward**. As with the Senkou-Spans, the visual
-/// displacement happens at chart-render time, NOT in storage. The
-/// helper therefore returns a verbatim copy of `closes` and the
-/// strategy reads through the intent-explicit anchor helpers below.
-///
+// Chikou-Span (lagging line) note:
+// Spec §1.1 defines Chikou as the close price visualized 26 bars backward.
+// The strategy keeps raw closes in storage and reads through the
+// intent-explicit anchor helpers above, so there is no separate shifted
+// series helper here.
 
 // ─── Ichimoku confluence score (Spec §12.2 default convention) ─────────────
 
@@ -310,6 +291,7 @@ pub const SCORE_WEIGHT: i32 = 20;
 ///
 /// Total range: `[-100, +100]`. With `score_threshold=100` this
 /// requires all five components confluent in the same direction.
+#[allow(clippy::too_many_arguments)]
 pub fn calc_ichimoku_score(
     tenkan: &[f64],
     kijun: &[f64],
@@ -486,11 +468,10 @@ use std::collections::HashMap;
 
 use crate::models::{Candle, Timeframe};
 use crate::strategy::{
-    AddinManifest, Context, InputSpec, ParameterSchema, Signal, StrategyAddin,
-    StrategyCategory,
+    AddinManifest, Context, InputSpec, ParameterSchema, Signal, StrategyAddin, StrategyCategory,
 };
 
-use super::bb_rsi::position_size_pct;
+use super::bb_rsi::position_size_pct_fee_aware;
 use super::common::{calc_adx, regime_passes_filter, within_session};
 
 /// Ichimoku Cloud Retest (Endstand-Variante) strategy add-in.
@@ -540,6 +521,7 @@ impl StrategyAddin for IchimokuStrategy {
         let score_threshold = ctx.param_or("score_threshold", 100.0).round() as i32;
         let tp_rr_ratio = ctx.param_or("tp_rr_ratio", 2.0);
         let risk_per_trade = ctx.param_or("risk_per_trade", 0.02);
+        let fee_rate = ctx.param_or("fee_rate", 0.0006);
         let session_enabled = ctx.param_or("session_filter_enabled", 0.0) >= 0.5;
         let session_start = ctx.param_or("session_start_hour", 9.0) as u32;
         let session_end = ctx.param_or("session_end_hour", 23.0) as u32;
@@ -551,8 +533,7 @@ impl StrategyAddin for IchimokuStrategy {
         let adx_filter_enabled = ctx.param_or("adx_filter_enabled", 0.0) >= 0.5;
         let adx_threshold = ctx.param_or("adx_threshold", 25.0);
         let adx_period = ctx.param_or("adx_period", 14.0) as usize;
-        let adx_use_di_confluence =
-            ctx.param_or("adx_use_di_confluence", 0.0) >= 0.5;
+        let adx_use_di_confluence = ctx.param_or("adx_use_di_confluence", 0.0) >= 0.5;
 
         // Warm-up — Spec §1.1: c4 ("Chikou über Cloud bei i-26") reads
         // span values at index i - 2*shift, which requires senkou_b at
@@ -564,7 +545,9 @@ impl StrategyAddin for IchimokuStrategy {
         // Going strict here is the only way to keep c4 from comparing
         // against `NaN` past-cloud reads.
         let i = ctx.index();
-        let start_idx = senkou_b_period.saturating_sub(1).saturating_add(2 * CLOUD_SHIFT_BARS);
+        let start_idx = senkou_b_period
+            .saturating_sub(1)
+            .saturating_add(2 * CLOUD_SHIFT_BARS);
         if i < start_idx {
             return None;
         }
@@ -630,9 +613,7 @@ impl StrategyAddin for IchimokuStrategy {
         // the bar lands outside `[start, end)` local time, no new
         // entries fire. Open positions are unaffected (engine-side
         // SL/TP/BE-trail still applies).
-        if session_enabled
-            && !within_session(current_ts, session_start, session_end, tz_offset)
-        {
+        if session_enabled && !within_session(current_ts, session_start, session_end, tz_offset) {
             return Some(Signal::NoAction);
         }
 
@@ -726,7 +707,8 @@ impl StrategyAddin for IchimokuStrategy {
             let sl_dist = current_close - sl;
             if sl_dist > 0.0 {
                 let tp = current_close + tp_rr_ratio * sl_dist;
-                let size_pct = position_size_pct(current_close, sl_dist, risk_per_trade);
+                let size_pct =
+                    position_size_pct_fee_aware(current_close, sl, risk_per_trade, fee_rate);
                 ctx.in_position = true;
                 return Some(Signal::EnterLong {
                     sl: Some(sl),
@@ -746,7 +728,8 @@ impl StrategyAddin for IchimokuStrategy {
             let sl_dist = sl - current_close;
             if sl_dist > 0.0 {
                 let tp = current_close - tp_rr_ratio * sl_dist;
-                let size_pct = position_size_pct(current_close, sl_dist, risk_per_trade);
+                let size_pct =
+                    position_size_pct_fee_aware(current_close, sl, risk_per_trade, fee_rate);
                 ctx.in_position = true;
                 return Some(Signal::EnterShort {
                     sl: Some(sl),
@@ -989,7 +972,13 @@ mod tests {
         ];
         for &(i, want) in expected.iter() {
             let got = rolling_max(&v, i, 3);
-            assert!((got - want).abs() < 1e-9, "rolling_max idx={} want={} got={}", i, want, got);
+            assert!(
+                (got - want).abs() < 1e-9,
+                "rolling_max idx={} want={} got={}",
+                i,
+                want,
+                got
+            );
         }
     }
 
@@ -1073,7 +1062,13 @@ mod tests {
         ];
         for &(i, want) in expected.iter() {
             let got = rolling_min(&v, i, 3);
-            assert!((got - want).abs() < 1e-9, "rolling_min idx={} want={} got={}", i, want, got);
+            assert!(
+                (got - want).abs() < 1e-9,
+                "rolling_min idx={} want={} got={}",
+                i,
+                want,
+                got
+            );
         }
     }
 
@@ -1215,7 +1210,10 @@ mod tests {
         for &(i, want) in expected.iter() {
             assert!(
                 (t[i] - want).abs() < 1e-9,
-                "tenkan idx={} want={} got={}", i, want, t[i],
+                "tenkan idx={} want={} got={}",
+                i,
+                want,
+                t[i],
             );
         }
     }
@@ -1335,7 +1333,9 @@ mod tests {
             assert!(
                 (a - b).abs() < 1e-12 || (a.is_nan() && b.is_nan()),
                 "future_senkou_at_i diverged from senkou_at_i at i={}: {} vs {}",
-                i, a, b,
+                i,
+                a,
+                b,
             );
         }
     }
@@ -1375,10 +1375,22 @@ mod tests {
         let n = 100;
         let cutoff: usize = 50;
         let tenkan: Vec<f64> = (0..n)
-            .map(|i| if i <= cutoff { 100.0 + i as f64 } else { f64::NAN })
+            .map(|i| {
+                if i <= cutoff {
+                    100.0 + i as f64
+                } else {
+                    f64::NAN
+                }
+            })
             .collect();
         let kijun: Vec<f64> = (0..n)
-            .map(|i| if i <= cutoff { 200.0 + i as f64 } else { f64::NAN })
+            .map(|i| {
+                if i <= cutoff {
+                    200.0 + i as f64
+                } else {
+                    f64::NAN
+                }
+            })
             .collect();
         let span_a = calc_senkou_span_a(&tenkan, &kijun).unwrap();
         // At i = cutoff = 50, past cloud reads span_a[24] = (124 + 224)/2 = 174
@@ -1388,7 +1400,6 @@ mod tests {
         assert!(past_senkou_at_i_minus_26(&span_a, 75).unwrap().is_finite());
         assert!(past_senkou_at_i_minus_26(&span_a, 77).unwrap().is_nan());
     }
-
 
     // ── Ichimoku score helper ───────────────────────────────────────────
 
@@ -1423,41 +1434,54 @@ mod tests {
     fn test_score_full_long_confluence_is_plus_60() {
         // Cross+, Color+, Distance+ → +60 (Spec §12.2 long threshold).
         let (t, k, a, b, c) = score_fixture(
-            /* tenkan */ 110.0,
-            /* kijun  */ 100.0,  // tenkan > kijun → +20
-            /* span_a (past) */ 105.0,
-            /* span_b (past) */ 95.0,   // a > b → +20
-            /* close */ 120.0,           // > top(105) → +20
+            /* tenkan */ 110.0, /* kijun  */ 100.0, // tenkan > kijun → +20
+            /* span_a (past) */ 105.0, /* span_b (past) */ 95.0, // a > b → +20
+            /* close */ 120.0, // > top(105) → +20
         );
-        assert_eq!(calc_ichimoku_score(&t, &k, &a, &b, &c, a[50], b[50], 50), 60);
+        assert_eq!(
+            calc_ichimoku_score(&t, &k, &a, &b, &c, a[50], b[50], 50),
+            60
+        );
     }
 
     #[test]
     fn test_score_full_short_confluence_is_minus_60() {
         // Cross-, Color-, Distance-, Kijun-slope- → -60.
         let (t, mut k, a, b, c) = score_fixture(
-            100.0, 110.0,  // tenkan < kijun → -20
-            95.0, 105.0,   // a < b → -20
-            80.0,          // < bottom(95) → -20
+            100.0, 110.0, // tenkan < kijun → -20
+            95.0, 105.0, // a < b → -20
+            80.0,  // < bottom(95) → -20
         );
         k[45] = 200.0; // kijun falling → -20 (Kijun-slope component)
-        assert_eq!(calc_ichimoku_score(&t, &k, &a, &b, &c, a[50], b[50], 50), -60);
+        assert_eq!(
+            calc_ichimoku_score(&t, &k, &a, &b, &c, a[50], b[50], 50),
+            -60
+        );
     }
 
     #[test]
     fn test_score_components_independent_partial_sums() {
         // Cross+ (+20) + Kijun-rising (+20) = +40
         let (t, k, a, b, c) = score_fixture(110.0, 100.0, 100.0, 100.0, 100.0);
-        assert_eq!(calc_ichimoku_score(&t, &k, &a, &b, &c, a[50], b[50], 50), 40);
+        assert_eq!(
+            calc_ichimoku_score(&t, &k, &a, &b, &c, a[50], b[50], 50),
+            40
+        );
 
         // Color+ only: tenkan == kijun (Cross = 0); close == cloud_top
         // (Distance = 0 because strict >). Kijun-rising (+20) = +20.
         let (t, k, a, b, c) = score_fixture(100.0, 100.0, 110.0, 90.0, 110.0);
-        assert_eq!(calc_ichimoku_score(&t, &k, &a, &b, &c, a[50], b[50], 50), 20);
+        assert_eq!(
+            calc_ichimoku_score(&t, &k, &a, &b, &c, a[50], b[50], 50),
+            20
+        );
 
         // Distance+ (+20) + Kijun-rising (+20) = +40
         let (t, k, a, b, c) = score_fixture(100.0, 100.0, 100.0, 100.0, 120.0);
-        assert_eq!(calc_ichimoku_score(&t, &k, &a, &b, &c, a[50], b[50], 50), 40);
+        assert_eq!(
+            calc_ichimoku_score(&t, &k, &a, &b, &c, a[50], b[50], 50),
+            40
+        );
     }
 
     #[test]
@@ -1466,7 +1490,10 @@ mod tests {
         // Tenkan == Kijun → Cross = 0. a > b → Color = +20.
         // Total = +20 only.
         let (t, k, a, b, c) = score_fixture(100.0, 100.0, 105.0, 95.0, 100.0);
-        assert_eq!(calc_ichimoku_score(&t, &k, &a, &b, &c, a[50], b[50], 50), 20);
+        assert_eq!(
+            calc_ichimoku_score(&t, &k, &a, &b, &c, a[50], b[50], 50),
+            20
+        );
     }
 
     #[test]
@@ -1475,13 +1502,19 @@ mod tests {
         let (mut t, mut k, a, b, c) = score_fixture(110.0, 100.0, 105.0, 95.0, 120.0);
         t[50] = f64::NAN;
         // Color (+20) + Distance (+20) = +40, Cross suppressed.
-        assert_eq!(calc_ichimoku_score(&t, &k, &a, &b, &c, a[50], b[50], 50), 40);
+        assert_eq!(
+            calc_ichimoku_score(&t, &k, &a, &b, &c, a[50], b[50], 50),
+            40
+        );
 
         // Restore tenkan, NaN-ify kijun → Cross = 0, Kijun-slope = 0.
         // Only Distance(+20) = 20.
         t[50] = 110.0;
         k[50] = f64::NAN;
-        assert_eq!(calc_ichimoku_score(&t, &k, &a, &b, &c, a[50], b[50], 50), 20);
+        assert_eq!(
+            calc_ichimoku_score(&t, &k, &a, &b, &c, a[50], b[50], 50),
+            20
+        );
     }
 
     #[test]
@@ -1491,13 +1524,16 @@ mod tests {
         let n = 60;
         let mut t = vec![0.0; n];
         let mut k = vec![0.0; n];
-        let a = vec![1.0; n];  // past reads → None for i < 26
+        let a = vec![1.0; n]; // past reads → None for i < 26
         let b = vec![2.0; n];
         let c = vec![100.0; n];
         t[25] = 110.0;
         k[25] = 100.0;
         // Cross+ alone → +20.
-        assert_eq!(calc_ichimoku_score(&t, &k, &a, &b, &c, a[25], b[25], 25), 20);
+        assert_eq!(
+            calc_ichimoku_score(&t, &k, &a, &b, &c, a[25], b[25], 25),
+            20
+        );
     }
 
     #[test]
@@ -1516,7 +1552,10 @@ mod tests {
         // the exact value, then verify the boundary semantics by
         // weakening one component to confirm the drop to +40.
         let (t, k, a, b, c) = score_fixture(110.0, 100.0, 105.0, 95.0, 120.0);
-        assert_eq!(calc_ichimoku_score(&t, &k, &a, &b, &c, a[50], b[50], 50), 60);
+        assert_eq!(
+            calc_ichimoku_score(&t, &k, &a, &b, &c, a[50], b[50], 50),
+            60
+        );
         // 3 * SCORE_WEIGHT = ±60 — pin the relationship so a future
         // bump to SCORE_WEIGHT propagates through this assertion.
         assert_eq!(3 * SCORE_WEIGHT, 60);
@@ -1524,7 +1563,10 @@ mod tests {
         // Weaken the Distance component (close inside the cloud) → +40.
         let (t, k, a, b, mut c2) = score_fixture(110.0, 100.0, 105.0, 95.0, 100.0);
         c2[50] = 100.0;
-        assert_eq!(calc_ichimoku_score(&t, &k, &a, &b, &c2, a[50], b[50], 50), 40);
+        assert_eq!(
+            calc_ichimoku_score(&t, &k, &a, &b, &c2, a[50], b[50], 50),
+            40
+        );
     }
 
     #[test]
@@ -1546,7 +1588,8 @@ mod tests {
         // ≡ (107.70308334140422 + 103.0) / 2 = 105.35154167070211
         assert!(
             (t9[8] - 105.351_541_670_702_1).abs() < 1e-9,
-            "tenkan[8] = {}", t9[8]
+            "tenkan[8] = {}",
+            t9[8]
         );
 
         let k26 = calc_kijun_sen(&highs, &lows, 26).unwrap();
@@ -1554,7 +1597,8 @@ mod tests {
         // = 94.64444430980959 (last digit at the ulp boundary of double).
         assert!(
             (k26[100] - 94.644_444_309_809_6).abs() < 1e-9,
-            "kijun[100] = {}", k26[100]
+            "kijun[100] = {}",
+            k26[100]
         );
     }
 
@@ -1605,11 +1649,9 @@ mod tests {
             ("tenkan_period", 9.0),
             ("kijun_period", 26.0),
             ("senkou_b_period", 52.0),
-
             ("score_threshold", 100.0),
             ("tp_rr_ratio", 2.0),
             ("risk_per_trade", 0.02),
-
             ("session_filter_enabled", 0.0),
             ("session_start_hour", 9.0),
             ("session_end_hour", 23.0),
@@ -1685,7 +1727,11 @@ mod tests {
         let mut ctx = Context::new(candles.clone(), Timeframe::H1, HashMap::new());
         for (i, candle) in candles.iter().enumerate() {
             ctx.set_index(i);
-            assert!(s.on_candle(&mut ctx, candle).is_none(), "bar {} produced a signal", i);
+            assert!(
+                s.on_candle(&mut ctx, candle).is_none(),
+                "bar {} produced a signal",
+                i
+            );
         }
     }
 
@@ -1773,16 +1819,14 @@ mod tests {
     /// reference fixture for the per-condition failure-mode tests below.
     fn long_pass_fixture() -> (f64, f64, f64, f64, f64, f64, f64, f64, f64, i32, i32) {
         (
-            /* close                */ 120.0,
-            /* tenkan               */ 108.0,
-            /* kijun                */ 100.0,
-            /* span_a_future        */ 115.0,
+            /* close                */ 120.0, /* tenkan               */ 108.0,
+            /* kijun                */ 100.0, /* span_a_future        */ 115.0,
             /* span_b_future        */ 105.0, // a > b → future green
             /* cloud_current_upper  */ 110.0, // close > upper → c1
             /* cloud_current_lower  */ 100.0,
             /* cloud_chikou_upper   */ 108.0, // close > upper → c4
             /* cloud_chikou_lower   */ 95.0,
-            /* score                */ 100,   // all 5 components confluent
+            /* score                */ 100, // all 5 components confluent
             /* score_threshold      */ 100,
         )
     }
@@ -1790,17 +1834,15 @@ mod tests {
     /// Bearish baseline mirror.
     fn short_pass_fixture() -> (f64, f64, f64, f64, f64, f64, f64, f64, f64, i32, i32) {
         (
-            /* close                */ 80.0,
-            /* tenkan               */ 92.0,
+            /* close                */ 80.0, /* tenkan               */ 92.0,
             /* kijun                */ 100.0, // kijun > tenkan → c3
             /* span_a_future        */ 85.0,
-            /* span_b_future        */ 95.0,  // a < b → future red
+            /* span_b_future        */ 95.0, // a < b → future red
             /* cloud_current_upper  */ 105.0,
-            /* cloud_current_lower  */ 90.0,  // close < lower → c1
+            /* cloud_current_lower  */ 90.0, // close < lower → c1
             /* cloud_chikou_upper   */ 100.0,
-            /* cloud_chikou_lower   */ 88.0,  // close < lower → c4
-            /* score                */ -100,
-            /* score_threshold      */ 100,
+            /* cloud_chikou_lower   */ 88.0, // close < lower → c4
+            /* score                */ -100, /* score_threshold      */ 100,
         )
     }
 
@@ -1825,7 +1867,10 @@ mod tests {
         let (c, t, k, _saf, sbf, ccu, ccl, chu, chl, sc, th) = long_pass_fixture();
         let saf = sbf; // equal → strict `>` fails (Spec §12.5)
         let r = detect_entry(c, t, k, saf, sbf, ccu, ccl, chu, chl, sc, th);
-        assert!(!r.long, "long must NOT fire when future cloud is flat (a == b)");
+        assert!(
+            !r.long,
+            "long must NOT fire when future cloud is flat (a == b)"
+        );
     }
 
     #[test]
@@ -1991,7 +2036,10 @@ mod tests {
                 break; // strategy now in_position; further bars NoAction
             }
         }
-        assert!(got_long, "uptrend fixture must trigger ≥ 1 EnterLong past warm-up");
+        assert!(
+            got_long,
+            "uptrend fixture must trigger ≥ 1 EnterLong past warm-up"
+        );
         // State snapshot populated by the last call.
         assert!(ctx.get_state("ichi_tenkan").is_some());
         assert!(ctx.get_state("ichi_kijun").is_some());
@@ -2037,9 +2085,7 @@ mod tests {
         for (i, c) in candles.iter_mut().enumerate() {
             c.timestamp = ts_at_local_berlin_hour(3, i as i64 / 24);
         }
-        let params = HashMap::from([
-            ("session_filter_enabled".to_string(), 1.0),
-        ]);
+        let params = HashMap::from([("session_filter_enabled".to_string(), 1.0)]);
         let mut ctx = Context::new(candles.clone(), Timeframe::H1, params);
         for (i, candle) in candles.iter().enumerate() {
             ctx.set_index(i);

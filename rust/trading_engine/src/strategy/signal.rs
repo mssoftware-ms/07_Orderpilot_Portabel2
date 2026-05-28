@@ -9,7 +9,7 @@ pub enum Signal {
     EnterLong {
         /// Stop loss price (absolute).
         sl: Option<f64>,
-        /// Take profit price levels (absolute).
+        /// Take profit price (absolute).
         tp: Option<f64>,
         /// Position size as a percentage of available capital (0.0 - 100.0).
         size_pct: f64,
@@ -18,7 +18,7 @@ pub enum Signal {
     EnterShort {
         /// Stop loss price (absolute).
         sl: Option<f64>,
-        /// Take profit price levels (absolute).
+        /// Take profit price (absolute).
         tp: Option<f64>,
         /// Position size as a percentage of available capital (0.0 - 100.0).
         size_pct: f64,
