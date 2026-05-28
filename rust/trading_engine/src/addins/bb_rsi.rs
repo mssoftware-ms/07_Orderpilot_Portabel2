@@ -28,7 +28,7 @@ use crate::strategy::{
     AddinManifest, Context, InputSpec, ParameterSchema, Signal, StrategyAddin, StrategyCategory,
 };
 
-use super::common::{calc_adx, regime_passes_filter};
+use super::common::{calc_adx, regime_passes_filter, within_session};
 
 // ─── Indicator helpers (pure functions) ─────────────────────────────────────
 
@@ -312,6 +312,12 @@ impl StrategyAddin for BbRsiStrategy {
         let adx_period = ctx.param_or("adx_period", 14.0) as usize;
         let adx_use_di_confluence =
             ctx.param_or("adx_use_di_confluence", 0.0) >= 0.5;
+        // Session filter — default OFF for backward compatibility.
+        // When enabled, entries only fire during [start, end) local time.
+        let session_enabled = ctx.param_or("session_filter_enabled", 0.0) >= 0.5;
+        let session_start = ctx.param_or("session_start_hour_local", 9.0) as u32;
+        let session_end = ctx.param_or("session_end_hour_local", 23.0) as u32;
+        let tz_offset = ctx.param_or("tz_offset_hours", 1.0) as i32;
 
         // F-09 parity gate: match Dart `startIdx = max(bbPeriod, rsiPeriod + 1)`.
         // Without this, Rust emits signals one bar earlier than Dart at the
@@ -323,6 +329,20 @@ impl StrategyAddin for BbRsiStrategy {
         let start_idx = bb_period.max(rsi_period + 1).max(swing_lookback);
         if ctx.index() < start_idx {
             return None;
+        }
+
+        // Session filter — when enabled, no new entries fire outside
+        // the configured [start, end) local-time window.  Placed BEFORE
+        // the heavy indicator computation so off-session bars are cheap.
+        if session_enabled
+            && !within_session(
+                ctx.all_candles()[ctx.index()].timestamp,
+                session_start,
+                session_end,
+                tz_offset,
+            )
+        {
+            return Some(Signal::NoAction);
         }
 
         // BB uses a fixed `bb_period` rolling window for the SMA-stddev
@@ -557,6 +577,42 @@ pub fn bb_rsi_manifest() -> AddinManifest {
                 0.001,
                 1.0,
                 0.001,
+            ),
+            // ── Session filter (Spec §7) ───────────────────────────────
+            // Default OFF: pre-Phase-2.5 backtests remain byte-identical.
+            // When enabled, entries fire only during [start, end) local
+            // time (default 09:00–23:00 UTC+1 Berlin, no DST).
+            ParameterSchema::new(
+                "session_filter_enabled",
+                "Session Filter Enabled (0/1)",
+                0.0,
+                0.0,
+                1.0,
+                1.0,
+            ),
+            ParameterSchema::new(
+                "session_start_hour_local",
+                "Session Start Hour (Berlin)",
+                9.0,
+                0.0,
+                23.0,
+                1.0,
+            ),
+            ParameterSchema::new(
+                "session_end_hour_local",
+                "Session End Hour (Berlin)",
+                23.0,
+                1.0,
+                24.0,
+                1.0,
+            ),
+            ParameterSchema::new(
+                "tz_offset_hours",
+                "TZ Offset from UTC (hours)",
+                1.0,
+                -12.0,
+                14.0,
+                1.0,
             ),
             // ── Welle R2-2 ADX regime filter ──────────────────────────
             // All four default to "off" so a fresh BB+RSI instance
@@ -955,7 +1011,7 @@ mod tests {
         // risk_per_trade (D-09) + R2-2 ADX filter quartet
         // (adx_filter_enabled, adx_threshold, adx_period,
         // adx_use_di_confluence) = 13.
-        assert_eq!(manifest.parameters.len(), 13);
+        assert_eq!(manifest.parameters.len(), 17); // +4 session params (S-01)
         assert_eq!(manifest.category, StrategyCategory::Trend);
         assert!(manifest
             .parameters
