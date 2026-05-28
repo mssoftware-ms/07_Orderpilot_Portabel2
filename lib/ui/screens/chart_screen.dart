@@ -5,6 +5,7 @@ import '../../core/constants/app_constants.dart';
 import '../../features/chart/chart_provider.dart';
 import '../themes/app_theme.dart';
 import '../widgets/candlestick_chart_pane.dart';
+import '../widgets/rsi_indicator_pane.dart';
 
 /// Welle P4C-3 chart tab.
 ///
@@ -64,7 +65,7 @@ class _ChartScreenState extends State<ChartScreen> {
                 ),
               ),
             ),
-            // RSI sub-chart placeholder until P4C-4.
+            // RSI sub-chart.
             Expanded(
               flex: 1,
               child: Container(
@@ -74,12 +75,8 @@ class _ChartScreenState extends State<ChartScreen> {
                   borderRadius: BorderRadius.circular(12),
                   border: Border.all(color: AppColors.border, width: 0.5),
                 ),
-                child: const Center(
-                  child: Text(
-                    'RSI Indicator (0–100)',
-                    style: TextStyle(color: AppColors.textMuted, fontSize: 12),
-                  ),
-                ),
+                clipBehavior: Clip.antiAlias,
+                child: RsiIndicatorPane(values: provider.rsi),
               ),
             ),
             const SizedBox(height: 8),
@@ -157,8 +154,161 @@ class _ChartToolbar extends StatelessWidget {
           ),
           const SizedBox(width: 8),
           _ConnectionPill(status: provider.status),
+          IconButton(
+            tooltip: 'Indicator settings',
+            icon: const Icon(Icons.tune, size: 18, color: AppColors.textMuted),
+            onPressed: () => _openSettingsSheet(context, provider),
+          ),
         ],
       ),
+    );
+  }
+
+  static void _openSettingsSheet(BuildContext context, ChartProvider provider) {
+    showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: AppColors.surfaceCard,
+      isScrollControlled: true,
+      builder: (sheetCtx) => _IndicatorSettingsSheet(provider: provider),
+    );
+  }
+}
+
+/// Settings sheet for the indicator parameters. Sliders feed directly
+/// into [ChartProvider.setIndicatorParams] — no WS restart, no REST
+/// refetch, just a local recompute of BB + RSI.
+class _IndicatorSettingsSheet extends StatefulWidget {
+  final ChartProvider provider;
+  const _IndicatorSettingsSheet({required this.provider});
+
+  @override
+  State<_IndicatorSettingsSheet> createState() =>
+      _IndicatorSettingsSheetState();
+}
+
+class _IndicatorSettingsSheetState extends State<_IndicatorSettingsSheet> {
+  late int _bbPeriod;
+  late double _bbStdDev;
+  late int _rsiPeriod;
+
+  @override
+  void initState() {
+    super.initState();
+    _bbPeriod = widget.provider.bbPeriod;
+    _bbStdDev = widget.provider.bbStdDev;
+    _rsiPeriod = widget.provider.rsiPeriod;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return SafeArea(
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(16, 12, 16, 24),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            const Text(
+              'Indicator settings',
+              style: TextStyle(
+                color: AppColors.textPrimary,
+                fontWeight: FontWeight.w600,
+                fontSize: 14,
+              ),
+            ),
+            const SizedBox(height: 8),
+            _SliderRow(
+              label: 'BB period',
+              value: _bbPeriod.toDouble(),
+              min: 5,
+              max: 200,
+              divisions: 195,
+              displayValue: _bbPeriod.toString(),
+              onChanged: (v) {
+                setState(() => _bbPeriod = v.round());
+                widget.provider.setIndicatorParams(bbPeriod: _bbPeriod);
+              },
+            ),
+            _SliderRow(
+              label: 'BB stddev',
+              value: _bbStdDev,
+              min: 1.0,
+              max: 3.5,
+              divisions: 25,
+              displayValue: _bbStdDev.toStringAsFixed(1),
+              onChanged: (v) {
+                setState(() => _bbStdDev = double.parse(v.toStringAsFixed(1)));
+                widget.provider.setIndicatorParams(bbStdDev: _bbStdDev);
+              },
+            ),
+            _SliderRow(
+              label: 'RSI period',
+              value: _rsiPeriod.toDouble(),
+              min: 2,
+              max: 50,
+              divisions: 48,
+              displayValue: _rsiPeriod.toString(),
+              onChanged: (v) {
+                setState(() => _rsiPeriod = v.round());
+                widget.provider.setIndicatorParams(rsiPeriod: _rsiPeriod);
+              },
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _SliderRow extends StatelessWidget {
+  final String label;
+  final double value;
+  final double min;
+  final double max;
+  final int divisions;
+  final String displayValue;
+  final ValueChanged<double> onChanged;
+
+  const _SliderRow({
+    required this.label,
+    required this.value,
+    required this.min,
+    required this.max,
+    required this.divisions,
+    required this.displayValue,
+    required this.onChanged,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      children: [
+        SizedBox(
+          width: 100,
+          child: Text(
+            label,
+            style: const TextStyle(color: AppColors.textSecondary, fontSize: 12),
+          ),
+        ),
+        Expanded(
+          child: Slider(
+            value: value.clamp(min, max),
+            min: min,
+            max: max,
+            divisions: divisions,
+            label: displayValue,
+            onChanged: onChanged,
+          ),
+        ),
+        SizedBox(
+          width: 36,
+          child: Text(
+            displayValue,
+            textAlign: TextAlign.right,
+            style: const TextStyle(color: AppColors.textPrimary, fontSize: 12),
+          ),
+        ),
+      ],
     );
   }
 }
