@@ -28,12 +28,16 @@ class _ChartScreenState extends State<ChartScreen> {
   void didChangeDependencies() {
     super.didChangeDependencies();
     // Trigger the initial REST backfill + WS attach exactly once per
-    // mount. Provider.read is safe here because the load() call is
-    // fire-and-forget and the UI watches the provider for updates.
+    // mount — and only when the provider is still idle so a tab
+    // switch back to a live ChartProvider doesn't re-fire load() and
+    // tear down the running WS.
     if (!_loaded) {
       _loaded = true;
-      // ignore: discarded_futures
-      context.read<ChartProvider>().load();
+      final p = context.read<ChartProvider>();
+      if (p.status == ChartStatus.idle) {
+        // ignore: discarded_futures
+        p.load();
+      }
     }
   }
 

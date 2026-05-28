@@ -18,7 +18,6 @@ import 'package:trading_app/core/models/candle.dart';
 import 'package:trading_app/features/chart/chart_provider.dart';
 import 'package:trading_app/services/indicators.dart';
 import 'package:trading_app/ui/screens/chart_screen.dart';
-import 'package:trading_app/ui/widgets/coming_soon_banner.dart';
 
 class _FakeChartProvider extends ChartProvider {
   _FakeChartProvider();
@@ -84,7 +83,9 @@ void main() {
     await tester.pumpWidget(_host(p));
     await tester.pump();
 
-    expect(find.byType(ComingSoonBanner), findsNothing);
+    // Pin the legacy banner copy to ensure the rewrite did not leak
+    // the placeholder back into the tree (the widget itself has been
+    // deleted in Welle P4C-5).
     expect(find.text('Live Chart — In Development'), findsNothing);
   });
 
