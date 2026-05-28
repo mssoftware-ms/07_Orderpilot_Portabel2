@@ -110,7 +110,28 @@ REM ============================================================================
 REM  Aktionen
 REM ============================================================================
 
+:ensure_windows_package_config
+if not exist ".dart_tool\package_config.json" (
+    echo --- flutter pub get ^(Package-Konfiguration fehlt^) ---
+    echo.
+    call "%FLUTTER%" pub get
+    exit /b !ERRORLEVEL!
+)
+
+findstr /c:"file:///home/" /c:"file:///mnt/" ".dart_tool\package_config.json" >nul 2>nul
+if not errorlevel 1 (
+    echo [HINWEIS] .dart_tool\package_config.json enthaelt WSL-Pfade.
+    echo           Regeneriere Dependencies mit Windows-Flutter...
+    echo.
+    call "%FLUTTER%" pub get
+    exit /b !ERRORLEVEL!
+)
+
+exit /b 0
+
 :run_debug
+call :ensure_windows_package_config
+if errorlevel 1 goto after_action
 echo --- flutter run -d windows --debug ---
 echo     ^(Beenden mit 'q' im laufenden Fenster^)
 echo.
@@ -118,6 +139,8 @@ call "%FLUTTER%" run -d windows --debug
 goto after_action
 
 :run_release
+call :ensure_windows_package_config
+if errorlevel 1 goto after_action
 echo --- flutter run -d windows --release ---
 echo     ^(Beenden mit 'q' im laufenden Fenster^)
 echo.
@@ -125,6 +148,8 @@ call "%FLUTTER%" run -d windows --release
 goto after_action
 
 :run_profile
+call :ensure_windows_package_config
+if errorlevel 1 goto after_action
 echo --- flutter run -d windows --profile ---
 echo     ^(Beenden mit 'q' im laufenden Fenster^)
 echo.
@@ -136,15 +161,15 @@ echo --- cargo build --release ^(rust\trading_engine^) ---
 echo.
 pushd rust\trading_engine
 cargo build --release
-set "RC=%ERRORLEVEL%"
+set "CARGO_EXIT_CODE=%ERRORLEVEL%"
 popd
-if "%RC%"=="0" (
+if "%CARGO_EXIT_CODE%"=="0" (
     echo.
     echo [OK] Rust-Engine erfolgreich gebaut.
     echo      Artefakt: rust\trading_engine\target\release\trading_engine.dll
 ) else (
     echo.
-    echo [FEHLER] cargo build fehlgeschlagen ^(Exit %RC%^).
+    echo [FEHLER] cargo build fehlgeschlagen ^(Exit %CARGO_EXIT_CODE%^).
     echo          Ist Rust installiert? rustup show
 )
 goto after_action
@@ -169,6 +194,8 @@ echo [OK] Build-Cache geloescht. Naechster Build dauert laenger.
 goto after_action
 
 :run_tests
+call :ensure_windows_package_config
+if errorlevel 1 goto after_action
 echo --- flutter test ---
 echo.
 call "%FLUTTER%" test
@@ -176,13 +203,13 @@ echo.
 echo --- cargo test ^(rust\trading_engine^) ---
 pushd rust\trading_engine
 cargo test --release
-set "RC=%ERRORLEVEL%"
+set "CARGO_EXIT_CODE=%ERRORLEVEL%"
 popd
 echo.
-if "%RC%"=="0" (
+if "%CARGO_EXIT_CODE%"=="0" (
     echo [OK] Test-Suite abgeschlossen.
 ) else (
-    echo [HINWEIS] cargo test Exit %RC% ^(WSL2 ist kanonische Test-Umgebung^).
+    echo [HINWEIS] cargo test Exit %CARGO_EXIT_CODE% ^(WSL2 ist kanonische Test-Umgebung^).
 )
 goto after_action
 
