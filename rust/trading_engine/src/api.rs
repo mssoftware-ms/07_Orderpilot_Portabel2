@@ -35,7 +35,7 @@ pub fn create_test_candle() -> Candle {
 pub fn create_test_signal_long() -> Signal {
     Signal::EnterLong {
         sl: Some(66000.0),
-        tp: vec![69000.0, 70000.0],
+        tp: Some(69000.0),
         size_pct: 50.0,
     }
 }
@@ -44,7 +44,7 @@ pub fn create_test_signal_long() -> Signal {
 pub fn create_test_signal_short() -> Signal {
     Signal::EnterShort {
         sl: Some(69000.0),
-        tp: vec![66000.0],
+        tp: Some(66000.0),
         size_pct: 100.0,
     }
 }

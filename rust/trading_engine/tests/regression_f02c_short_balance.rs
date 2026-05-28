@@ -52,7 +52,7 @@ impl StrategyAddin for OneShotShort {
         match ctx.index() {
             1 if !ctx.in_position => Some(Signal::EnterShort {
                 sl: None,
-                tp: vec![],
+                tp: None,
                 size_pct: 100.0,
             }),
             3 if ctx.in_position => Some(Signal::Exit {
@@ -87,7 +87,7 @@ impl StrategyAddin for LongThenShort {
         match ctx.index() {
             1 if !ctx.in_position => Some(Signal::EnterLong {
                 sl: None,
-                tp: vec![],
+                tp: None,
                 size_pct: 100.0,
             }),
             3 if ctx.in_position => Some(Signal::Exit {
@@ -95,7 +95,7 @@ impl StrategyAddin for LongThenShort {
             }),
             5 if !ctx.in_position => Some(Signal::EnterShort {
                 sl: None,
-                tp: vec![],
+                tp: None,
                 size_pct: 100.0,
             }),
             7 if ctx.in_position => Some(Signal::Exit {

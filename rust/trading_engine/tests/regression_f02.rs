@@ -51,13 +51,13 @@ impl StrategyAddin for OneShotEntry {
             Some(if self.side_long {
                 Signal::EnterLong {
                     sl: Some(self.sl),
-                    tp: vec![self.tp],
+                    tp: Some(self.tp),
                     size_pct: 100.0,
                 }
             } else {
                 Signal::EnterShort {
                     sl: Some(self.sl),
-                    tp: vec![self.tp],
+                    tp: Some(self.tp),
                     size_pct: 100.0,
                 }
             })

@@ -697,7 +697,7 @@ impl SseDecode for crate::strategy::signal::Signal {
         match tag_ {
             0 => {
                 let mut var_sl = <Option<f64>>::sse_decode(deserializer);
-                let mut var_tp = <Vec<f64>>::sse_decode(deserializer);
+                let mut var_tp = <Option<f64>>::sse_decode(deserializer);
                 let mut var_sizePct = <f64>::sse_decode(deserializer);
                 return crate::strategy::signal::Signal::EnterLong {
                     sl: var_sl,
@@ -707,7 +707,7 @@ impl SseDecode for crate::strategy::signal::Signal {
             }
             1 => {
                 let mut var_sl = <Option<f64>>::sse_decode(deserializer);
-                let mut var_tp = <Vec<f64>>::sse_decode(deserializer);
+                let mut var_tp = <Option<f64>>::sse_decode(deserializer);
                 let mut var_sizePct = <f64>::sse_decode(deserializer);
                 return crate::strategy::signal::Signal::EnterShort {
                     sl: var_sl,
@@ -1001,13 +1001,13 @@ impl SseEncode for crate::strategy::signal::Signal {
             crate::strategy::signal::Signal::EnterLong { sl, tp, size_pct } => {
                 <i32>::sse_encode(0, serializer);
                 <Option<f64>>::sse_encode(sl, serializer);
-                <Vec<f64>>::sse_encode(tp, serializer);
+                <Option<f64>>::sse_encode(tp, serializer);
                 <f64>::sse_encode(size_pct, serializer);
             }
             crate::strategy::signal::Signal::EnterShort { sl, tp, size_pct } => {
                 <i32>::sse_encode(1, serializer);
                 <Option<f64>>::sse_encode(sl, serializer);
-                <Vec<f64>>::sse_encode(tp, serializer);
+                <Option<f64>>::sse_encode(tp, serializer);
                 <f64>::sse_encode(size_pct, serializer);
             }
             crate::strategy::signal::Signal::Exit { reason } => {

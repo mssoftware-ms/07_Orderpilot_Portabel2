@@ -486,6 +486,17 @@ impl StrategyAddin for UtBotStrategy {
             (cs, hs, ls, lp, hp, candles[i].timestamp, candles[i].close)
         };
 
+        // Session filter — hoisted BEFORE indicator computation (N-09).
+        if session_enabled
+            && !within_session(current_ts, session_start, session_end, tz_offset_hours)
+        {
+            return Some(Signal::NoAction);
+        }
+
+        if ctx.in_position {
+            return Some(Signal::NoAction);
+        }
+
         let ema = calc_ema(&closes, ema_period)?;
         let atr_series = calc_atr(&highs, &lows, &closes, atr_period)?;
         let (_trail, direction_series) =
@@ -499,21 +510,6 @@ impl StrategyAddin for UtBotStrategy {
         ctx.set_state("ut_smi", smi_series[i]);
         ctx.set_state("ut_smi_signal", signal_series[i]);
         ctx.set_state("ut_direction", direction_series[i] as f64);
-
-        // Session filter — default off (encoded as f64 0.0). When
-        // enabled and the bar falls outside `[start, end)` local Berlin
-        // time, no new entries fire. Open positions are unaffected
-        // (engine-side SL/TP/BE-trail still applies). Defaults to UTC+1
-        // (Berlin, no DST) — configurable via tz_offset_hours.
-        if session_enabled
-            && !within_session(current_ts, session_start, session_end, tz_offset_hours)
-        {
-            return Some(Signal::NoAction);
-        }
-
-        if ctx.in_position {
-            return Some(Signal::NoAction);
-        }
 
         let entry = detect_entry(
             current_close,
@@ -571,7 +567,7 @@ impl StrategyAddin for UtBotStrategy {
                 ctx.in_position = true;
                 return Some(Signal::EnterLong {
                     sl: Some(swing),
-                    tp: vec![tp],
+                    tp: Some(tp),
                     size_pct,
                 });
             }
@@ -590,7 +586,7 @@ impl StrategyAddin for UtBotStrategy {
                 ctx.in_position = true;
                 return Some(Signal::EnterShort {
                     sl: Some(swing),
-                    tp: vec![tp],
+                    tp: Some(tp),
                     size_pct,
                 });
             }

@@ -730,7 +730,7 @@ impl StrategyAddin for IchimokuStrategy {
                 ctx.in_position = true;
                 return Some(Signal::EnterLong {
                     sl: Some(sl),
-                    tp: vec![tp],
+                    tp: Some(tp),
                     size_pct,
                 });
             }
@@ -750,7 +750,7 @@ impl StrategyAddin for IchimokuStrategy {
                 ctx.in_position = true;
                 return Some(Signal::EnterShort {
                     sl: Some(sl),
-                    tp: vec![tp],
+                    tp: Some(tp),
                     size_pct,
                 });
             }
@@ -1984,7 +1984,7 @@ mod tests {
                 // Spec §4 sanity: SL below entry, R:R = 2 (default).
                 assert!(sl.unwrap() < candle.close);
                 let r = candle.close - sl.unwrap();
-                let tp0 = tp.first().copied().unwrap();
+                let tp0 = tp.unwrap();
                 assert!((tp0 - (candle.close + 2.0 * r)).abs() < 1e-9);
                 assert!(size_pct > 0.0 && size_pct <= 100.0);
                 got_long = true;

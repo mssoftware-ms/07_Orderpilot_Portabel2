@@ -346,7 +346,7 @@ impl BacktestEngine {
                 if size_pct <= 0.0 {
                     return; // zero or negative allocation → don't queue (N-16)
                 }
-                let first_tp = tp.first().copied();
+                let first_tp = tp;
                 self.pending_order = Some(PendingOrder::EnterLong {
                     sl,
                     tp: first_tp,
@@ -357,7 +357,7 @@ impl BacktestEngine {
                 if size_pct <= 0.0 {
                     return; // zero or negative allocation → don't queue (N-16)
                 }
-                let first_tp = tp.first().copied();
+                let first_tp = tp;
                 self.pending_order = Some(PendingOrder::EnterShort {
                     sl,
                     tp: first_tp,
@@ -368,6 +368,16 @@ impl BacktestEngine {
                 self.pending_order = Some(PendingOrder::Exit { reason });
             }
             Signal::MoveStop { new_sl } if self.position.is_some() => {
+                // N-24: skip move if SL would cross to wrong side of entry.
+                if let Some(ref pos) = self.position {
+                    let valid = match pos.side {
+                        PositionSide::Long => new_sl < pos.entry_price,
+                        PositionSide::Short => new_sl > pos.entry_price,
+                    };
+                    if !valid {
+                        return;
+                    }
+                }
                 if let Some(ref mut pos) = self.position {
                     pos.stop_loss = Some(new_sl);
                 }
@@ -380,6 +390,11 @@ impl BacktestEngine {
     /// one-side slippage against the trader (long buy / short sell exit get
     /// `open * (1 + s)`; long sell / short buy entry get `open * (1 - s)`).
     /// Default slippage_bps = 0 → executes bit-exact at the open.
+    ///
+    /// N-22: all orders fill completely — no partial-fill simulation.
+    /// For BTC/USDT at retail size on liquid exchanges this is realistic;
+    /// for altcoins or large positions a volume-participation-rate model
+    /// would be needed.
     fn execute_pending(&mut self, pending: PendingOrder, candle: &Candle) {
         let s = self.config.slippage_bps / 10_000.0;
         match pending {
@@ -441,6 +456,24 @@ impl BacktestEngine {
         );
         if entry_price <= 0.0 {
             return;
+        }
+        // N-23: validate SL is on the correct side of entry.
+        // Uses `warn` instead of `debug_assert` because the fill price
+        // (next bar's open) can gap past the signal-bar SL, making the
+        // assertion too strict for real-world data.
+        if let Some(sl_price) = sl {
+            match side {
+                PositionSide::Long => {
+                    if sl_price >= entry_price {
+                        return; // SL at or above entry → skip this trade
+                    }
+                }
+                PositionSide::Short => {
+                    if sl_price <= entry_price {
+                        return;
+                    }
+                }
+            }
         }
 
         let raw_alloc = self.balance * (size_pct.clamp(0.0, 100.0) / 100.0);
@@ -610,7 +643,7 @@ mod tests {
             match i {
                 1 => Some(Signal::EnterLong {
                     sl: None,
-                    tp: vec![],
+                    tp: None,
                     size_pct: 100.0,
                 }),
                 3 => Some(Signal::Exit {
@@ -648,7 +681,7 @@ mod tests {
             if ctx.index() == 1 && !ctx.in_position {
                 Some(Signal::EnterLong {
                     sl: Some(self.sl),
-                    tp: vec![self.tp],
+                    tp: Some(self.tp),
                     size_pct: 100.0,
                 })
             } else {
@@ -839,12 +872,12 @@ mod tests {
                 match i {
                     1 if !ctx.in_position => {
                         self.trade_num += 1;
-                        Some(Signal::EnterLong { sl: None, tp: vec![], size_pct: 100.0 })
+                        Some(Signal::EnterLong { sl: None, tp: None, size_pct: 100.0 })
                     }
                     2 if ctx.in_position => Some(Signal::Exit { reason: ExitReason::Signal("exit1".into()) }),
                     3 if !ctx.in_position => {
                         self.trade_num += 1;
-                        Some(Signal::EnterLong { sl: None, tp: vec![], size_pct: 100.0 })
+                        Some(Signal::EnterLong { sl: None, tp: None, size_pct: 100.0 })
                     }
                     4 if ctx.in_position => Some(Signal::Exit { reason: ExitReason::Signal("exit2".into()) }),
                     _ => None,
@@ -899,7 +932,7 @@ mod tests {
             fn required_inputs(&self) -> Vec<crate::strategy::InputSpec> { vec![] }
             fn on_candle(&mut self, ctx: &mut Context, _candle: &Candle) -> Option<Signal> {
                 match ctx.index() {
-                    1 => Some(Signal::EnterShort { sl: None, tp: vec![], size_pct: 100.0 }),
+                    1 => Some(Signal::EnterShort { sl: None, tp: None, size_pct: 100.0 }),
                     3 => Some(Signal::Exit { reason: ExitReason::Signal("close short".into()) }),
                     _ => None,
                 }
@@ -988,7 +1021,7 @@ mod tests {
             fn required_inputs(&self) -> Vec<crate::strategy::InputSpec> { vec![] }
             fn on_candle(&mut self, ctx: &mut Context, _candle: &Candle) -> Option<Signal> {
                 match ctx.index() {
-                    1 => Some(Signal::EnterLong { sl: Some(90.0), tp: vec![], size_pct: 100.0 }),
+                    1 => Some(Signal::EnterLong { sl: Some(90.0), tp: None, size_pct: 100.0 }),
                     2 => Some(Signal::MoveStop { new_sl: 99.0 }), // tighten stop
                     _ => None,
                 }
@@ -1038,7 +1071,7 @@ mod tests {
             if ctx.index() == 1 && !ctx.in_position {
                 Some(Signal::EnterLong {
                     sl: Some(self.sl),
-                    tp: vec![self.tp],
+                    tp: Some(self.tp),
                     size_pct: 100.0,
                 })
             } else {

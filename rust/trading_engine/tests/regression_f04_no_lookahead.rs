@@ -47,7 +47,7 @@ impl StrategyAddin for EnterAt20Strategy {
         if ctx.index() == 20 && !ctx.in_position {
             Some(Signal::EnterLong {
                 sl: None,
-                tp: Vec::new(),
+                tp: None,
                 size_pct: 100.0,
             })
         } else {

@@ -10,7 +10,7 @@ pub enum Signal {
         /// Stop loss price (absolute).
         sl: Option<f64>,
         /// Take profit price levels (absolute).
-        tp: Vec<f64>,
+        tp: Option<f64>,
         /// Position size as a percentage of available capital (0.0 - 100.0).
         size_pct: f64,
     },
@@ -19,7 +19,7 @@ pub enum Signal {
         /// Stop loss price (absolute).
         sl: Option<f64>,
         /// Take profit price levels (absolute).
-        tp: Vec<f64>,
+        tp: Option<f64>,
         /// Position size as a percentage of available capital (0.0 - 100.0).
         size_pct: f64,
     },
@@ -42,7 +42,7 @@ impl Signal {
     pub fn long(sl: Option<f64>, tp: Option<f64>) -> Self {
         Signal::EnterLong {
             sl,
-            tp: tp.map(|t| vec![t]).unwrap_or_default(),
+            tp,
             size_pct: 100.0,
         }
     }
@@ -51,7 +51,7 @@ impl Signal {
     pub fn short(sl: Option<f64>, tp: Option<f64>) -> Self {
         Signal::EnterShort {
             sl,
-            tp: tp.map(|t| vec![t]).unwrap_or_default(),
+            tp,
             size_pct: 100.0,
         }
     }
@@ -87,7 +87,7 @@ mod tests {
     fn test_signal_enter_long() {
         let signal = Signal::EnterLong {
             sl: Some(95.0),
-            tp: vec![110.0, 120.0],
+            tp: Some(110.0),
             size_pct: 50.0,
         };
         assert!(signal.is_actionable());
@@ -99,7 +99,7 @@ mod tests {
     fn test_signal_enter_short() {
         let signal = Signal::EnterShort {
             sl: Some(115.0),
-            tp: vec![90.0],
+            tp: Some(90.0),
             size_pct: 100.0,
         };
         assert!(signal.is_actionable());
@@ -138,7 +138,7 @@ mod tests {
         match long {
             Signal::EnterLong { sl, tp, size_pct } => {
                 assert_eq!(sl, Some(95.0));
-                assert_eq!(tp, vec![110.0]);
+                assert_eq!(tp, Some(110.0));
                 assert_eq!(size_pct, 100.0);
             }
             _ => panic!("Expected EnterLong"),
@@ -148,7 +148,7 @@ mod tests {
         match short {
             Signal::EnterShort { sl, tp, size_pct } => {
                 assert_eq!(sl, None);
-                assert!(tp.is_empty());
+                assert_eq!(tp, None);
                 assert_eq!(size_pct, 100.0);
             }
             _ => panic!("Expected EnterShort"),
@@ -162,7 +162,7 @@ mod tests {
     fn test_signal_serialization() {
         let signal = Signal::EnterLong {
             sl: Some(95.0),
-            tp: vec![110.0, 120.0],
+            tp: Some(110.0),
             size_pct: 50.0,
         };
         let json = serde_json::to_string(&signal).unwrap();

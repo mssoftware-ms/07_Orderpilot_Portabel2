@@ -390,8 +390,10 @@ impl StrategyAddin for BbRsiStrategy {
         let pre_signal = &ctx.all_candles()[ctx.index() - swing_lookback..ctx.index()];
         let pre_lows: Vec<f64> = pre_signal.iter().map(|c| c.low).collect();
         let pre_highs: Vec<f64> = pre_signal.iter().map(|c| c.high).collect();
-        let swing_low_price = swing_low(&pre_lows)?;
-        let swing_high_price = swing_high(&pre_highs)?;
+        let swing_low_price = swing_low(&pre_lows)
+            .expect("swing_lookback warm-up guarantees non-empty pre_lows");
+        let swing_high_price = swing_high(&pre_highs)
+            .expect("swing_lookback warm-up guarantees non-empty pre_highs");
 
         // ── Welle R2-2 ADX regime snapshot ──────────────────────────────
         // Only computed when the filter is enabled — keeps the disabled
@@ -475,7 +477,7 @@ impl StrategyAddin for BbRsiStrategy {
                     ctx.in_position = true;
                     return Some(Signal::EnterLong {
                         sl: Some(swing_low_price),
-                        tp: vec![tp_price],
+                        tp: Some(tp_price),
                         size_pct,
                     });
                 }
@@ -494,7 +496,7 @@ impl StrategyAddin for BbRsiStrategy {
                     ctx.in_position = true;
                     return Some(Signal::EnterShort {
                         sl: Some(swing_high_price),
-                        tp: vec![tp_price],
+                        tp: Some(tp_price),
                         size_pct,
                     });
                 }
@@ -513,6 +515,21 @@ impl StrategyAddin for BbRsiStrategy {
             if let Some(&val) = params.get(&schema.name) {
                 schema.validate(val)?;
             }
+        }
+        // N-11: cross-parameter validation — oversold must be below overbought.
+        let oversold = params
+            .get("rsi_oversold")
+            .copied()
+            .unwrap_or(30.0);
+        let overbought = params
+            .get("rsi_overbought")
+            .copied()
+            .unwrap_or(70.0);
+        if oversold >= overbought {
+            return Err(format!(
+                "rsi_oversold ({}) must be less than rsi_overbought ({})",
+                oversold, overbought
+            ));
         }
         Ok(())
     }
@@ -1274,7 +1291,7 @@ mod tests {
         for (i, candle) in candles.iter().enumerate() {
             ctx.set_index(i);
             if let Some(Signal::EnterLong { tp, .. }) = strategy.on_candle(&mut ctx, candle) {
-                captured_tp = tp.first().copied();
+                captured_tp = tp;
                 break;
             }
         }
@@ -1315,7 +1332,7 @@ mod tests {
         for (i, candle) in candles.iter().enumerate() {
             ctx.set_index(i);
             if let Some(Signal::EnterShort { tp, .. }) = strategy.on_candle(&mut ctx, candle) {
-                captured_tp = tp.first().copied();
+                captured_tp = tp;
                 break;
             }
         }
