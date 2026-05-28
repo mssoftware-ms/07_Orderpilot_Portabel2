@@ -594,14 +594,14 @@ impl StrategyAddin for IchimokuStrategy {
         // Warm-up — Spec §1.1: c4 ("Chikou über Cloud bei i-26") reads
         // span values at index i - 2*shift, which requires senkou_b at
         // that index to be valid (period - 1). Dominant constraint:
-        //   start_idx = (senkou_b_period - 1) + 2 * shift
+        //   start_idx = (senkou_b_period - 1) + 2 * CLOUD_SHIFT_BARS
         // With defaults that's 51 + 52 = 103 — stricter than the
         // Spec §1.1 "78 bars" figure (the spec text computes the
         // senkou-b lookback for c1 only and misses c4's deeper anchor).
         // Going strict here is the only way to keep c4 from comparing
         // against `NaN` past-cloud reads.
         let i = ctx.index();
-        let start_idx = senkou_b_period.saturating_sub(1).saturating_add(2 * shift);
+        let start_idx = senkou_b_period.saturating_sub(1).saturating_add(2 * CLOUD_SHIFT_BARS);
         if i < start_idx {
             return None;
         }
@@ -1822,18 +1822,10 @@ mod tests {
 
     #[test]
     fn test_ichimoku_warmup_respects_override_periods() {
-        // Smaller senkou_b/shift → smaller start_idx. Proves the
-        // warm-up math is `(senkou_b - 1) + 2 * shift`, not hard-coded.
-        //
-        // NOTE: `past_senkou_at_i_minus_26` uses the hardcoded
-        // `CLOUD_SHIFT_BARS = 26` const, so even with smaller `shift`
-        // params the past-cloud reads still need 26+ bars below to
-        // yield `Some`. The early-return on missing past-anchors then
-        // turns the post-warm-up bars into `NoAction`. That's exactly
-        // what this test pins: bars below start_idx → `None` (no
-        // indicator work at all); bars at/above → `Some(NoAction)`.
+        // Smaller senkou_b → smaller start_idx.  Proves the warm-up
+        // math is `(senkou_b - 1) + 2 * CLOUD_SHIFT_BARS`.
         let mut s = IchimokuStrategy::new();
-        let n = 60;
+        let n = 80;
         let candles: Vec<Candle> = (0..n)
             .map(|i| Candle::new(i * 3_600_000, 100.0, 101.0, 99.0, 100.0, 1.0))
             .collect();
@@ -1841,10 +1833,9 @@ mod tests {
             ("tenkan_period".to_string(), 3.0),
             ("kijun_period".to_string(), 5.0),
             ("senkou_b_period".to_string(), 10.0),
-            ("shift".to_string(), 5.0),
         ]);
         let mut ctx = Context::new(candles.clone(), Timeframe::H1, params);
-        let start_idx = 19usize; // (10 - 1) + 2*5 = 19
+        let start_idx = 61usize; // (10 - 1) + 2 * CLOUD_SHIFT_BARS(26) = 61
         for (i, candle) in candles.iter().enumerate() {
             ctx.set_index(i);
             let sig = s.on_candle(&mut ctx, candle);
