@@ -23,3 +23,4 @@ fixed:
   session_filter_enabled: 0.0   # 24/7 crypto, no session filter
   adx_filter_enabled: 1.0       # always-on per Welle-R4
   adx_period: 14.0
+  slippage_bps: 0.0             # BTC/USDT retail has negligible spread (N-20)

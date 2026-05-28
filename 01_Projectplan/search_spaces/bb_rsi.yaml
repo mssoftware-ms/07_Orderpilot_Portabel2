@@ -23,6 +23,7 @@ parameters:
   adx_threshold: { type: Float, min: 25.0, max: 45.0 }
   adx_use_di_confluence: { type: Bool }
 fixed:
-  bb_ma_type: 1.0           # EMA basis per Phase-2 spec (D-08)
+  bb_ma_type: 1.0           # EMA basis per Phase-2 spec (D-01)
   adx_filter_enabled: 1.0   # always-on per Welle-R4
   adx_period: 14.0
+  slippage_bps: 0.0         # BTC/USDT retail has negligible spread (N-20)
