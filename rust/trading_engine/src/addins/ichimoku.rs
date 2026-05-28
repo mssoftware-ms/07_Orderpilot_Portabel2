@@ -267,43 +267,6 @@ pub fn past_senkou_at_i_minus_26(span: &[f64], i: usize) -> Option<f64> {
 /// helper therefore returns a verbatim copy of `closes` and the
 /// strategy reads through the intent-explicit anchor helpers below.
 ///
-/// Returning a `Vec<f64>` (rather than `&closes`) gives strategy code
-/// an owned series it can pass through state snapshots / FFI bridges
-/// without worrying about lifetimes.
-pub fn calc_chikou_span(closes: &[f64]) -> Vec<f64> {
-    closes.to_vec()
-}
-
-/// Chikou-Span confirmation for a **long** entry at bar `i`.
-///
-/// Rule (Spec §1.1, classical Ichimoku): the Chikou-Span — visually
-/// plotted at bar `i - 26` with value `close[i]` — must be **above**
-/// the actual close at that historical bar, i.e. `close[i] > close[i - 26]`.
-/// Equivalent to "current close exceeds the close 26 bars ago".
-///
-/// Returns `None` if `i < CLOUD_SHIFT_BARS` (no prior history) or
-/// `i >= closes.len()` (defensive against out-of-bounds reads).
-/// Returns `Some(true/false)` otherwise — no NaN propagation needed
-/// because a strict `>` comparison with NaN is always false in IEEE.
-pub fn chikou_confirms_long(closes: &[f64], i: usize) -> Option<bool> {
-    if i < CLOUD_SHIFT_BARS || i >= closes.len() {
-        return None;
-    }
-    Some(closes[i] > closes[i - CLOUD_SHIFT_BARS])
-}
-
-/// Chikou-Span confirmation for a **short** entry at bar `i`.
-///
-/// Mirror of [`chikou_confirms_long`] — the Chikou-Span plotted at
-/// bar `i - 26` must be **below** the historical close, i.e.
-/// `close[i] < close[i - 26]`. Returns `None` if the comparison
-/// isn't available yet.
-pub fn chikou_confirms_short(closes: &[f64], i: usize) -> Option<bool> {
-    if i < CLOUD_SHIFT_BARS || i >= closes.len() {
-        return None;
-    }
-    Some(closes[i] < closes[i - CLOUD_SHIFT_BARS])
-}
 
 // ─── Ichimoku confluence score (Spec §12.2 default convention) ─────────────
 
@@ -573,7 +536,7 @@ impl StrategyAddin for IchimokuStrategy {
         let tenkan_period = ctx.param_or("tenkan_period", 9.0) as usize;
         let kijun_period = ctx.param_or("kijun_period", 26.0) as usize;
         let senkou_b_period = ctx.param_or("senkou_b_period", 52.0) as usize;
-        let _shift = ctx.param_or("shift", 26.0) as usize;
+
         let score_threshold = ctx.param_or("score_threshold", 100.0).round() as i32;
         let tp_rr_ratio = ctx.param_or("tp_rr_ratio", 2.0);
         let risk_per_trade = ctx.param_or("risk_per_trade", 0.02);
@@ -841,11 +804,7 @@ pub fn ichimoku_manifest() -> AddinManifest {
                 200.0,
                 1.0,
             ),
-            // Cloud-shift / Chikou-lag in bars. `CLOUD_SHIFT_BARS` is the
-            // hard-coded value used by the read-anchor helpers; the
-            // parameter lets the manifest surface the convention but the
-            // strategy still reads through the const internally.
-            ParameterSchema::new("shift", "Cloud / Chikou Shift", 26.0, 5.0, 100.0, 1.0),
+
             // Spec §12.2 default: ±60 = "3 × SCORE_WEIGHT" = full
             // confluence (all five components in the same direction).
             // Long fires at `score >= +threshold`, short at
@@ -862,18 +821,7 @@ pub fn ichimoku_manifest() -> AddinManifest {
             ParameterSchema::new("tp_rr_ratio", "TP R:R Ratio", 2.0, 0.5, 10.0, 0.1),
             // Spec §8: 2 % of equity per trade.
             ParameterSchema::new("risk_per_trade", "Risk Per Trade", 0.02, 0.001, 1.0, 0.001),
-            // Spec §4 algorithmic SL distance uses kijun/cloud anchors;
-            // `swing_lookback_bars` is currently unused by the Ichimoku
-            // SL (kept in the manifest so a Phase-3 hybrid SL variant
-            // can opt in without breaking the parameter map).
-            ParameterSchema::new(
-                "swing_lookback_bars",
-                "Swing Lookback Bars",
-                20.0,
-                5.0,
-                100.0,
-                1.0,
-            ),
+
             // Spec §7 session filter (London + NY). Default OFF for
             // BTCUSDT (24/7); Phase-3 EUR/USD reruns can enable it
             // without code changes.
@@ -1441,56 +1389,6 @@ mod tests {
         assert!(past_senkou_at_i_minus_26(&span_a, 77).unwrap().is_nan());
     }
 
-    // ── Chikou-Span helpers ─────────────────────────────────────────────
-
-    #[test]
-    fn test_chikou_span_returns_verbatim_copy_of_closes() {
-        let closes = [100.0, 101.0, 99.5, 102.0];
-        let c = calc_chikou_span(&closes);
-        assert_eq!(c.len(), closes.len());
-        for (i, &v) in c.iter().enumerate() {
-            assert!((v - closes[i]).abs() < 1e-12);
-        }
-    }
-
-    #[test]
-    fn test_chikou_confirms_long_none_before_shift() {
-        let closes = vec![100.0; 100];
-        assert!(chikou_confirms_long(&closes, 0).is_none());
-        assert!(chikou_confirms_long(&closes, 25).is_none());
-    }
-
-    #[test]
-    fn test_chikou_confirms_long_uses_close_at_i_vs_i_minus_26() {
-        // Linear ramp: close[i] = i. Then close[26] = 26 > close[0] = 0
-        // → confirms_long = true. close[26] < close[26+1] in flat
-        // counter-example: build inverted ramp.
-        let closes_up: Vec<f64> = (0..50).map(|i| i as f64).collect();
-        assert_eq!(chikou_confirms_long(&closes_up, 26), Some(true));
-        assert_eq!(chikou_confirms_long(&closes_up, 49), Some(true));
-
-        let closes_down: Vec<f64> =
-            (0..50).map(|i| 100.0 - i as f64).collect();
-        assert_eq!(chikou_confirms_long(&closes_down, 26), Some(false));
-    }
-
-    #[test]
-    fn test_chikou_confirms_short_mirrors_long() {
-        let closes_down: Vec<f64> =
-            (0..50).map(|i| 100.0 - i as f64).collect();
-        // close[26] = 74 < close[0] = 100 → short confirmed
-        assert_eq!(chikou_confirms_short(&closes_down, 26), Some(true));
-
-        let closes_up: Vec<f64> = (0..50).map(|i| i as f64).collect();
-        assert_eq!(chikou_confirms_short(&closes_up, 26), Some(false));
-    }
-
-    #[test]
-    fn test_chikou_helpers_none_for_i_out_of_bounds() {
-        let closes = vec![1.0; 30];
-        assert!(chikou_confirms_long(&closes, 30).is_none());
-        assert!(chikou_confirms_short(&closes, 30).is_none());
-    }
 
     // ── Ichimoku score helper ───────────────────────────────────────────
 
@@ -1707,11 +1605,11 @@ mod tests {
             ("tenkan_period", 9.0),
             ("kijun_period", 26.0),
             ("senkou_b_period", 52.0),
-            ("shift", 26.0),
+
             ("score_threshold", 100.0),
             ("tp_rr_ratio", 2.0),
             ("risk_per_trade", 0.02),
-            ("swing_lookback_bars", 20.0),
+
             ("session_filter_enabled", 0.0),
             ("session_start_hour", 9.0),
             ("session_end_hour", 23.0),

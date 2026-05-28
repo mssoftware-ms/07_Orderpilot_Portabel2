@@ -223,6 +223,9 @@ pub fn calc_rsi(closes: &[f64], period: usize) -> Option<f64> {
     }
 
     if avg_loss == 0.0 {
+        if avg_gain == 0.0 {
+            return Some(50.0); // flat price → neutral RSI (N-07)
+        }
         return Some(100.0);
     }
     let rs = avg_gain / avg_loss;
