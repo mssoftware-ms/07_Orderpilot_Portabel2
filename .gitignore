@@ -109,5 +109,8 @@ agentdb.rvf.lock
 secrets.json
 **/secrets.json
 
+# ─── Git worktrees (isolated workspaces) ───────────────────────────────────────
+.worktrees/
+
 # ─── Claude / Scheduled-tasks cache (not for repo) ────────────────────────────
 .claude/scheduled_tasks.lock
