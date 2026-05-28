@@ -316,42 +316,47 @@ pub const SCORE_WEIGHT: i32 = 20;
 
 /// Compute the Ichimoku confluence score at bar `i`.
 ///
-/// Score is the sum of three independent ±[`SCORE_WEIGHT`] components
-/// (Spec §12.2 default convention):
+/// Score is the sum of five independent ±[`SCORE_WEIGHT`] components
+/// (Spec §12.2):
 ///
 /// 1. **Cross** (Tenkan vs Kijun at bar `i`):
 ///    - `+SCORE_WEIGHT` if `tenkan[i] > kijun[i]`
 ///    - `-SCORE_WEIGHT` if `tenkan[i] < kijun[i]`
 ///    - `0` if equal or either is `NaN`.
 ///
-/// 2. **Color** (currently-visible cloud at bar `i`):
-///    - `+SCORE_WEIGHT` if `past_span_a > past_span_b` (green cloud)
-///    - `-SCORE_WEIGHT` if `past_span_a < past_span_b` (red cloud)
-///    - `0` if equal, either NaN, or the past-shifted reads are
-///      unavailable (warm-up region, `i < 26`).
+/// 2. **Future-Cloud Colour** (Senkou-span projection 26 bars ahead):
+///    - `+SCORE_WEIGHT` if `span_a_future > span_b_future` (green future)
+///    - `-SCORE_WEIGHT` if `span_a_future < span_b_future` (red future)
+///    - `0` if equal or either `NaN`.
 ///
-/// 3. **Distance** (close vs the visible cloud band):
+/// 3. **Distance** (close vs the visible cloud band at bar `i`):
 ///    - `+SCORE_WEIGHT` if `close[i] > max(past_a, past_b)`
 ///    - `-SCORE_WEIGHT` if `close[i] < min(past_a, past_b)`
 ///    - `0` if the close is inside the cloud, any input is `NaN`, or
 ///      the past-shifted cloud reads are unavailable.
 ///
-/// Total range: `[-60, +60]`. The canonical Spec §12.2 entry threshold
-/// is `±60` ("all three components confluent in the same direction").
+/// 4. **Chikou Position** (close vs the cloud that was visible at i−26):
+///    - `+SCORE_WEIGHT` if `close[i] > max(cloud_upper_at_i_minus_26)`
+///    - `-SCORE_WEIGHT` if `close[i] < min(cloud_lower_at_i_minus_26)`
+///    - `0` if inside the cloud, `NaN`, or warm-up.
 ///
-/// "Past cloud" reads go through [`past_senkou_at_i_minus_26`] — the
-/// cloud actually visible at bar `i`, computed 26 bars ago — which
-/// makes the score consistent with what a chart trader would see.
+/// 5. **Kijun Slope** (5-bar momentum of the Kijun midline):
+///    - `+SCORE_WEIGHT` if `kijun[i] > kijun[i-5]` (rising Kijun)
+///    - `-SCORE_WEIGHT` if `kijun[i] < kijun[i-5]` (falling Kijun)
+///    - `0` if equal, `NaN`, or insufficient history.
+///
+/// Total range: `[-100, +100]`. With `score_threshold=100` this
+/// requires all five components confluent in the same direction.
 pub fn calc_ichimoku_score(
     tenkan: &[f64],
     kijun: &[f64],
     span_a: &[f64],
     span_b: &[f64],
     close: &[f64],
+    span_a_future: f64,
+    span_b_future: f64,
     i: usize,
 ) -> i32 {
-    // Defensive bounds check — out-of-range `i` yields a 0 score
-    // (interpretable as "no confluence detected at an invalid bar").
     if i >= tenkan.len() || i >= kijun.len() || i >= close.len() {
         return 0;
     }
@@ -369,20 +374,21 @@ pub fn calc_ichimoku_score(
         }
     }
 
-    // Past-shifted cloud reads — both component 2 and 3 use the same
-    // pair of values, so compute once.
+    // Component 2: future-cloud colour.
+    if !span_a_future.is_nan() && !span_b_future.is_nan() {
+        if span_a_future > span_b_future {
+            score += SCORE_WEIGHT;
+        } else if span_a_future < span_b_future {
+            score -= SCORE_WEIGHT;
+        }
+    }
+
+    // Past-shifted cloud reads for components 3 and 4.
     let past_a = past_senkou_at_i_minus_26(span_a, i);
     let past_b = past_senkou_at_i_minus_26(span_b, i);
 
     if let (Some(a), Some(b)) = (past_a, past_b) {
         if !a.is_nan() && !b.is_nan() {
-            // Component 2: cloud color.
-            if a > b {
-                score += SCORE_WEIGHT;
-            } else if a < b {
-                score -= SCORE_WEIGHT;
-            }
-
             // Component 3: close vs cloud band.
             let c = close[i];
             if !c.is_nan() {
@@ -393,6 +399,43 @@ pub fn calc_ichimoku_score(
                 } else if c < bottom {
                     score -= SCORE_WEIGHT;
                 }
+            }
+
+            // Component 4: Chikou position — close vs cloud at i−26.
+            // The cloud-band at i−26 is {past_a_at_26priors,
+            // past_b_at_26priors}, i.e. the senkou-span shifted back
+            // by 2 × 26 bars.  We compute via past_senkou_at_i_minus_26
+            // with an offset into the past.
+            if i >= 2 * CLOUD_SHIFT_BARS {
+                let chikou_a = past_senkou_at_i_minus_26(span_a, i - CLOUD_SHIFT_BARS);
+                let chikou_b = past_senkou_at_i_minus_26(span_b, i - CLOUD_SHIFT_BARS);
+                if let (Some(ca), Some(cb)) = (chikou_a, chikou_b) {
+                    if !ca.is_nan() && !cb.is_nan() {
+                        let c = close[i];
+                        if !c.is_nan() {
+                            let top = ca.max(cb);
+                            let bottom = ca.min(cb);
+                            if c > top {
+                                score += SCORE_WEIGHT;
+                            } else if c < bottom {
+                                score -= SCORE_WEIGHT;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Component 5: Kijun slope over 5 bars.
+    if i >= 5 {
+        let k_now = kijun[i];
+        let k_prev = kijun[i - 5];
+        if !k_now.is_nan() && !k_prev.is_nan() {
+            if k_now > k_prev {
+                score += SCORE_WEIGHT;
+            } else if k_now < k_prev {
+                score -= SCORE_WEIGHT;
             }
         }
     }
@@ -531,7 +574,7 @@ impl StrategyAddin for IchimokuStrategy {
         let kijun_period = ctx.param_or("kijun_period", 26.0) as usize;
         let senkou_b_period = ctx.param_or("senkou_b_period", 52.0) as usize;
         let shift = ctx.param_or("shift", 26.0) as usize;
-        let score_threshold = ctx.param_or("score_threshold", 60.0) as i32;
+        let score_threshold = ctx.param_or("score_threshold", 100.0).round() as i32;
         let tp_rr_ratio = ctx.param_or("tp_rr_ratio", 2.0);
         let risk_per_trade = ctx.param_or("risk_per_trade", 0.02);
         let session_enabled = ctx.param_or("session_filter_enabled", 0.0) >= 0.5;
@@ -608,6 +651,8 @@ impl StrategyAddin for IchimokuStrategy {
             &span_a,
             &span_b,
             &closes,
+            span_a_future_i,
+            span_b_future_i,
             i,
         );
 
@@ -769,7 +814,7 @@ impl StrategyAddin for IchimokuStrategy {
 /// Build the canonical AddinManifest for the Ichimoku Cloud Retest
 /// strategy. Defaults match `01_Projectplan/specs/ichimoku_spec.md` and
 /// the engineering plan §2 Welle I2 parameter table; the strict-spec
-/// `score_threshold = 60` (Spec §12.2) gates entries to "all three
+/// `score_threshold = 100` (Spec §12.2) gates entries to "all five
 /// components confluent in the same direction".
 pub fn ichimoku_manifest() -> AddinManifest {
     AddinManifest {
@@ -802,13 +847,13 @@ pub fn ichimoku_manifest() -> AddinManifest {
             // strategy still reads through the const internally.
             ParameterSchema::new("shift", "Cloud / Chikou Shift", 26.0, 5.0, 100.0, 1.0),
             // Spec §12.2 default: ±60 = "3 × SCORE_WEIGHT" = full
-            // confluence (all three Cross/Color/Distance components in
-            // the same direction). Long fires at `score >= +threshold`,
-            // short at `score <= -threshold`.
+            // confluence (all five components in the same direction).
+            // Long fires at `score >= +threshold`, short at
+            // `score <= -threshold`.
             ParameterSchema::new(
                 "score_threshold",
                 "Ichimoku-Score Threshold (±)",
-                60.0,
+                100.0,
                 20.0,
                 100.0,
                 5.0,
@@ -1486,36 +1531,35 @@ mod tests {
             /* span_b (past) */ 95.0,   // a > b → +20
             /* close */ 120.0,           // > top(105) → +20
         );
-        assert_eq!(calc_ichimoku_score(&t, &k, &a, &b, &c, 50), 60);
+        assert_eq!(calc_ichimoku_score(&t, &k, &a, &b, &c, a[50], b[50], 50), 60);
     }
 
     #[test]
     fn test_score_full_short_confluence_is_minus_60() {
-        // Cross-, Color-, Distance- → -60.
-        let (t, k, a, b, c) = score_fixture(
+        // Cross-, Color-, Distance-, Kijun-slope- → -60.
+        let (t, mut k, a, b, c) = score_fixture(
             100.0, 110.0,  // tenkan < kijun → -20
             95.0, 105.0,   // a < b → -20
             80.0,          // < bottom(95) → -20
         );
-        assert_eq!(calc_ichimoku_score(&t, &k, &a, &b, &c, 50), -60);
+        k[45] = 200.0; // kijun falling → -20 (Kijun-slope component)
+        assert_eq!(calc_ichimoku_score(&t, &k, &a, &b, &c, a[50], b[50], 50), -60);
     }
 
     #[test]
     fn test_score_components_independent_partial_sums() {
-        // Cross+ only (Color = 0 because a == b, Distance = 0 because
-        // close inside cloud).
+        // Cross+ (+20) + Kijun-rising (+20) = +40
         let (t, k, a, b, c) = score_fixture(110.0, 100.0, 100.0, 100.0, 100.0);
-        assert_eq!(calc_ichimoku_score(&t, &k, &a, &b, &c, 50), 20);
+        assert_eq!(calc_ichimoku_score(&t, &k, &a, &b, &c, a[50], b[50], 50), 40);
 
         // Color+ only: tenkan == kijun (Cross = 0); close == cloud_top
-        // (Distance = 0 because strict >).
+        // (Distance = 0 because strict >). Kijun-rising (+20) = +20.
         let (t, k, a, b, c) = score_fixture(100.0, 100.0, 110.0, 90.0, 110.0);
-        assert_eq!(calc_ichimoku_score(&t, &k, &a, &b, &c, 50), 20);
+        assert_eq!(calc_ichimoku_score(&t, &k, &a, &b, &c, a[50], b[50], 50), 20);
 
-        // Distance+ only: equal tenkan/kijun + equal spans + close above
-        // the (degenerate-equal) cloud.
+        // Distance+ (+20) + Kijun-rising (+20) = +40
         let (t, k, a, b, c) = score_fixture(100.0, 100.0, 100.0, 100.0, 120.0);
-        assert_eq!(calc_ichimoku_score(&t, &k, &a, &b, &c, 50), 20);
+        assert_eq!(calc_ichimoku_score(&t, &k, &a, &b, &c, a[50], b[50], 50), 40);
     }
 
     #[test]
@@ -1524,7 +1568,7 @@ mod tests {
         // Tenkan == Kijun → Cross = 0. a > b → Color = +20.
         // Total = +20 only.
         let (t, k, a, b, c) = score_fixture(100.0, 100.0, 105.0, 95.0, 100.0);
-        assert_eq!(calc_ichimoku_score(&t, &k, &a, &b, &c, 50), 20);
+        assert_eq!(calc_ichimoku_score(&t, &k, &a, &b, &c, a[50], b[50], 50), 20);
     }
 
     #[test]
@@ -1533,12 +1577,13 @@ mod tests {
         let (mut t, mut k, a, b, c) = score_fixture(110.0, 100.0, 105.0, 95.0, 120.0);
         t[50] = f64::NAN;
         // Color (+20) + Distance (+20) = +40, Cross suppressed.
-        assert_eq!(calc_ichimoku_score(&t, &k, &a, &b, &c, 50), 40);
+        assert_eq!(calc_ichimoku_score(&t, &k, &a, &b, &c, a[50], b[50], 50), 40);
 
-        // Restore tenkan, NaN-ify kijun → Cross = 0 again.
+        // Restore tenkan, NaN-ify kijun → Cross = 0, Kijun-slope = 0.
+        // Only Distance(+20) = 20.
         t[50] = 110.0;
         k[50] = f64::NAN;
-        assert_eq!(calc_ichimoku_score(&t, &k, &a, &b, &c, 50), 40);
+        assert_eq!(calc_ichimoku_score(&t, &k, &a, &b, &c, a[50], b[50], 50), 20);
     }
 
     #[test]
@@ -1554,14 +1599,14 @@ mod tests {
         t[25] = 110.0;
         k[25] = 100.0;
         // Cross+ alone → +20.
-        assert_eq!(calc_ichimoku_score(&t, &k, &a, &b, &c, 25), 20);
+        assert_eq!(calc_ichimoku_score(&t, &k, &a, &b, &c, a[25], b[25], 25), 20);
     }
 
     #[test]
     fn test_score_out_of_bounds_index_returns_zero() {
         let (t, k, a, b, c) = score_fixture(110.0, 100.0, 105.0, 95.0, 120.0);
         // i past close length → defensive return 0.
-        assert_eq!(calc_ichimoku_score(&t, &k, &a, &b, &c, 200), 0);
+        assert_eq!(calc_ichimoku_score(&t, &k, &a, &b, &c, 0.0, 0.0, 200), 0);
     }
 
     #[test]
@@ -1573,7 +1618,7 @@ mod tests {
         // the exact value, then verify the boundary semantics by
         // weakening one component to confirm the drop to +40.
         let (t, k, a, b, c) = score_fixture(110.0, 100.0, 105.0, 95.0, 120.0);
-        assert_eq!(calc_ichimoku_score(&t, &k, &a, &b, &c, 50), 60);
+        assert_eq!(calc_ichimoku_score(&t, &k, &a, &b, &c, a[50], b[50], 50), 60);
         // 3 * SCORE_WEIGHT = ±60 — pin the relationship so a future
         // bump to SCORE_WEIGHT propagates through this assertion.
         assert_eq!(3 * SCORE_WEIGHT, 60);
@@ -1581,7 +1626,7 @@ mod tests {
         // Weaken the Distance component (close inside the cloud) → +40.
         let (t, k, a, b, mut c2) = score_fixture(110.0, 100.0, 105.0, 95.0, 100.0);
         c2[50] = 100.0;
-        assert_eq!(calc_ichimoku_score(&t, &k, &a, &b, &c2, 50), 40);
+        assert_eq!(calc_ichimoku_score(&t, &k, &a, &b, &c2, a[50], b[50], 50), 40);
     }
 
     #[test]
@@ -1663,7 +1708,7 @@ mod tests {
             ("kijun_period", 26.0),
             ("senkou_b_period", 52.0),
             ("shift", 26.0),
-            ("score_threshold", 60.0),
+            ("score_threshold", 100.0),
             ("tp_rr_ratio", 2.0),
             ("risk_per_trade", 0.02),
             ("swing_lookback_bars", 20.0),
@@ -1703,9 +1748,9 @@ mod tests {
     }
 
     #[test]
-    fn test_ichimoku_manifest_score_threshold_matches_three_score_weights() {
+    fn test_ichimoku_manifest_score_threshold_matches_five_score_weights() {
         // Spec §12.2: the canonical "full confluence" threshold is
-        // `3 * SCORE_WEIGHT = 60`. Pin the relationship so a future bump
+        // `5 * SCORE_WEIGHT = 100`. Pin the relationship so a future bump
         // to SCORE_WEIGHT propagates through the manifest default.
         let m = ichimoku_manifest();
         let st = m
@@ -1713,7 +1758,7 @@ mod tests {
             .iter()
             .find(|p| p.name == "score_threshold")
             .unwrap();
-        assert_eq!(st.default as i32, 3 * SCORE_WEIGHT);
+        assert_eq!(st.default as i32, 5 * SCORE_WEIGHT);
     }
 
     #[test]
@@ -1848,8 +1893,8 @@ mod tests {
             /* cloud_current_lower  */ 100.0,
             /* cloud_chikou_upper   */ 108.0, // close > upper → c4
             /* cloud_chikou_lower   */ 95.0,
-            /* score                */ 60,    // exactly at threshold
-            /* score_threshold      */ 60,
+            /* score                */ 100,   // all 5 components confluent
+            /* score_threshold      */ 100,
         )
     }
 
@@ -1865,8 +1910,8 @@ mod tests {
             /* cloud_current_lower  */ 90.0,  // close < lower → c1
             /* cloud_chikou_upper   */ 100.0,
             /* cloud_chikou_lower   */ 88.0,  // close < lower → c4
-            /* score                */ -60,
-            /* score_threshold      */ 60,
+            /* score                */ -100,
+            /* score_threshold      */ 100,
         )
     }
 
