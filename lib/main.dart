@@ -8,6 +8,7 @@ import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 import 'core/logging/app_log.dart';
 import 'core/navigation/app_navigation.dart';
 import 'features/backtest/backtest_provider.dart';
+import 'features/chart/chart_provider.dart';
 import 'features/exchange/bitunix_connection_provider.dart';
 import 'features/paper/paper_trading_provider.dart';
 import 'features/risk/risk_manager.dart';
@@ -45,6 +46,7 @@ class TradingApp extends StatelessWidget {
       providers: [
         ChangeNotifierProvider(create: (_) => BacktestProvider()),
         ChangeNotifierProvider(create: (_) => StudiesProvider()),
+        ChangeNotifierProvider(create: (_) => ChartProvider()),
         // Welle B4.3-3: RiskManager has to live before PaperTradingProvider
         // so the paper provider can read it back via context.read at
         // construction time. The proxy-provider alternative was overkill
