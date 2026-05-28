@@ -400,6 +400,10 @@ impl BacktestEngine {
     }
 
     /// Open a new position, deducting entry fee from balance.
+    ///
+    /// The entry fee is a cost debited from the account but does NOT reduce
+    /// position size — quantity is based on the full allocation (N-13).  In
+    /// real futures trading, fees are balance charges, not notional dilution.
     fn open_position(
         &mut self,
         entry_price: f64,
@@ -409,10 +413,18 @@ impl BacktestEngine {
         tp: Option<f64>,
         size_pct: f64,
     ) {
+        // Guard against synthetic / corrupt data with zero or negative price.
+        debug_assert!(
+            entry_price > 0.0,
+            "open_position: entry_price must be positive, got {entry_price}"
+        );
+        if entry_price <= 0.0 {
+            return;
+        }
+
         let alloc = self.balance * (size_pct.clamp(0.0, 100.0) / 100.0);
         let entry_fee = alloc * self.config.fee_rate;
-        let notional_after_fee = alloc - entry_fee;
-        let quantity = notional_after_fee / entry_price;
+        let quantity = alloc / entry_price;
 
         self.balance -= alloc;
         self.current_entry_fee = entry_fee;
@@ -469,8 +481,10 @@ impl BacktestEngine {
         };
 
         // Return reserved margin + realised net P&L (direction-agnostic).
-        let alloc = entry_notional + self.current_entry_fee;
-        self.balance += alloc + net_pnl;
+        // `entry_notional = pos.quantity * entry_price` equals the full
+        // allocation from open_position (since N-13 quantity is based on
+        // full alloc, not alloc-minus-fee).
+        self.balance += entry_notional + net_pnl;
 
         self.current_entry_fee = 0.0;
 
@@ -490,20 +504,21 @@ impl BacktestEngine {
     /// Current equity = balance + mark-to-market of open position.
     ///
     /// Direction-agnostic (F-02c): equity is what the account would settle to
-    /// if the position closed at `current_price` right now. Using the same
-    /// algebra as `close_position`:
-    ///   equity = balance + alloc + net_unrealized_pnl
-    ///          = balance + alloc + (gross_unrealized - entry_fee - est_exit_fee)
-    /// For LONGs this collapses to the previous `balance + exit_notional -
-    /// est_exit_fee` formula; for SHORTs the old formula reported negative
-    /// unrealised P&L when the trade was in the money.
+    /// if the position closed at `current_price` right now.
+    ///   entry_notional = quantity * entry_price (= full alloc from open,
+    ///     since N-13 positions are notional-accurate)
+    ///   equity = balance + entry_notional + unrealized - entry_fee - est_exit_fee
     fn current_equity(&self, current_price: f64) -> f64 {
         match &self.position {
             Some(pos) => {
-                let alloc = pos.entry_price * pos.quantity + self.current_entry_fee;
+                let entry_notional = pos.entry_price * pos.quantity;
                 let unrealized = pos.unrealized_pnl(current_price);
                 let est_exit_fee = pos.quantity * current_price * self.config.fee_rate;
-                self.balance + alloc + unrealized - self.current_entry_fee - est_exit_fee
+                self.balance
+                    + entry_notional
+                    + unrealized
+                    - self.current_entry_fee
+                    - est_exit_fee
             }
             None => self.balance,
         }
