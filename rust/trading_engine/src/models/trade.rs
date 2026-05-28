@@ -232,14 +232,20 @@ impl BacktestMetrics {
             .sum();
         let avg_trade_duration_ms = total_duration / total_trades as f64;
 
-        let largest_win = trades
+        let mut largest_win = trades
             .iter()
             .map(|t| t.pnl)
             .fold(f64::NEG_INFINITY, f64::max);
-        let largest_loss = trades
+        let mut largest_loss = trades
             .iter()
             .map(|t| t.pnl)
             .fold(f64::INFINITY, f64::min);
+        if !largest_win.is_finite() {
+            largest_win = 0.0; // N-17: no wins → no largest win
+        }
+        if !largest_loss.is_finite() {
+            largest_loss = 0.0; // N-17: no losses → no largest loss
+        }
 
         Self {
             total_trades,

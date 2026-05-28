@@ -368,8 +368,8 @@ pub fn detect_entry(
     }
     let flip_up = direction_prev == -1 && direction_now == 1;
     let flip_down = direction_prev == 1 && direction_now == -1;
-    let smi_cross_up = smi_prev < signal_prev && smi_now >= signal_now;
-    let smi_cross_down = smi_prev > signal_prev && smi_now <= signal_now;
+    let smi_cross_up = smi_prev < signal_prev && smi_now > signal_now;
+    let smi_cross_down = smi_prev > signal_prev && smi_now < signal_now;
     let smi_below_zero = smi_now < 0.0 && signal_now < 0.0;
     let smi_above_zero = smi_now > 0.0 && signal_now > 0.0;
     // Zero-line gate per mode — strict ↦ below/above, relaxed ↦ above/below.

@@ -278,7 +278,7 @@ impl StrategyAddin for BbRsiStrategy {
     fn required_inputs(&self) -> Vec<InputSpec> {
         vec![
             InputSpec::OhlcvTimeframe(Timeframe::H1),
-            InputSpec::MinCandles(50), // need enough history for BB(20) + RSI(14)
+            InputSpec::MinCandles(50), // minimum reasonable candles for BB + RSI
             InputSpec::Indicator("BB".to_string()),
             InputSpec::Indicator("RSI".to_string()),
         ]

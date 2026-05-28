@@ -331,6 +331,9 @@ impl BacktestEngine {
     fn queue_signal(&mut self, signal: Signal) {
         match signal {
             Signal::EnterLong { sl, tp, size_pct } if self.position.is_none() => {
+                if size_pct <= 0.0 {
+                    return; // zero or negative allocation → don't queue (N-16)
+                }
                 let first_tp = tp.first().copied();
                 self.pending_order = Some(PendingOrder::EnterLong {
                     sl,
@@ -339,6 +342,9 @@ impl BacktestEngine {
                 });
             }
             Signal::EnterShort { sl, tp, size_pct } if self.position.is_none() => {
+                if size_pct <= 0.0 {
+                    return; // zero or negative allocation → don't queue (N-16)
+                }
                 let first_tp = tp.first().copied();
                 self.pending_order = Some(PendingOrder::EnterShort {
                     sl,

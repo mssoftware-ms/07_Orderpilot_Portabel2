@@ -573,7 +573,7 @@ impl StrategyAddin for IchimokuStrategy {
         let tenkan_period = ctx.param_or("tenkan_period", 9.0) as usize;
         let kijun_period = ctx.param_or("kijun_period", 26.0) as usize;
         let senkou_b_period = ctx.param_or("senkou_b_period", 52.0) as usize;
-        let shift = ctx.param_or("shift", 26.0) as usize;
+        let _shift = ctx.param_or("shift", 26.0) as usize;
         let score_threshold = ctx.param_or("score_threshold", 100.0).round() as i32;
         let tp_rr_ratio = ctx.param_or("tp_rr_ratio", 2.0);
         let risk_per_trade = ctx.param_or("risk_per_trade", 0.02);
