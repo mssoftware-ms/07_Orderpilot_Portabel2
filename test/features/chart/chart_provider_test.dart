@@ -490,39 +490,58 @@ void main() {
           now: () => start.add(async.elapsed),
         );
 
+        // Record every status transition: the `reconnecting` state is
+        // transient (the freshly reattached fake reports `running` again
+        // on the next microtask, flipping the pill straight back to
+        // `live`), so a point-in-time read would race the recovery.
+        final statuses = <ChartStatus>[];
+        p.addListener(() => statuses.add(p.status));
+
         unawaited(p.load());
         async.flushMicrotasks();
         expect(streams.length, 1, reason: 'load() attaches one stream');
         expect(p.status, ChartStatus.live);
 
-        // 2 minutes of silence on a 1m timeframe → 2.0x — still inside
-        // the grace window, no restart yet.
+        // 2 minutes of silence on a 1m timeframe → 2.0x — and the watchdog
+        // only polls on minute boundaries, so the 2:00 tick is still
+        // inside the 2.5x grace window: no restart yet.
         async.elapse(const Duration(minutes: 2));
+        async.flushMicrotasks();
         expect(streams.length, 1, reason: 'still inside the 2.5x window');
 
-        // Push past 2.5x → watchdog must restart the WS.
-        async.elapse(const Duration(seconds: 31));
+        // Cross the next watchdog poll (3:00) — by then 3.0x ≥ 2.5x of
+        // silence has elapsed, so the watchdog tears the WS down and
+        // reattaches a fresh one.
+        async.elapse(const Duration(seconds: 61));
         async.flushMicrotasks();
         expect(streams.length, greaterThanOrEqualTo(2),
             reason: 'watchdog should detach + reattach a fresh stream');
-        expect(p.status, ChartStatus.reconnecting,
-            reason: 'pill flips to reconnecting while the restart runs');
+        expect(statuses, contains(ChartStatus.reconnecting),
+            reason: 'pill must flip to reconnecting while the restart runs');
 
         p.dispose();
       });
     });
 
-    test('cooldown floor prevents a reconnect storm', () {
+    test('cooldown floor caps restart attempts during a sustained outage',
+        () {
       fakeAsync((async) {
         final start = DateTime.utc(2026, 5, 28);
-        final streams = <FakeBinanceKlineStream>[];
+        var factoryCalls = 0;
         final rest = _ScriptedRest()..response = _makeBackfill(5);
+        // A '1s' timeframe is the only realistic Binance interval whose
+        // watchdog poll cadence (1 s) is shorter than the 30 s reconnect
+        // cooldown — the regime where the cooldown floor actually bites.
+        // The reattach is wired to keep failing (factory throws after the
+        // first, healthy attach) so `_lastTickAt` is never reset and every
+        // poll re-detects the stale stream; only the cooldown stops it
+        // from hammering a reconnect every single second.
         final p = ChartProvider(
-          timeframe: '1m',
+          timeframe: '1s',
           wsFactory: () {
-            final s = FakeBinanceKlineStream();
-            streams.add(s);
-            return s;
+            factoryCalls++;
+            if (factoryCalls == 1) return FakeBinanceKlineStream();
+            throw StateError('reconnect failed');
           },
           restFn: rest.call,
           now: () => start.add(async.elapsed),
@@ -530,21 +549,24 @@ void main() {
 
         unawaited(p.load());
         async.flushMicrotasks();
+        expect(factoryCalls, 1, reason: 'load() performs the initial attach');
+        expect(p.status, ChartStatus.live);
 
-        // Trip the watchdog once.
-        async.elapse(const Duration(minutes: 3));
+        // 25 s of silence: first stale trip at ~3 s fires one reconnect
+        // attempt, then the 30 s cooldown suppresses every later poll.
+        async.elapse(const Duration(seconds: 25));
         async.flushMicrotasks();
-        final restartsAfterFirst = streams.length;
-        expect(restartsAfterFirst, greaterThanOrEqualTo(2));
+        expect(factoryCalls, 2,
+            reason: 'cooldown caps a 25 s outage to one reconnect attempt');
+        expect(p.status, ChartStatus.reconnecting,
+            reason: 'a failed reattach must leave the pill on reconnecting');
 
-        // Two more watchdog ticks within the 30 s cooldown floor must
-        // not trigger any further restart.
-        async.elapse(const Duration(seconds: 5));
-        async.flushMicrotasks();
+        // Cross the 30 s floor (relative to the first attempt at ~3 s):
+        // the watchdog is allowed exactly one further attempt.
         async.elapse(const Duration(seconds: 10));
         async.flushMicrotasks();
-        expect(streams.length, restartsAfterFirst,
-            reason: 'restarts inside the 30 s cooldown are suppressed');
+        expect(factoryCalls, 3,
+            reason: 'a second attempt only after the 30 s cooldown elapses');
 
         p.dispose();
       });
@@ -640,13 +662,15 @@ void main() {
         async.flushMicrotasks();
         final streamsBefore = streams.length;
 
-        // 8 minutes ≈ 1.6× the new 5m interval — still inside the
-        // 2.5× grace window. Must not restart yet.
-        async.elapse(const Duration(minutes: 8));
+        // The 5m watchdog polls at 5/10/15 min. 10 minutes of silence is
+        // 2.0× the new interval — the 10:00 poll is still inside the 2.5×
+        // grace window (12.5 m), so no restart yet.
+        async.elapse(const Duration(minutes: 10));
         async.flushMicrotasks();
         expect(streams.length, streamsBefore);
 
-        // Push past 2.5× × 5 m = 12.5 m.
+        // Cross the 15:00 poll: by then 3.0× ≥ 2.5× of silence has
+        // elapsed on the 5m cadence, so the watchdog restarts.
         async.elapse(const Duration(minutes: 6));
         async.flushMicrotasks();
         expect(streams.length, greaterThan(streamsBefore),

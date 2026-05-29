@@ -196,6 +196,9 @@ class ChartProvider extends ChangeNotifier {
     if (timeframe != null) _timeframe = timeframe;
 
     final gen = ++_loadGeneration;
+    // Stop any prior watchdog up front; it is re-armed (with the
+    // possibly-new timeframe cadence) only after a successful attach.
+    _stopStaleWatchdog();
     await _detachStream();
     _candles.clear();
     _bb = null;
@@ -240,6 +243,10 @@ class ChartProvider extends ChangeNotifier {
 
     if (gen != _loadGeneration || _disposed) return;
     _setStatus(ChartStatus.live);
+    // Arm the stale-watchdog for the live stream. It outlives individual
+    // stream restarts (see [_restartStream]) and is only torn down by the
+    // next load()/setTimeframe or dispose().
+    _startStaleWatchdog();
   }
 
   /// Swap the active symbol. No-op when the new value equals the
@@ -316,24 +323,28 @@ class ChartProvider extends ChangeNotifier {
     );
     _wsStatusSub = stream.statusStream.listen(_onWsStatusChange);
     // Reset the stale-watchdog clock so the fresh subscription gets a
-    // full grace window before the watchdog can decide it's dead.
+    // full grace window before the watchdog can decide it's dead. The
+    // watchdog timer itself is owned by load()/[_startStaleWatchdog] so a
+    // stale-restart can reattach without killing the watchdog.
     _lastTickAt = _now();
-    _startStaleWatchdog();
   }
 
   Future<void> _detachStream() async {
-    _stopStaleWatchdog();
     final sub = _klineSub;
     _klineSub = null;
-    await sub?.cancel();
     final statusSub = _wsStatusSub;
     _wsStatusSub = null;
-    await statusSub?.cancel();
     final stream = _stream;
     _stream = null;
-    if (stream != null) {
-      await stream.dispose();
-    }
+    // Fire-and-forget the cancels + dispose, mirroring [dispose]: the
+    // refs are already dropped so no further event reaches the provider,
+    // and a fresh attach must not block on the OS socket close. Awaiting
+    // a broadcast `StreamSubscription.cancel()` also never resolves under
+    // `FakeAsync`, which would otherwise deadlock the watchdog restart
+    // both in tests and — more importantly — never re-arm a real reconnect.
+    sub?.cancel();
+    statusSub?.cancel();
+    stream?.dispose();
   }
 
   void _onKline(KlineUpdate update) {
@@ -393,9 +404,11 @@ class ChartProvider extends ChangeNotifier {
 
   /// Welle P4C-H-2: start a periodic watchdog that compares the
   /// wall-time since the last kline against
-  /// [kChartStaleThresholdFactor]× the timeframe interval. Recreated
-  /// on every [_attachStream], so a timeframe switch picks up the new
-  /// cadence.
+  /// [kChartStaleThresholdFactor]× the timeframe interval. Armed by
+  /// [load] after the stream goes live and kept running across
+  /// stale-restarts so a failed reattach still gets retried on the next
+  /// tick; a timeframe switch re-runs [load] and rebuilds the timer with
+  /// the new cadence.
   void _startStaleWatchdog() {
     _stopStaleWatchdog();
     if (_disposed) return;
