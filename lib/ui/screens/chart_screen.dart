@@ -65,6 +65,7 @@ class _ChartScreenState extends State<ChartScreen> {
                   child: CandlestickChartPane(
                     candles: provider.candles,
                     bb: provider.bb,
+                    timeframe: provider.timeframe,
                   ),
                 ),
               ),
