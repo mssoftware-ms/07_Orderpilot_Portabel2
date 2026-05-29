@@ -89,7 +89,7 @@ void main() {
     });
 
     test('enterLong is actionable entry', () {
-      final signal = RustSignal.enterLong(sl: 95.0, tp: [110.0], sizePct: 50.0);
+      final signal = RustSignal.enterLong(sl: 95.0, tp: 110.0, sizePct: 50.0);
       expect(signal.isActionable, isTrue);
       expect(signal.isEntry, isTrue);
       expect(signal.isExit, isFalse);
