@@ -108,6 +108,44 @@ void main() {
     expect(lib.entries.every((e) => e.health != null), isTrue);
   });
 
+  test('refreshHealth preserves a pin toggled mid-probe', () async {
+    // Single-DB dir so refreshHealth is provably probing THIS entry when
+    // the pin toggle lands during its async db.open gap.
+    final soloDir = await Directory.systemTemp.createTemp('studies_solo_');
+    final solo = '${soloDir.path}/studies-solo.db';
+    final db = await databaseFactory.openDatabase(solo);
+    await db.execute('CREATE TABLE studies (id INTEGER PRIMARY KEY, '
+        'name TEXT NOT NULL, strategy TEXT NOT NULL, '
+        'search_space_yaml TEXT NOT NULL, created_at TEXT NOT NULL, '
+        'commit_hash TEXT)');
+    await db.execute('CREATE TABLE trials (id INTEGER PRIMARY KEY, '
+        'study_id INTEGER NOT NULL, trial_id INTEGER NOT NULL, '
+        'params_json TEXT NOT NULL, metrics_json TEXT NOT NULL, '
+        'score REAL NOT NULL, created_at TEXT NOT NULL)');
+    await db.close();
+
+    final lib = StudiesLibrary(storage: LibraryStorage());
+    await lib.boot(scanDirs: [soloDir.path]);
+    expect(lib.entries.single.pinned, isFalse);
+
+    // Start the probe (it yields at the async db.open), pin while it is in
+    // flight, then let it finish. A stale write-back would clobber the pin.
+    final probe = lib.refreshHealth();
+    await lib.togglePin(solo);
+    await probe;
+
+    expect(lib.entries.single.pinned, isTrue,
+        reason: 'a pin toggled during the health probe must survive');
+    expect(lib.entries.single.health, isNotNull,
+        reason: 'health is still computed');
+
+    // Persisted state must also keep the pin.
+    final reloaded = await LibraryStorage().load();
+    expect(reloaded.firstWhere((e) => e.path == solo).pinned, isTrue);
+
+    await soloDir.delete(recursive: true);
+  });
+
   test('missing file keeps entry but marks missing', () async {
     final lib = StudiesLibrary(storage: LibraryStorage());
     await lib.boot(scanDirs: [tempDir.path]);

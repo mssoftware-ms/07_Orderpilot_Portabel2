@@ -112,31 +112,52 @@ class StudiesLibrary extends ChangeNotifier {
   }
 
   Future<void> refreshHealth() async {
-    for (var i = 0; i < _entries.length; i++) {
-      final e = _entries[i];
-      if (isMissing(e)) continue;
-      final file = File(e.path);
+    // Iterate over a path snapshot and re-resolve each entry by path
+    // *after* the async health probe before writing back. The probe
+    // yields (db.open/healthSnapshot), and a pin/unpin/remove can land in
+    // that gap; capturing the entry up front and writing the stale copy
+    // back would clobber the concurrent pin change (it only carries the
+    // pinned bit it was captured with). `copyWith` touches health +
+    // lastScannedAt only, so re-resolving preserves whatever pinned state
+    // is current at write-back time.
+    final paths =
+        _entries.map((e) => e.path).toList(growable: false);
+    for (final path in paths) {
+      final i0 = _entries.indexWhere((e) => e.path == path);
+      if (i0 < 0) continue; // removed during a prior probe
+      final current = _entries[i0];
+      if (isMissing(current)) continue;
+      final file = File(path);
       final mtimeMs = file.statSync().modified.millisecondsSinceEpoch;
-      if (e.health != null && e.health!.dbMtimeMs == mtimeMs) continue;
+      if (current.health != null && current.health!.dbMtimeMs == mtimeMs) {
+        continue;
+      }
+      LibraryHealth? health;
       final db = StudiesDb();
       try {
-        await db.open(e.path);
+        await db.open(path);
         final snapshot = await db.healthSnapshot();
-        _entries[i] = e.copyWith(
-          lastScannedAt: DateTime.now().toUtc(),
-          health: LibraryHealth(
-            studyCount: snapshot.studyCount,
-            profitableTrialCount: snapshot.profitableTrialCount,
-            totalTrialCount: snapshot.totalTrialCount,
-            dbMtimeMs: mtimeMs,
-          ),
+        health = LibraryHealth(
+          studyCount: snapshot.studyCount,
+          profitableTrialCount: snapshot.profitableTrialCount,
+          totalTrialCount: snapshot.totalTrialCount,
+          dbMtimeMs: mtimeMs,
         );
       } catch (err, st) {
-        AppLog.warn('StudiesLibrary',
-            'refreshHealth failed for ${e.path}: $err', err, st);
+        AppLog.warn(
+            'StudiesLibrary', 'refreshHealth failed for $path: $err', err, st);
       } finally {
         await db.close();
       }
+      if (health == null) continue;
+      // Re-resolve now — the entry may have moved (add/remove) or had its
+      // pin toggled during the probe.
+      final i = _entries.indexWhere((e) => e.path == path);
+      if (i < 0) continue;
+      _entries[i] = _entries[i].copyWith(
+        lastScannedAt: DateTime.now().toUtc(),
+        health: health,
+      );
     }
     await _storage.save(_entries);
     notifyListeners();
