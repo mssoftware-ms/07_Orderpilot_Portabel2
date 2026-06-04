@@ -121,6 +121,12 @@ StudiesScreen
 
 ### 4.1 SQL für `topNProfitable` (cross-study within a single DB)
 
+> **Probe-Outcome (Task 1, 2026-06-04):** `dart run tool/probe_json_extract.dart`
+> gegen `test/fixtures/studies_fixture.db` (sqflite_common_ffi **2.4.1**) →
+> `json_extract OK: 1` (exit 0). **`json_extract` ist verfügbar** → der
+> SQL-Pfad wird überall in Task 3 genutzt; der Dart-Fallback bleibt nur als
+> defensiver `DatabaseException`-Catch erhalten (nicht der primäre Pfad).
+
 ```sql
 SELECT t.id, t.study_id, t.trial_id, t.params_json, t.metrics_json,
        t.score, t.created_at,
