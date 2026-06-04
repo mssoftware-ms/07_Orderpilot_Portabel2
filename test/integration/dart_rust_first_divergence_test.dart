@@ -22,7 +22,6 @@ import 'dart:convert';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:trading_app/core/models/candle.dart';
-import 'package:trading_app/core/models/trade.dart';
 import 'package:trading_app/services/backtest_service.dart';
 import 'package:trading_app/services/binance_api_client.dart';
 import 'package:trading_app/services/rust_bridge.dart';
