@@ -1,0 +1,200 @@
+# Post-Task Welle O3-B4 — Studies Library (Multi-DB-Leaderboard)
+
+**Executed:** 2026-06-04 by parallel-CC (WSL2)
+**Branch:** `main`, atomare Commits + push pro grünem Task
+**Base:** `e538b81` (origin/main, inkl. der bereits committeten Dependency-Migration
+auf file_picker 11 / fl_chart 1.2 / candlesticks 3 / flutter_secure_storage 10 /
+sqflite_common_ffi 2.4.1)
+**Status:** O3-B4-Feature vollständig implementiert + getestet (grün). **Final-Sign-off
+beim QA-Koordinator** — ein Punkt (Phase-1-dart↔rust-Parität) ist ein vorbestehender,
+O3-B4-fremder Befund (siehe §5).
+
+---
+
+## 1. Scope delivered
+
+Studies-Screen hat jetzt eine **Library-Schicht** über dem bestehenden Single-DB-Viewer:
+
+- **Multi-DB-Auto-Scan** von `01_Projectplan/optimizer_studies/` + manuelles „Add custom .db"
+- **Pin/Unpin** mit persistentem Zustand (`SharedPreferences`, versioniert v1)
+- **Health-Dot** pro Entry (grün/gelb/rot/grau, mtime-gecacht)
+- **Global-Leaderboard** über alle gepinnten DBs × alle Studies, gefiltert auf
+  `total_pnl > 0 AND total_trades >= min_trades`, mit Sort-By (score/pnl/sharpe/pf/
+  trades/winRate), Top-N-Stepper und Min-Trades-Slider
+- **Detail-Sheet** pro Leaderboard-Row (Strategy + Study + Trial + Params/Metrics)
+- **Per-Study-Drill-Down (O3-B2) unverändert erhalten** unter „Per-study drill-down"
+
+Out-of-scope (PRE_TASK §1) eingehalten: kein DB-Schreiben, kein Cross-DB-Convergence-Plot,
+kein Live-Stream-Update, kein Custom-Re-Scoring, keine ruvector/stat_gates-Integration.
+
+---
+
+## 2. Commits shipped (12)
+
+| # | Commit | Subject |
+|---|---|---|
+| 1 | `016c872` | feat(O3-B4-1): probe json_extract availability + fallback plan |
+| 2 | `1a164e7` | feat(O3-B4-2): library + leaderboard data models |
+| 3 | `b036126` | feat(O3-B4-2.1): studies_db.topNProfitable + healthSnapshot |
+| 4 | `4ef2d56` | feat(O3-B4-3): studies_library SharedPreferences storage |
+| 5 | `e96bd0d` | feat(O3-B4-3.1): studies_library provider |
+| 6 | `644efeb` | feat(O3-B4-4): aggregate_leaderboard provider |
+| 7 | `e6b6ef3` | feat(O3-B4-5a): library_panel widget |
+| 8 | `e091edd` | feat(O3-B4-5b): leaderboard_filter_bar widget + tests |
+| 9 | `4f487cb` | feat(O3-B4-5c): global_leaderboard_table widget |
+| 10 | `81566f6` | feat(O3-B4-5.1): studies_screen composes library + leaderboard |
+| 11 | `9995e96` | test(O3-B4-6): integration smoke test for studies library |
+| 12 | *(dieser Report)* | chore(O3-B4-7): UAT pass + post-task report |
+
+Working-Tree-Hinweis: Vor Task 1 lag eine fremde Dependency-Migration als M-Files vor;
+der QA-Koordinator hat sie selbst committet+gepusht (`e538b81 #up`), bevor O3-B4 startete.
+Damit war der Tree sauber und keine fremden M-Files wurden vereinnahmt.
+
+---
+
+## 3. Deviations from PRE_TASK / IMPL_PLAN
+
+| # | Abweichung | Grund (empirisch verifiziert) |
+|---|---|---|
+| D1 | **Q2-Storage:** `SharedPreferences` statt `path_provider`+JSON-Datei | Bereits im IMPL_PLAN als Q2-Deviation festgelegt (Dep-Parität, 0 neue Packages) |
+| D2 | **`json_valid(metrics_json)`-Guard** in `topNProfitable`/`healthSnapshot`-SQL | Roh-`json_extract` wirft einen harten „malformed JSON, SQL logic error" auf eine einzelne kaputte Row und bricht die ganze Query ab (verifiziert gegen `studies_fixture.db`). `json_valid` überspringt sie (wie `_parseTrialRows` skip-and-warn) und hält den SQL-Pfad am Leben. Dart-Fallback nur noch bei komplett fehlendem JSON1 |
+| D3 | **Studies_db-Tests an reale Fixture angepasst** | Plan nahm 2 profitable Trials / PnL 280.0 an; die echte `studies_fixture.db` hat 3 profitable (120.5/450.0/60.0). Assertions auf die tatsächlichen Werte korrigiert |
+| D4 | **`dart:async`-`unawaited`** statt zweiter lokaler No-op in `aggregate_leaderboard.dart` | `studies_provider.dart` deklariert bereits eine top-level `unawaited`; eine zweite hätte beim gemeinsamen Import in `studies_screen.dart`/`main.dart` `ambiguous_import` riskiert |
+| D5 | **Widget-/Smoke-Tests: synchrone Datei-I/O** (`createTempSync`/`copySync`/`deleteSync`, Platzhalter-`.db`) | Echtes Async-I/O (`Directory.createTemp`, `File.copy`, `sqflite openDatabase`) wird in der `testWidgets`-FakeAsync-Zone nie abgeschlossen → Hang (Lesson `testing_runasync_in_widget_tests`). `SharedPreferences` via `setMockInitialValues` läuft per Microtask, ist also ok; `recompute` bleibt in `tester.runAsync` für den sqflite-Isolate |
+| D6 | **`build_fixture_library.dart`: absolute Pfade für `openDatabase`** | `sqflite_common_ffi` löst relative Pfade gegen sein eigenes `.dart_tool/`-Verzeichnis auf, sonst landen die Fixtures am falschen Ort |
+| D7 | **Smoke-Test-Study-Name-Assertion auf Sheet-Teilbaum eingegrenzt** (`find.descendant`) | Die Tabelle hinter dem Modal-Sheet rendert den Study-Namen ebenfalls → Plan-`findsOneWidget` matchte 2 Widgets |
+| D8 | **`studies_screen_test.dart` + `studies_viewer_smoke_test.dart` um 2 Provider ergänzt** | `StudiesScreen` liest jetzt `StudiesLibrary` + `AggregateLeaderboard`; ohne sie `ProviderNotFoundException`. Leere/un-gebootete Library → Leaderboard-Empty-State → keine `#`-Rank-Kollision mit den Per-Study-Top-10-Assertions |
+
+---
+
+## 4. Test status
+
+**O3-B4 + studies-Regression: vollständig grün.**
+
+| Suite | Tests | Status |
+|---|---|---|
+| `test/core/models/library_entry_test.dart` | 4 | ✅ |
+| `test/services/studies_db_test.dart` (16, +5 neu) | 16 | ✅ |
+| `test/services/library_storage_test.dart` | 5 | ✅ |
+| `test/features/studies/studies_library_test.dart` | 6 | ✅ |
+| `test/features/studies/aggregate_leaderboard_test.dart` | 7 | ✅ |
+| `test/ui/widgets/library_panel_test.dart` | 2 | ✅ |
+| `test/ui/widgets/leaderboard_filter_bar_test.dart` | 3 | ✅ |
+| `test/ui/widgets/global_leaderboard_table_test.dart` | 3 | ✅ |
+| `test/integration/studies_library_smoke_test.dart` | 1 | ✅ |
+| `test/ui/screens/studies_screen_test.dart` (regression) | 4 | ✅ |
+| `test/integration/studies_viewer_smoke_test.dart` (regression) | 1 | ✅ |
+| `test/features/studies/studies_provider_test.dart` (regression) | ✓ | ✅ |
+
+**`flutter analyze`:** 0 Issues in `lib/`+`test/`-Source (pro-Datei verifiziert). Der volle
+`flutter analyze` meldet 2 Issues, beide in `build/windows/x64/plugins/.../cargokit_build/`
+— **generierte, gitignored Windows-Build-Artefakte** (ephemeral-Symlink fehlt in WSL),
+nicht O3-B4-bezogen, umgebungsbedingt.
+
+**`flutter test` (volle Suite): NICHT durchgehend grün** — blockiert ausschließlich durch
+den vorbestehenden dart↔rust-Paritäts-Fail (§5), der O3-B4-fremd ist.
+
+---
+
+## 5. Phase-1-Reference-Backtest — Befund (STOP-Punkt)
+
+`tool/build_rust.sh release` neu gebaut (16.4s, frisches `libtrading_engine.so`), dann
+`test/integration/phase1_reference_backtest_test.dart`:
+
+```
+trades = 91   (Dart & Rust, identisch)
+Dart : pnl = -1565.358744  (3/3 deterministisch reproduziert)
+Rust : pnl = -1514.059742  (3/3 deterministisch reproduziert)
+→ Test FAILT auf dart↔rust-Parität: |−1565.36 − (−1514.06)| ≈ 51 USDT > 1e-9
+```
+
+**Einordnung:**
+
+1. **Die `-2071.38 USDT`-Referenz ist veraltet.** `01_Projectplan/specs/bb_rsi_diff.md:40`
+   dokumentiert selbst: „Der gedruckte Phase-1-Diagnosewert (pnl ≈ −2071.38 USDT, 139
+   Trades) ist nach dem Fix Geschichte. Der Test selbst kollabiert nicht (keine
+   Hard-Assertion auf diese Zahl)." Zahlreiche Engine-Fixes nach dem Baseline-Freeze
+   (2026-05-26) — `86a6199` (risk sizing/TP), `28bdca0` (fee-adjusted allocation),
+   `52ce16b`, `7eeeb5f` u.a. — haben den PnL legitim verschoben. **Trade-Count 91 ist
+   stabil geblieben.**
+
+2. **Der Test pinnt keinen absoluten PnL**, sondern prüft (a) Dart-Determinismus,
+   (b) Rust-Determinismus, (c) dart↔rust-Parität (`closeTo 1e-9`). Er failt nur an (c).
+
+3. **Nicht durch O3-B4 verursacht — beweisbar:** `git diff --stat e538b81..HEAD` berührt
+   ausschließlich `studies/`, `main.dart` (Provider-Liste), studies-Tests, Tools, Docs —
+   **null** Rust-/Backtest-/Strategy-Code. Das `.so` ist ein untracked, gitignored lokales
+   Artefakt; das vorherige veraltete `.so` maskierte die Divergenz, der vom Plan geforderte
+   Rebuild (aktueller main-Rust-Source) legte sie frei. Auf reinem `main` ohne O3-B4 würde
+   derselbe Rebuild dieselbe Parität brechen → **vorbestehend, O3-B4-fremd**.
+
+**Empfehlung:** dart↔rust-PnL-Divergenz (~51 USDT bei identischem Trade-Count) separat
+untersuchen — Verdacht auf Rounding/Ordering in einem der F-01/F-02/F-03-Pfade bzw.
+Rust-Source-Drift gegenüber der Dart-Engine seit dem letzten frischen `.so`. Außerhalb des
+O3-B4-Scopes; QA-Koordinator-Entscheidung.
+
+---
+
+## 6. UAT-Akzeptanzkriterien (PRE_TASK §7)
+
+Hinweis: Die App läuft auf Windows (`flutter run -d windows`); der Executor arbeitet
+headless in WSL2 ohne GUI, kann das visuelle Walkthrough also nicht selbst durchführen.
+Jede Zeile ist daher mit der **automatisierten Test-Evidenz** belegt; die finale
+visuelle Bestätigung am Windows-Build liegt beim QA-Koordinator.
+
+| # | Check | Automatisierte Evidenz | Status |
+|---|---|---|---|
+| 1 | Library listet optimizer_studies; ruvector/stat_gates kein Crash, nicht silent | Scan listet alle `.db` (studies_library_test); ungültige DBs werden bei `topNProfitable`/Health-Open via `NotAStudiesDbException` gefangen+übersprungen (aggregate broken-DB-Test) | 🔶 siehe Hinweis A |
+| 2 | Alle Entries beim ersten Boot un-pinned | studies_library_test „scanDirectory finds .db files" (alle `pinned==false`) | ✅ |
+| 3 | Pin 2 DBs → Leaderboard mischt beide Strategien | aggregate_leaderboard_test + studies_library_smoke_test (ichimoku+bb_rsi) | ✅ |
+| 4 | min_trades=20 → Low-Sample raus, im Drill-Down weiter sichtbar | studies_db topNProfitable min_trades + aggregate min_trades-cutoff | ✅ |
+| 5 | Sort PnL → Reihenfolge + Rank-Update | filter_bar sort-dropdown + aggregate sortBy=pnl | ✅ |
+| 6 | Click Leaderboard-Row → Detail-Sheet (Strategy+Study+Trial) | global_leaderboard_table_test „tap on row opens detail sheet" + smoke | ✅ |
+| 7 | Click Library-Row → Per-Study-Drill-Down lädt | — | ⚠️ siehe Hinweis B |
+| 8 | DB löschen → Reload → „Missing", andere liefern weiter, kein Crash | studies_library_test „missing file keeps entry but marks missing" + aggregate broken-DB-Test | 🔶 (GUI-Reload visuell offen) |
+| 9 | Add custom ruvector.db → „Not an Optuna studies DB", nicht gespeichert | studies_library_test „addCustom rejects non-studies DB" | ✅ |
+| 10 | SharedPreferences zerschossen → leere Library + Warn + Auto-Rescan | library_storage_test „corrupt JSON resets to empty" / „unknown version resets" | ✅ |
+| 11 | Bestehender Pick-`.db`-Flow + studies_viewer_smoke_test grün | studies_viewer_smoke_test ✅ (grün mit neuen Providern) | ✅ |
+| 12 | Phase-1-Backtest unverändert (91 Trades / -2071.38 USDT) | trades=91 ✅; PnL & Parität siehe §5 | ⚠️ §5 |
+
+**Hinweis A (UAT 1):** Auto-gescannte Nicht-Studies-DBs (`ruvector.db`,
+`stat_gates_results.db`) erscheinen als graue Health-Dot-Einträge („Not scanned yet"
+bzw. nach fehlgeschlagenem Health-Open) und tragen nichts zum Leaderboard bei (open
+wirft → gefangen → übersprungen). Sie werden also **nicht** silent geschluckt und
+crashen nicht — aber der IMPL_PLAN rendert für sie keinen expliziten „Not a studies DB"-
+Text (nur der manuelle Add-Custom-Pfad zeigt den Toast). Minor-Deviation gegenüber dem
+PRE_TASK-§7.1-Wortlaut.
+
+**Hinweis B (UAT 7):** Der IMPL_PLAN verdrahtet **keinen** Library-Row-Click → Per-Study-
+Load. `_LibraryRow` hat nur Pin-Toggle + Health-Dot; der Per-Study-Drill-Down bleibt über
+den **erhaltenen manuellen „Pick .db"-Picker** erreichbar (UAT 11). Damit weicht die
+Umsetzung vom PRE_TASK-§7.7-Wortlaut ab (dort: Klick auf Library-Row lädt Drill-Down).
+Empfehlung für eine Folge-Welle: optionaler Row-`onTap` → `StudiesProvider.loadDb(path)`.
+
+---
+
+## 7. Sign-Off-Checkliste (Status)
+
+- [x] Subtasks 1.0–6.0 (11 Code/Test-Commits) atomic committed + pushed
+- [x] `flutter analyze` clean für alle O3-B4-`lib/`+`test/`-Dateien (2 Restissues nur in
+      gitignored `build/windows/`-Artefakten, umgebungsbedingt)
+- [x] Alle neuen + studies-Regressions-Tests grün
+- [x] Bestehender `studies_viewer_smoke_test.dart` grün (kein Regress)
+- [ ] **`flutter test` durchgehend grün — BLOCKIERT** durch vorbestehende dart↔rust-Parität (§5)
+- [~] UAT 1–12 — automatisiert belegt (siehe §6); visuelle Windows-Bestätigung + UAT 7-Gap
+      + UAT 12-Parität beim QA-Koordinator
+- [x] POST_TASK-Report (dieses Dokument)
+
+---
+
+## 8. Notes for next welle
+
+1. **dart↔rust Phase-1-Parität** (~51 USDT PnL-Drift bei 91 Trades) untersuchen — eigene
+   Engine-Welle. Verdacht: Rust-Source-Drift seit letztem frischem `.so` bzw.
+   Rounding/Ordering in F-01/F-02/F-03. `tool/build_rust.sh release` als Pflicht-Schritt
+   in jede CI/Test-Routine aufnehmen, damit stale `.so` solche Divergenzen nicht maskiert.
+2. **`-2071.38`-Referenz aktualisieren** in HANDOFF/Memory `project_regression_guards` →
+   aktueller Dart-Wert `-1565.358744` (91 Trades), oder den Wert nach behobener Parität.
+3. **UAT 7** nachrüsten: Library-Row-`onTap` → `StudiesProvider.loadDb`.
+4. **UAT 1** optional schärfen: expliziter „Not a studies DB"-Hint für auto-gescannte
+   Nicht-Studies-DBs (Health-Probe beim Scan statt erst lazy bei `refreshHealth`).
