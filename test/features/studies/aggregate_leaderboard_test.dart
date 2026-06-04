@@ -68,9 +68,14 @@ void main() {
 
   setUp(() async {
     tempDir = await Directory.systemTemp.createTemp('agg_lb_');
-    dbA = '${tempDir.path}/studies-a.db';
-    dbB = '${tempDir.path}/studies-b.db';
-    dbEmpty = '${tempDir.path}/studies-empty.db';
+    // Canonicalize to OS-native separators so togglePin/path-equals match
+    // the library's stored canonical form. See O3-B4-10.
+    dbA = '${tempDir.path}/studies-a.db'
+        .replaceAll('/', Platform.pathSeparator);
+    dbB = '${tempDir.path}/studies-b.db'
+        .replaceAll('/', Platform.pathSeparator);
+    dbEmpty = '${tempDir.path}/studies-empty.db'
+        .replaceAll('/', Platform.pathSeparator);
     await _seedDb(dbA, strategy: 'ichimoku', trials: [
       {'pnl': 100, 'trades': 30, 'score': 1.5},
       {'pnl': -50, 'trades': 30, 'score': -0.8},

@@ -36,7 +36,12 @@ void main() {
     SharedPreferences.setMockInitialValues({});
     final tempDir =
         Directory.systemTemp.createTempSync('library_panel_widget_');
-    final dbPath = '${tempDir.path}/studies-x.db';
+    // Canonicalize so the test path matches the OS-native form the library
+    // stores (Backslash on Windows). Mixed-slash misses the key.
+    final dbPath = File('${tempDir.path}/studies-x.db')
+        .absolute
+        .path
+        .replaceAll('/', Platform.pathSeparator);
     File(dbPath).createSync(recursive: true);
 
     final lib = StudiesLibrary(storage: LibraryStorage());
@@ -63,7 +68,12 @@ void main() {
     SharedPreferences.setMockInitialValues({});
     final tempDir =
         Directory.systemTemp.createTempSync('library_panel_open_');
-    final dbPath = '${tempDir.path}/studies-y.db';
+    // Canonicalize: onOpenDb receives entry.path (Backslash on Windows);
+    // the test must compare against the same canonical form.
+    final dbPath = File('${tempDir.path}/studies-y.db')
+        .absolute
+        .path
+        .replaceAll('/', Platform.pathSeparator);
     File(dbPath).createSync(recursive: true);
 
     final lib = StudiesLibrary(storage: LibraryStorage());

@@ -27,6 +27,19 @@ class StudiesLibrary extends ChangeNotifier {
 
   bool isMissing(LibraryEntry e) => !File(e.path).existsSync();
 
+  /// Welle O3-B4-10 (Windows slash-mix fix): normalize incoming paths to
+  /// OS-native separators so string-equals lookups work regardless of how
+  /// the caller (file_picker, tests, deep links) constructed the path.
+  ///
+  /// `File.absolute.path` on Windows preserves the input slash style —
+  /// `File('C:/x/y.db').absolute.path` returns `'C:/x/y.db'`, NOT
+  /// `'C:\\x\\y.db'`. Without an explicit slash replace, mixed-slash
+  /// paths silently miss every entry and leave the library un-pinnable.
+  static String _canonicalize(String path) {
+    final abs = File(path).absolute.path;
+    return Platform.isWindows ? abs.replaceAll('/', '\\') : abs;
+  }
+
   Future<void> boot({required List<String> scanDirs}) async {
     final fromDisk = await _storage.load();
     _entries
@@ -50,7 +63,7 @@ class StudiesLibrary extends ChangeNotifier {
       for (final f in dir.listSync()) {
         if (f is! File) continue;
         if (!f.path.endsWith('.db')) continue;
-        final abs = f.absolute.path;
+        final abs = _canonicalize(f.path);
         if (known.contains(abs)) continue;
         _entries.add(LibraryEntry(
           path: abs,
@@ -64,7 +77,8 @@ class StudiesLibrary extends ChangeNotifier {
   }
 
   Future<void> togglePin(String path) async {
-    final i = _entries.indexWhere((e) => e.path == path);
+    final canonical = _canonicalize(path);
+    final i = _entries.indexWhere((e) => e.path == canonical);
     if (i < 0) return;
     _entries[i] = _entries[i].copyWith(pinned: !_entries[i].pinned);
     await _storage.save(_entries);
@@ -72,7 +86,8 @@ class StudiesLibrary extends ChangeNotifier {
   }
 
   Future<void> remove(String path) async {
-    _entries.removeWhere((e) => e.path == path);
+    final canonical = _canonicalize(path);
+    _entries.removeWhere((e) => e.path == canonical);
     await _storage.save(_entries);
     notifyListeners();
   }
@@ -82,7 +97,7 @@ class StudiesLibrary extends ChangeNotifier {
   /// A re-add of an already-known entry ensures it is pinned (set, not
   /// toggle — re-picking must never silently unpin).
   Future<bool> addCustom(String path) async {
-    final abs = File(path).absolute.path;
+    final abs = _canonicalize(path);
     final existing = _entries.indexWhere((e) => e.path == abs);
     if (existing >= 0) {
       if (!_entries[existing].pinned) {

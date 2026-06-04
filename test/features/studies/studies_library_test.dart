@@ -22,8 +22,13 @@ void main() {
 
   setUp(() async {
     tempDir = await Directory.systemTemp.createTemp('studies_library_');
-    fixtureA = '${tempDir.path}/studies-a.db';
-    fixtureB = '${tempDir.path}/studies-b.db';
+    // Canonicalize to OS-native separators (Backslash on Windows). The
+    // library stores `_canonicalize(file.path)`; mixed-slash test paths
+    // miss every string-equals lookup. See O3-B4-10.
+    fixtureA = '${tempDir.path}/studies-a.db'
+        .replaceAll('/', Platform.pathSeparator);
+    fixtureB = '${tempDir.path}/studies-b.db'
+        .replaceAll('/', Platform.pathSeparator);
     for (final path in [fixtureA, fixtureB]) {
       final db = await databaseFactory.openDatabase(path);
       await db.execute('CREATE TABLE studies (id INTEGER PRIMARY KEY, '
@@ -66,7 +71,8 @@ void main() {
   });
 
   test('addCustom rejects non-studies DB', () async {
-    final wrongPath = '${tempDir.path}/wrong.db';
+    final wrongPath = '${tempDir.path}/wrong.db'
+        .replaceAll('/', Platform.pathSeparator);
     final db = await databaseFactory.openDatabase(wrongPath);
     await db.execute('CREATE TABLE foo (id INTEGER PRIMARY KEY)');
     await db.close();
@@ -112,7 +118,8 @@ void main() {
     // Single-DB dir so refreshHealth is provably probing THIS entry when
     // the pin toggle lands during its async db.open gap.
     final soloDir = await Directory.systemTemp.createTemp('studies_solo_');
-    final solo = '${soloDir.path}/studies-solo.db';
+    final solo = '${soloDir.path}/studies-solo.db'
+        .replaceAll('/', Platform.pathSeparator);
     final db = await databaseFactory.openDatabase(solo);
     await db.execute('CREATE TABLE studies (id INTEGER PRIMARY KEY, '
         'name TEXT NOT NULL, strategy TEXT NOT NULL, '
