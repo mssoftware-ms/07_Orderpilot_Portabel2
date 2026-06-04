@@ -229,3 +229,42 @@ bool regimePassesFilter(
   }
   return true;
 }
+
+// ─── Fee-aware risk sizing (engine-shared, N-08) ───────────────────────────
+
+/// Convert a price-risk budget into a notional allocation percentage of
+/// equity (`0–100`), accounting for round-trip taker fees.
+///
+/// Bit-for-bit mirror of `position_size_pct_fee_aware` in
+/// `rust/trading_engine/src/addins/bb_rsi.rs` (Welle N-08), which all three
+/// Rust strategies (BB+RSI, UT-Bot, Ichimoku) consume at signal-construction
+/// time. The Dart engines previously used the legacy no-fee helper
+/// (`risk_per_trade * entry / sl_dist`), which over-sized every position and
+/// drove the Dart↔Rust Phase-1 parity drift (F-10).
+///
+/// Net SL loss per unit is `|entry - sl| + fee_rate * (entry + sl)`; solving
+/// for notional allocation as a percentage of equity gives
+/// `100 * risk_per_trade / (sl_dist/entry + fee_rate * (1 + sl/entry))`,
+/// clamped to `[0, 100]` (this engine does not model leveraged notional
+/// above full-balance allocation). Call sites divide the result by `100` to
+/// obtain the `size_fraction` the fill path multiplies against balance —
+/// mirroring the Rust engine's `balance * (size_pct / 100)`.
+double positionSizePctFeeAware(
+  double entryPrice,
+  double slPrice,
+  double riskPerTrade,
+  double feeRate,
+) {
+  if (entryPrice <= 0.0 ||
+      slPrice <= 0.0 ||
+      riskPerTrade <= 0.0 ||
+      feeRate < 0.0) {
+    return 0.0;
+  }
+  final slDistance = (entryPrice - slPrice).abs();
+  if (slDistance <= 0.0) return 0.0;
+  final denominator =
+      slDistance / entryPrice + feeRate * (1.0 + slPrice / entryPrice);
+  if (denominator <= 0.0 || !denominator.isFinite) return 0.0;
+  return (100.0 * riskPerTrade / denominator).clamp(0.0, 100.0);
+}

@@ -913,12 +913,17 @@ class BacktestService {
                 // is documented in the Welle-2 QA brief).
                 final slDistanceLong = close - slLong;
                 final tpLong = close + params.tpRrRatio * slDistanceLong;
-                // Diff D-09: size = risk_per_trade × entry / sl_distance,
-                // clamped to full balance. Algebraically identical to the
-                // Rust `position_size_pct` helper / 100.
-                final sizeLong =
-                    (params.riskPerTrade * close / slDistanceLong)
-                        .clamp(0.0, 1.0);
+                // Diff D-09 + N-08: fee-aware risk sizing — mirrors the Rust
+                // `position_size_pct_fee_aware(price, sl, risk, fee) / 100`
+                // (bb_rsi.rs:497). The legacy `risk × entry / sl_dist` form
+                // over-sized every position and caused the F-10 parity drift.
+                final sizeLong = positionSizePctFeeAware(
+                      close,
+                      slLong,
+                      params.riskPerTrade,
+                      feeRate,
+                    ) /
+                    100.0;
                 pending = _PendingEnterLong(slLong, tpLong, sizeLong);
               } else if (slLong != null &&
                   slShort != null &&
@@ -930,9 +935,14 @@ class BacktestService {
                 final slDistanceShort = slShort - close;
                 final tpShort =
                     close - params.tpRrRatio * slDistanceShort;
-                final sizeShort =
-                    (params.riskPerTrade * close / slDistanceShort)
-                        .clamp(0.0, 1.0);
+                // N-08: fee-aware risk sizing (mirror of bb_rsi.rs:521).
+                final sizeShort = positionSizePctFeeAware(
+                      close,
+                      slShort,
+                      params.riskPerTrade,
+                      feeRate,
+                    ) /
+                    100.0;
                 pending = _PendingEnterShort(slShort, tpShort, sizeShort);
               }
             }
@@ -1360,8 +1370,14 @@ class BacktestService {
               if (swing != null && swing < price) {
                 final slDist = price - swing;
                 final tp = price + params.tpRrRatio * slDist;
-                final size = (params.riskPerTrade * price / slDist)
-                    .clamp(0.0, 1.0);
+                // N-08: fee-aware risk sizing (mirror of ut_bot.rs:566).
+                final size = positionSizePctFeeAware(
+                      price,
+                      swing,
+                      params.riskPerTrade,
+                      feeRate,
+                    ) /
+                    100.0;
                 pending = _PendingEnterLong(swing, tp, size);
               }
             } else if (price < ema &&
@@ -1378,8 +1394,14 @@ class BacktestService {
               if (swing != null && swing > price) {
                 final slDist = swing - price;
                 final tp = price - params.tpRrRatio * slDist;
-                final size = (params.riskPerTrade * price / slDist)
-                    .clamp(0.0, 1.0);
+                // N-08: fee-aware risk sizing (mirror of ut_bot.rs:585).
+                final size = positionSizePctFeeAware(
+                      price,
+                      swing,
+                      params.riskPerTrade,
+                      feeRate,
+                    ) /
+                    100.0;
                 pending = _PendingEnterShort(swing, tp, size);
               }
             }
@@ -1755,8 +1777,14 @@ class BacktestService {
               final slDist = close - sl;
               if (slDist > 0) {
                 final tp = close + params.tpRrRatio * slDist;
-                final size = (params.riskPerTrade * close / slDist)
-                    .clamp(0.0, 1.0);
+                // N-08: fee-aware risk sizing (mirror of ichimoku.rs:711).
+                final size = positionSizePctFeeAware(
+                      close,
+                      sl,
+                      params.riskPerTrade,
+                      feeRate,
+                    ) /
+                    100.0;
                 pending = _PendingEnterLong(sl, tp, size);
               }
             } else {
@@ -1775,8 +1803,14 @@ class BacktestService {
                 final slDist = sl - close;
                 if (slDist > 0) {
                   final tp = close - params.tpRrRatio * slDist;
-                  final size = (params.riskPerTrade * close / slDist)
-                      .clamp(0.0, 1.0);
+                  // N-08: fee-aware risk sizing (mirror of ichimoku.rs:732).
+                  final size = positionSizePctFeeAware(
+                        close,
+                        sl,
+                        params.riskPerTrade,
+                        feeRate,
+                      ) /
+                      100.0;
                   pending = _PendingEnterShort(sl, tp, size);
                 }
               }
