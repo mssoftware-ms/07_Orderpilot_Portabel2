@@ -122,6 +122,62 @@ void main() {
       final fresh = StudiesDb();
       expect(() => fresh.listStudies(), throwsA(isA<StateError>()));
     });
+
+    // ─── Welle O3-B4 — cross-study profitable filter ──────────────────────
+    //
+    // Fixture (strategy bb_rsi, study "fixture_bb_rsi_5trials"):
+    //   trial 1: pnl 120.5, trades 4   (profitable)
+    //   trial 2: pnl 450.0, trades 12  (profitable)
+    //   trial 4: pnl  60.0, trades 7   (profitable)
+    //   trials 0/3: pnl 0.0, score -inf (not profitable)
+    //   trial 5: malformed metrics_json (skipped via json_valid guard)
+    test('topNProfitable: keeps only profitable rows, skips malformed/0-pnl',
+        () async {
+      final all = await db.topNProfitable(minTrades: 0, limit: 50);
+      expect(all.length, 3);
+      expect(all.every((r) => r.trial.metrics.totalPnl > 0), isTrue);
+      // Default sort is score desc → trial 2 (score 2.10) leads.
+      expect(all.first.trial.trialId, 2);
+      expect(all.first.trial.metrics.totalPnl,
+          greaterThan(all.last.trial.metrics.totalPnl));
+      // Strategy + study name are denormalized from the studies row.
+      expect(all.first.strategy, 'bb_rsi');
+      expect(all.first.studyName, 'fixture_bb_rsi_5trials');
+      // The malformed-metrics_json trial 5 must never surface.
+      expect(all.any((r) => r.trial.trialId == 5), isFalse);
+    });
+
+    test('topNProfitable: min_trades cutoff drops low-sample trials',
+        () async {
+      // Profitable trials carry 4 / 12 / 7 trades. min_trades=10 keeps only
+      // the 12-trade trial; a cutoff above the max empties the result.
+      final cut10 = await db.topNProfitable(minTrades: 10, limit: 50);
+      expect(cut10.length, 1);
+      expect(cut10.every((r) => r.trial.metrics.totalTrades >= 10), isTrue);
+      final cut13 = await db.topNProfitable(minTrades: 13, limit: 50);
+      expect(cut13, isEmpty);
+    });
+
+    test('topNProfitable: respects limit', () async {
+      final one = await db.topNProfitable(minTrades: 0, limit: 1);
+      expect(one.length, 1);
+    });
+
+    test('topNProfitable: sortBy=pnl reorders by totalPnl desc', () async {
+      final byPnl =
+          await db.topNProfitable(minTrades: 0, limit: 50, sortBy: 'pnl');
+      expect(byPnl.first.trial.metrics.totalPnl, 450.0);
+      expect(byPnl.last.trial.metrics.totalPnl, 60.0);
+    });
+
+    test('healthSnapshot returns counts (malformed row tolerated)', () async {
+      final h = await db.healthSnapshot();
+      expect(h.studyCount, 1);
+      // 6 physical trial rows (incl. the malformed one).
+      expect(h.totalTrialCount, 6);
+      // 3 with total_pnl > 0; malformed row skipped by json_valid.
+      expect(h.profitableTrialCount, 3);
+    });
   });
 
   // ─── Welle O3-B2.1 — friendly schema preflight ────────────────────────────

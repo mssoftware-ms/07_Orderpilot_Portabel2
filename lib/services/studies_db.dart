@@ -11,8 +11,11 @@ library;
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 
 import '../core/logging/app_log.dart';
+import '../core/models/leaderboard_row.dart';
+import '../core/models/library_entry.dart';
 import '../core/models/study.dart';
 import '../core/models/trial.dart';
+import '../core/models/trial_metrics.dart';
 
 /// Thrown by [StudiesDb.open] when the picked file is not a usable
 /// Optuna-style studies database — either because it is not a SQLite
@@ -168,6 +171,183 @@ class StudiesDb {
       [studyId],
     );
     return _parseTrialRows(rows);
+  }
+
+  /// Welle O3-B4: cross-study profitable trials within a single DB.
+  ///
+  /// Filters on `total_pnl > 0` and `total_trades >= minTrades`, drops
+  /// `-inf` scores (defensive). `sortBy` ∈ {score, pnl, sharpe, pf,
+  /// trades, winRate}; defaults to `score`. Result rows are denormalized
+  /// with strategy + study name so the UI does not need a second JOIN.
+  ///
+  /// The SQL `WHERE` carries a `json_valid(metrics_json)` guard so a
+  /// single malformed `metrics_json` row is skipped (matching the
+  /// skip-and-warn behaviour of [_parseTrialRows]) instead of aborting
+  /// the whole query — `json_extract` raises a hard SQL error on
+  /// malformed JSON. The Dart fallback in [_topNProfitableFallback] is
+  /// reached only if the engine lacks the JSON1 extension entirely
+  /// (both `json_valid` and `json_extract` missing → DatabaseException).
+  Future<List<LeaderboardRow>> topNProfitable({
+    int minTrades = 20,
+    int limit = 10,
+    String sortBy = 'score',
+  }) async {
+    final db = _require();
+    if (_jsonExtractAvailable ?? true) {
+      try {
+        return await _topNProfitableSql(db,
+            minTrades: minTrades, limit: limit, sortBy: sortBy);
+      } on DatabaseException catch (e) {
+        // JSON1 functions missing — cache the negative result and fall back.
+        AppLog.warn('StudiesDb',
+            'JSON1 functions unavailable, switching to client-side filter: $e');
+        _jsonExtractAvailable = false;
+      }
+    }
+    return _topNProfitableFallback(db,
+        minTrades: minTrades, limit: limit, sortBy: sortBy);
+  }
+
+  bool? _jsonExtractAvailable;
+
+  static const Map<String, String> _sortColumnMap = {
+    'score': 't.score',
+    'pnl': "CAST(json_extract(t.metrics_json, '\$.total_pnl') AS REAL)",
+    'sharpe': "CAST(json_extract(t.metrics_json, '\$.sharpe_ratio') AS REAL)",
+    'pf': "CAST(json_extract(t.metrics_json, '\$.profit_factor') AS REAL)",
+    'trades':
+        "CAST(json_extract(t.metrics_json, '\$.total_trades') AS INTEGER)",
+    'winRate': "CAST(json_extract(t.metrics_json, '\$.win_rate') AS REAL)",
+  };
+
+  Future<List<LeaderboardRow>> _topNProfitableSql(
+    Database db, {
+    required int minTrades,
+    required int limit,
+    required String sortBy,
+  }) async {
+    final orderExpr = _sortColumnMap[sortBy] ?? 't.score';
+    final rows = await db.rawQuery(
+      'SELECT t.*, s.strategy AS _strategy, s.name AS _study_name '
+      'FROM trials t JOIN studies s ON t.study_id = s.id '
+      'WHERE t.score > -1e308 '
+      '  AND json_valid(t.metrics_json) '
+      "  AND CAST(json_extract(t.metrics_json, '\$.total_pnl') AS REAL) > 0 "
+      "  AND CAST(json_extract(t.metrics_json, '\$.total_trades') AS INTEGER) >= ? "
+      'ORDER BY $orderExpr DESC '
+      'LIMIT ?',
+      [minTrades, limit],
+    );
+    return _mapToLeaderboardRows(rows);
+  }
+
+  Future<List<LeaderboardRow>> _topNProfitableFallback(
+    Database db, {
+    required int minTrades,
+    required int limit,
+    required String sortBy,
+  }) async {
+    // Client-side: join studies + trials, parse metrics in Dart, filter,
+    // sort. O(total_trials_in_db) per call — acceptable for ≤10k trials.
+    final rows = await db.rawQuery(
+      'SELECT t.*, s.strategy AS _strategy, s.name AS _study_name '
+      'FROM trials t JOIN studies s ON t.study_id = s.id '
+      'WHERE t.score > -1e308',
+    );
+    final all = _mapToLeaderboardRows(rows)
+        .where((r) =>
+            r.trial.metrics.totalPnl > 0 &&
+            r.trial.metrics.totalTrades >= minTrades)
+        .toList();
+    int cmp(LeaderboardRow a, LeaderboardRow b) {
+      switch (sortBy) {
+        case 'pnl':
+          return b.trial.metrics.totalPnl.compareTo(a.trial.metrics.totalPnl);
+        case 'sharpe':
+          return b.trial.metrics.sharpeRatio
+              .compareTo(a.trial.metrics.sharpeRatio);
+        case 'pf':
+          return b.trial.metrics.profitFactor
+              .compareTo(a.trial.metrics.profitFactor);
+        case 'trades':
+          return b.trial.metrics.totalTrades
+              .compareTo(a.trial.metrics.totalTrades);
+        case 'winRate':
+          return b.trial.metrics.winRate.compareTo(a.trial.metrics.winRate);
+        case 'score':
+        default:
+          return b.trial.score.compareTo(a.trial.score);
+      }
+    }
+
+    all.sort(cmp);
+    return all.take(limit).toList();
+  }
+
+  List<LeaderboardRow> _mapToLeaderboardRows(
+      List<Map<String, Object?>> rows) {
+    final out = <LeaderboardRow>[];
+    for (final row in rows) {
+      try {
+        final trial = Trial.fromRow(row);
+        out.add(LeaderboardRow(
+          trial: trial,
+          strategy: row['_strategy'] as String,
+          studyName: row['_study_name'] as String,
+          studyDbId: trial.studyId,
+          dbPath: _path ?? '',
+        ));
+      } catch (e, st) {
+        AppLog.warn('StudiesDb',
+            'Skipped malformed leaderboard row id=${row['id']}: $e', e, st);
+      }
+    }
+    return out;
+  }
+
+  /// Welle O3-B4: lightweight counts for the Library health dot. The
+  /// profitable-count query carries the same `json_valid` guard +
+  /// JSON1-missing fallback as [topNProfitable].
+  Future<LibraryHealth> healthSnapshot() async {
+    final db = _require();
+    final studyCountRow =
+        await db.rawQuery('SELECT COUNT(*) AS c FROM studies');
+    final totalRow = await db.rawQuery('SELECT COUNT(*) AS c FROM trials');
+    int profitableCount;
+    if (_jsonExtractAvailable ?? true) {
+      try {
+        final r = await db.rawQuery(
+          "SELECT COUNT(*) AS c FROM trials WHERE "
+          "json_valid(metrics_json) AND "
+          "CAST(json_extract(metrics_json, '\$.total_pnl') AS REAL) > 0",
+        );
+        profitableCount = (r.first['c'] as num).toInt();
+      } on DatabaseException {
+        _jsonExtractAvailable = false;
+        profitableCount = await _profitableCountFallback(db);
+      }
+    } else {
+      profitableCount = await _profitableCountFallback(db);
+    }
+    return LibraryHealth(
+      studyCount: (studyCountRow.first['c'] as num).toInt(),
+      profitableTrialCount: profitableCount,
+      totalTrialCount: (totalRow.first['c'] as num).toInt(),
+      dbMtimeMs: 0, // filled by StudiesLibrary, not by StudiesDb
+    );
+  }
+
+  Future<int> _profitableCountFallback(Database db) async {
+    final all = await db.rawQuery('SELECT metrics_json FROM trials');
+    var count = 0;
+    for (final row in all) {
+      try {
+        final metrics =
+            TrialMetrics.fromJsonString(row['metrics_json'] as String);
+        if (metrics.totalPnl > 0) count++;
+      } catch (_) {/* skip malformed */}
+    }
+    return count;
   }
 
   List<Trial> _parseTrialRows(List<Map<String, Object?>> rows) {
