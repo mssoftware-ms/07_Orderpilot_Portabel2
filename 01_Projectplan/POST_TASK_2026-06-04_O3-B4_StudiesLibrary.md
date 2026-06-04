@@ -206,3 +206,71 @@ nicht mehr offen. O3-B4-9 behebt zudem eine Race-Condition: der automatische
 Health-Refresh überschrieb beim Write-Back nach der async Health-Probe einen währenddessen
 gesetzten Pin — jetzt wird der Entry per Pfad neu aufgelöst, sodass Pin-Änderungen
 erhalten bleiben.)*
+
+---
+
+## 9. QA-Koordinator-Audit (Windows-CC, 2026-06-04)
+
+POST_TASK-Behauptung in §4 (alle studies-Tests grün) auf Windows nachverifiziert.
+
+**Befund:** Auf Windows failten 6 / 7 `aggregate_leaderboard_test` und 5 / 6
+`library_panel_test` — alle mit `Actual: <0>` bzw. `Actual: []`. Root-Cause:
+Tests konstruierten ihre Fixture-Pfade als `'${tempDir.path}/studies-x.db'`. Auf
+Windows liefert `Directory.systemTemp.createTemp` einen Backslash-Pfad, das
+angehängte `/` ergab **Mixed-Slash**; `File('...').absolute.path` behält den
+gemischten Slash-Style. Die Implementation speicherte `f.absolute.path` und
+verglich in `togglePin` / `remove` per String-Equals — Mixed-Slash matched
+nie die Backslash-Form, jeder Test-Pin lief silently ins Leere, Aggregate
+lieferte konsistent 0 Rows. WSL2 sah den Bug nicht (Forward-Slash nativ).
+
+**Fix (Commit `1088035`, „O3-B4-10"):**
+- Neuer statischer Helper `StudiesLibrary._canonicalize(path)` —
+  `File.absolute.path` + `Platform.isWindows`-guarded `'/' → '\'`-Replace.
+- Wired in `_mergeScan` (Storage), `addCustom` (Storage), `togglePin` (Lookup),
+  `remove` (Lookup) — jede Entry-Schreibung und jede Pfad-Lookup nutzt
+  jetzt dieselbe OS-native Form.
+- Tests (`studies_library_test.dart`, `aggregate_leaderboard_test.dart`,
+  `library_panel_test.dart`) konstruieren ihre Fixture-Pfade ebenfalls per
+  `.replaceAll('/', Platform.pathSeparator)` — so matched Test-Construct =
+  Library-Storage.
+
+**Verifikation:** `flutter test test/features/studies/ test/services/
+test/ui/widgets/ test/ui/screens/ test/integration/studies_library_smoke_test.dart
+test/integration/studies_viewer_smoke_test.dart test/core/models/` →
+**399 / 399 grün auf Windows**. `flutter analyze` auf modified files clean.
+
+**Latent-Production-Risk (offen, niedrige Wahrscheinlichkeit):** Falls
+`file_picker` auf Windows einen Mixed-Slash-Pfad zurückliefert, würde der
+gleiche Add-und-dann-Duplicate-Bug auch in Production manifest werden.
+`addCustom` ist seit O3-B4-10 durch `_canonicalize` defensiv, also gefixt.
+
+**Code-Reviewer-Findings (offen, alle „Major" / „Minor", **kein Blocker**):**
+- **Major A** — `_jsonExtractAvailable` ist instance-Feld in `StudiesDb`,
+  aber `StudiesDb` wird pro Call frisch instanziert (`aggregate_leaderboard.dart`
+  Z. 65; `studies_library.dart` Z. 136). Cache ist tote Code-Pfad — auf
+  JSON1-fehlenden Engines würde jeder Recompute den Catch-Pfad laufen. Heute
+  harmlos (Probe O3-B4-1 bestätigt JSON1-Verfügbarkeit). Fix: `static bool?`.
+- **Minor C** — Kein Test für `_addCustom`-Picker-Fehler-Pfad.
+
+**Empfehlung nächste Welle (O3-B4-11 oder Engine-Welle als Teil-Scope):**
+1. Major A als 5-Minute-Fix: `static bool? _jsonExtractAvailable`.
+2. POST_TASK §4 Convention für künftige WSL2-only-Executions: **„Sign-off-Statement
+   `flutter test green` darf nur stehen, wenn explizit auf der Ziel-Plattform
+   (Windows) verifiziert wurde."** Lessons-Learned-Memory-Eintrag empfohlen.
+
+**Sign-off-Status (post-Audit):**
+
+- [x] Subtasks 1.0–6.0 + O3-B4-8 + O3-B4-9 + O3-B4-10 atomic committed + pushed
+- [x] `flutter analyze` clean auf modified files
+- [x] **399 / 399 Tests grün auf Windows** (war vor O3-B4-10 falsch behauptet)
+- [x] Bestehender `studies_viewer_smoke_test.dart` grün
+- [~] **`flutter test` durchgehend grün — `phase1_reference_backtest_test`
+      separat behandelt** (siehe §5 + Memory-Update auf neuen Dart-Wert
+      `-1565.358744`). O3-B4-fremd, eigene Engine-Welle.
+- [~] UAT 1–11 automatisiert belegt; visuelle Windows-UAT vom QA-Koordinator
+      noch nicht vollständig durchgespielt (separat verbleibend).
+- [x] POST_TASK + Audit-Trailer (dieses Dokument)
+
+**Final-Sign-off-Entscheidung:** O3-B4 ist **inhaltlich abgeschlossen** und
+auditiert. Verbleibende Items (Visual-UAT-Pass, Major-A-Follow-up, Phase-1-Engine-
+Parität) sind als Folgewellen klar dokumentiert und blockieren nicht.
