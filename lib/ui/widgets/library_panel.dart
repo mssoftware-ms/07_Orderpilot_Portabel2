@@ -13,7 +13,12 @@ import '../../features/studies/studies_library.dart';
 import '../themes/app_theme.dart';
 
 class LibraryPanel extends StatelessWidget {
-  const LibraryPanel({super.key});
+  /// Invoked when a library row body (not the pin button) is tapped —
+  /// wired by StudiesScreen to load that DB into the per-study
+  /// drill-down (PRE_TASK §7.7). Null in isolated widget tests.
+  final void Function(String path)? onOpenDb;
+
+  const LibraryPanel({super.key, this.onOpenDb});
 
   Future<void> _addCustom(BuildContext context) async {
     try {
@@ -28,11 +33,15 @@ class LibraryPanel extends StatelessWidget {
       final lib = context.read<StudiesLibrary>();
       final ok = await lib.addCustom(path);
       if (!context.mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-        content: Text(ok
-            ? 'Added to library'
-            : 'Not an Optuna studies DB — entry not added'),
-      ));
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            ok
+                ? 'Added to library'
+                : 'Not an Optuna studies DB — entry not added',
+          ),
+        ),
+      );
     } catch (e, st) {
       AppLog.error('LibraryPanel', 'addCustom failed: $e', e, st);
     }
@@ -53,14 +62,20 @@ class LibraryPanel extends StatelessWidget {
         children: [
           Row(
             children: [
-              const Icon(Icons.library_books,
-                  size: 18, color: AppColors.accentCyan),
+              const Icon(
+                Icons.library_books,
+                size: 18,
+                color: AppColors.accentCyan,
+              ),
               const SizedBox(width: 8),
-              const Text('Studies library',
-                  style: TextStyle(
-                      color: AppColors.textPrimary,
-                      fontSize: 14,
-                      fontWeight: FontWeight.w600)),
+              const Text(
+                'Studies library',
+                style: TextStyle(
+                  color: AppColors.textPrimary,
+                  fontSize: 14,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
               const Spacer(),
               ElevatedButton.icon(
                 key: const Key('library-add-custom'),
@@ -71,17 +86,22 @@ class LibraryPanel extends StatelessWidget {
                   backgroundColor: AppColors.accentCyan,
                   foregroundColor: Colors.black,
                   shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(8)),
+                    borderRadius: BorderRadius.circular(8),
+                  ),
                 ),
               ),
             ],
           ),
           const SizedBox(height: 12),
           if (lib.entries.isEmpty)
-            const Text('No studies databases yet',
-                style: TextStyle(color: AppColors.textMuted, fontSize: 12))
+            const Text(
+              'No studies databases yet',
+              style: TextStyle(color: AppColors.textMuted, fontSize: 12),
+            )
           else
-            ...lib.entries.map((e) => _LibraryRow(entry: e, library: lib)),
+            ...lib.entries.map(
+              (e) => _LibraryRow(entry: e, library: lib, onOpenDb: onOpenDb),
+            ),
         ],
       ),
     );
@@ -91,7 +111,12 @@ class LibraryPanel extends StatelessWidget {
 class _LibraryRow extends StatelessWidget {
   final LibraryEntry entry;
   final StudiesLibrary library;
-  const _LibraryRow({required this.entry, required this.library});
+  final void Function(String path)? onOpenDb;
+  const _LibraryRow({
+    required this.entry,
+    required this.library,
+    this.onOpenDb,
+  });
 
   Color get _healthColor {
     final h = entry.health;
@@ -111,51 +136,64 @@ class _LibraryRow extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final h = entry.health;
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 4),
-      child: Row(
-        children: [
-          Container(
-            width: 10,
-            height: 10,
-            decoration: BoxDecoration(
-              color: _healthColor,
-              shape: BoxShape.circle,
+    return InkWell(
+      key: Key('library-open-${entry.path}'),
+      onTap: onOpenDb == null ? null : () => onOpenDb!(entry.path),
+      borderRadius: BorderRadius.circular(6),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 4),
+        child: Row(
+          children: [
+            Container(
+              width: 10,
+              height: 10,
+              decoration: BoxDecoration(
+                color: _healthColor,
+                shape: BoxShape.circle,
+              ),
             ),
-          ),
-          const SizedBox(width: 10),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(_displayName,
+            const SizedBox(width: 10),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    _displayName,
                     style: const TextStyle(
-                        color: AppColors.textPrimary, fontSize: 13)),
-                Text(
-                  library.isMissing(entry)
-                      ? 'File missing'
-                      : h == null
-                          ? 'Not scanned yet'
-                          : '${h.studyCount} studies · '
+                      color: AppColors.textPrimary,
+                      fontSize: 13,
+                    ),
+                  ),
+                  Text(
+                    library.isMissing(entry)
+                        ? 'File missing'
+                        : h == null
+                        ? 'Not scanned yet'
+                        : '${h.studyCount} studies · '
                               '${h.profitableTrialCount}/${h.totalTrialCount} '
                               'profitable',
-                  style: const TextStyle(
-                      color: AppColors.textMuted, fontSize: 11),
-                ),
-              ],
+                    style: const TextStyle(
+                      color: AppColors.textMuted,
+                      fontSize: 11,
+                    ),
+                  ),
+                ],
+              ),
             ),
-          ),
-          IconButton(
-            key: Key('library-pin-${entry.path}'),
-            icon: Icon(
-              entry.pinned ? Icons.push_pin : Icons.push_pin_outlined,
-              color: entry.pinned ? AppColors.accentCyan : AppColors.textMuted,
-              size: 18,
+            IconButton(
+              key: Key('library-pin-${entry.path}'),
+              icon: Icon(
+                entry.pinned ? Icons.push_pin : Icons.push_pin_outlined,
+                color: entry.pinned
+                    ? AppColors.accentCyan
+                    : AppColors.textMuted,
+                size: 18,
+              ),
+              tooltip: entry.pinned ? 'Unpin' : 'Pin',
+              onPressed: () => library.togglePin(entry.path),
             ),
-            tooltip: entry.pinned ? 'Unpin' : 'Pin',
-            onPressed: () => library.togglePin(entry.path),
-          ),
-        ],
+          ],
+        ),
       ),
     );
   }

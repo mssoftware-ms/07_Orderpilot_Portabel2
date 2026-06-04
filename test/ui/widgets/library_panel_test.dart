@@ -57,4 +57,34 @@ void main() {
 
     tempDir.deleteSync(recursive: true);
   });
+
+  testWidgets('row body tap fires onOpenDb with the entry path',
+      (tester) async {
+    SharedPreferences.setMockInitialValues({});
+    final tempDir =
+        Directory.systemTemp.createTempSync('library_panel_open_');
+    final dbPath = '${tempDir.path}/studies-y.db';
+    File(dbPath).createSync(recursive: true);
+
+    final lib = StudiesLibrary(storage: LibraryStorage());
+    await lib.boot(scanDirs: [tempDir.path]);
+
+    String? opened;
+    await tester.pumpWidget(
+      MaterialApp(
+        home: ChangeNotifierProvider.value(
+          value: lib,
+          child: Scaffold(
+            body: LibraryPanel(onOpenDb: (p) => opened = p),
+          ),
+        ),
+      ),
+    );
+    // Tap the row body (the filename text), not the pin button.
+    await tester.tap(find.text('studies-y.db'));
+    await tester.pump();
+    expect(opened, dbPath);
+
+    tempDir.deleteSync(recursive: true);
+  });
 }

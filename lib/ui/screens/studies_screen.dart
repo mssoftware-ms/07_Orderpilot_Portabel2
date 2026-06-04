@@ -77,7 +77,9 @@ class _StudiesBody extends StatelessWidget {
         children: [
           // Welle O3-B4: multi-DB Library + Global Leaderboard above the
           // existing single-DB picker + per-study drill-down sections.
-          const LibraryPanel(),
+          // Tapping a library row loads that DB into the per-study
+          // drill-down (PRE_TASK §7.7).
+          LibraryPanel(onOpenDb: (path) => provider.loadDb(path)),
           const SizedBox(height: 16),
           Container(
             padding: const EdgeInsets.all(16),
@@ -91,14 +93,20 @@ class _StudiesBody extends StatelessWidget {
               children: const [
                 Row(
                   children: [
-                    Icon(Icons.emoji_events,
-                        size: 18, color: AppColors.accentCyan),
+                    Icon(
+                      Icons.emoji_events,
+                      size: 18,
+                      color: AppColors.accentCyan,
+                    ),
                     SizedBox(width: 8),
-                    Text('Global leaderboard',
-                        style: TextStyle(
-                            color: AppColors.textPrimary,
-                            fontSize: 14,
-                            fontWeight: FontWeight.w600)),
+                    Text(
+                      'Global leaderboard',
+                      style: TextStyle(
+                        color: AppColors.textPrimary,
+                        fontSize: 14,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
                   ],
                 ),
                 SizedBox(height: 12),
@@ -111,12 +119,15 @@ class _StudiesBody extends StatelessWidget {
           const SizedBox(height: 24),
           const Divider(color: AppColors.divider),
           const SizedBox(height: 16),
-          const Text('Per-study drill-down',
-              style: TextStyle(
-                  color: AppColors.textSecondary,
-                  fontSize: 11,
-                  fontWeight: FontWeight.w600,
-                  letterSpacing: 0.5)),
+          const Text(
+            'Per-study drill-down',
+            style: TextStyle(
+              color: AppColors.textSecondary,
+              fontSize: 11,
+              fontWeight: FontWeight.w600,
+              letterSpacing: 0.5,
+            ),
+          ),
           const SizedBox(height: 12),
           _PickerSection(provider: provider),
           const SizedBox(height: 16),
@@ -165,8 +176,7 @@ class _PickerSection extends StatelessWidget {
       if (path == null) return;
       await provider.loadDb(path);
     } catch (e, st) {
-      AppLog.error('StudiesScreen',
-          'File picker failed: $e', e, st);
+      AppLog.error('StudiesScreen', 'File picker failed: $e', e, st);
     }
   }
 
@@ -184,27 +194,32 @@ class _PickerSection extends StatelessWidget {
         children: [
           Row(
             children: [
-              const Icon(Icons.folder_open,
-                  size: 18, color: AppColors.accentCyan),
+              const Icon(
+                Icons.folder_open,
+                size: 18,
+                color: AppColors.accentCyan,
+              ),
               const SizedBox(width: 8),
-              const Text('Optimizer studies database',
-                  style: TextStyle(
-                    color: AppColors.textPrimary,
-                    fontSize: 14,
-                    fontWeight: FontWeight.w600,
-                  )),
+              const Text(
+                'Optimizer studies database',
+                style: TextStyle(
+                  color: AppColors.textPrimary,
+                  fontSize: 14,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
               const Spacer(),
               ElevatedButton.icon(
                 key: const Key('studies-pick-db-button'),
-                onPressed:
-                    provider.isLoading ? null : () => _pickDb(context),
+                onPressed: provider.isLoading ? null : () => _pickDb(context),
                 icon: const Icon(Icons.file_open, size: 16),
                 label: const Text('Pick .db'),
                 style: ElevatedButton.styleFrom(
                   backgroundColor: AppColors.accentCyan,
                   foregroundColor: Colors.black,
                   shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(8)),
+                    borderRadius: BorderRadius.circular(8),
+                  ),
                 ),
               ),
             ],
@@ -213,8 +228,7 @@ class _PickerSection extends StatelessWidget {
           if (provider.dbPath != null) ...[
             Text(
               provider.dbPath!,
-              style: const TextStyle(
-                  color: AppColors.textMuted, fontSize: 11),
+              style: const TextStyle(color: AppColors.textMuted, fontSize: 11),
               overflow: TextOverflow.ellipsis,
             ),
             const SizedBox(height: 12),
@@ -260,27 +274,28 @@ class _StudyDropdown extends StatelessWidget {
           value: provider.selectedStudy?.id,
           isExpanded: true,
           dropdownColor: AppColors.surfaceElevated,
-          style: const TextStyle(
-              color: AppColors.textPrimary, fontSize: 13),
+          style: const TextStyle(color: AppColors.textPrimary, fontSize: 13),
           items: studies
-              .map((Study s) => DropdownMenuItem<int>(
-                    value: s.id,
-                    child: Row(
-                      children: [
-                        Text(s.strategy,
-                            style: const TextStyle(
-                                color: AppColors.accentPurple,
-                                fontWeight: FontWeight.w600)),
-                        const SizedBox(width: 8),
-                        Expanded(
-                          child: Text(
-                            s.name,
-                            overflow: TextOverflow.ellipsis,
-                          ),
+              .map(
+                (Study s) => DropdownMenuItem<int>(
+                  value: s.id,
+                  child: Row(
+                    children: [
+                      Text(
+                        s.strategy,
+                        style: const TextStyle(
+                          color: AppColors.accentPurple,
+                          fontWeight: FontWeight.w600,
                         ),
-                      ],
-                    ),
-                  ))
+                      ),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: Text(s.name, overflow: TextOverflow.ellipsis),
+                      ),
+                    ],
+                  ),
+                ),
+              )
               .toList(),
           onChanged: provider.isLoading
               ? null
@@ -313,15 +328,16 @@ class _Top10Placeholder extends StatelessWidget {
         children: [
           const Row(
             children: [
-              Icon(Icons.leaderboard,
-                  size: 18, color: AppColors.accentCyan),
+              Icon(Icons.leaderboard, size: 18, color: AppColors.accentCyan),
               SizedBox(width: 8),
-              Text('Top-10 trials',
-                  style: TextStyle(
-                    color: AppColors.textPrimary,
-                    fontSize: 14,
-                    fontWeight: FontWeight.w600,
-                  )),
+              Text(
+                'Top-10 trials',
+                style: TextStyle(
+                  color: AppColors.textPrimary,
+                  fontSize: 14,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
             ],
           ),
           const SizedBox(height: 12),
@@ -358,15 +374,16 @@ class _ConvergencePlaceholder extends StatelessWidget {
         children: [
           const Row(
             children: [
-              Icon(Icons.scatter_plot,
-                  size: 18, color: AppColors.accentCyan),
+              Icon(Icons.scatter_plot, size: 18, color: AppColors.accentCyan),
               SizedBox(width: 8),
-              Text('Convergence plot',
-                  style: TextStyle(
-                    color: AppColors.textPrimary,
-                    fontSize: 14,
-                    fontWeight: FontWeight.w600,
-                  )),
+              Text(
+                'Convergence plot',
+                style: TextStyle(
+                  color: AppColors.textPrimary,
+                  fontSize: 14,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
             ],
           ),
           const SizedBox(height: 12),
@@ -378,8 +395,7 @@ class _ConvergencePlaceholder extends StatelessWidget {
           else
             ParamConvergencePlot(
               trials: provider.trials,
-              searchSpaceYaml:
-                  provider.selectedStudy?.searchSpaceYaml ?? '',
+              searchSpaceYaml: provider.selectedStudy?.searchSpaceYaml ?? '',
             ),
         ],
       ),
@@ -406,14 +422,12 @@ class _ErrorBanner extends StatelessWidget {
       ),
       child: Row(
         children: [
-          const Icon(Icons.error_outline,
-              size: 16, color: AppColors.bearRed),
+          const Icon(Icons.error_outline, size: 16, color: AppColors.bearRed),
           const SizedBox(width: 8),
           Expanded(
             child: Text(
               message,
-              style: const TextStyle(
-                  color: AppColors.bearRed, fontSize: 12),
+              style: const TextStyle(color: AppColors.bearRed, fontSize: 12),
             ),
           ),
         ],
@@ -434,7 +448,9 @@ class _LoadingIndicator extends StatelessWidget {
           width: 14,
           height: 14,
           child: CircularProgressIndicator(
-              strokeWidth: 2, color: AppColors.accentCyan),
+            strokeWidth: 2,
+            color: AppColors.accentCyan,
+          ),
         ),
         const SizedBox(width: 8),
         const Text(

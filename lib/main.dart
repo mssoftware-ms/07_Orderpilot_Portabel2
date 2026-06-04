@@ -31,8 +31,7 @@ void main() {
   // On the (non-web) host, swap the global databaseFactory to the FFI
   // variant. On web, the studies viewer is disabled at build time.
   WidgetsFlutterBinding.ensureInitialized();
-  if (!kIsWeb &&
-      (Platform.isLinux || Platform.isMacOS || Platform.isWindows)) {
+  if (!kIsWeb && (Platform.isLinux || Platform.isMacOS || Platform.isWindows)) {
     sqfliteFfiInit();
     databaseFactory = databaseFactoryFfi;
   }
@@ -53,8 +52,17 @@ class TradingApp extends StatelessWidget {
         // persistent pin-state); the leaderboard is a proxy of it so it
         // is constructed once and survives library notifications.
         ChangeNotifierProvider(
-          create: (_) => StudiesLibrary()
-            ..boot(scanDirs: const ['01_Projectplan/optimizer_studies']),
+          create: (_) {
+            final lib = StudiesLibrary();
+            // Boot (scan + persisted pins) then compute the health dots
+            // once. refreshHealth is chained here rather than inside
+            // boot() so the FakeAsync widget tests that await boot() never
+            // block on the sqflite health probe (real async).
+            lib
+                .boot(scanDirs: const ['01_Projectplan/optimizer_studies'])
+                .then((_) => lib.refreshHealth());
+            return lib;
+          },
         ),
         ChangeNotifierProxyProvider<StudiesLibrary, AggregateLeaderboard>(
           create: (ctx) =>
@@ -68,13 +76,11 @@ class TradingApp extends StatelessWidget {
         // for a single optional dependency.
         ChangeNotifierProvider(create: (_) => RiskManager()..loadConfig()),
         ChangeNotifierProvider(
-          create: (ctx) => PaperTradingProvider(
-            riskManager: ctx.read<RiskManager>(),
-          ),
+          create: (ctx) =>
+              PaperTradingProvider(riskManager: ctx.read<RiskManager>()),
         ),
         ChangeNotifierProvider(
-          create: (_) =>
-              BitunixConnectionProvider()..loadStoredCredentials(),
+          create: (_) => BitunixConnectionProvider()..loadStoredCredentials(),
         ),
         ChangeNotifierProvider(create: (_) => AppNavigation()),
         ChangeNotifierProvider<AppLogStore>.value(value: AppLog.instance),
@@ -106,13 +112,41 @@ class AppScaffold extends StatelessWidget {
   ];
 
   static const _navItems = <_NavItem>[
-    _NavItem(icon: Icons.dashboard_outlined, selectedIcon: Icons.dashboard, label: 'Home'),
-    _NavItem(icon: Icons.candlestick_chart_outlined, selectedIcon: Icons.candlestick_chart, label: 'Chart'),
-    _NavItem(icon: Icons.history_outlined, selectedIcon: Icons.history, label: 'Backtest'),
-    _NavItem(icon: Icons.analytics_outlined, selectedIcon: Icons.analytics, label: 'Studies'),
-    _NavItem(icon: Icons.play_circle_outline, selectedIcon: Icons.play_circle_filled, label: 'Paper'),
-    _NavItem(icon: Icons.extension_outlined, selectedIcon: Icons.extension, label: 'Strategies'),
-    _NavItem(icon: Icons.account_balance_wallet_outlined, selectedIcon: Icons.account_balance_wallet, label: 'Account'),
+    _NavItem(
+      icon: Icons.dashboard_outlined,
+      selectedIcon: Icons.dashboard,
+      label: 'Home',
+    ),
+    _NavItem(
+      icon: Icons.candlestick_chart_outlined,
+      selectedIcon: Icons.candlestick_chart,
+      label: 'Chart',
+    ),
+    _NavItem(
+      icon: Icons.history_outlined,
+      selectedIcon: Icons.history,
+      label: 'Backtest',
+    ),
+    _NavItem(
+      icon: Icons.analytics_outlined,
+      selectedIcon: Icons.analytics,
+      label: 'Studies',
+    ),
+    _NavItem(
+      icon: Icons.play_circle_outline,
+      selectedIcon: Icons.play_circle_filled,
+      label: 'Paper',
+    ),
+    _NavItem(
+      icon: Icons.extension_outlined,
+      selectedIcon: Icons.extension,
+      label: 'Strategies',
+    ),
+    _NavItem(
+      icon: Icons.account_balance_wallet_outlined,
+      selectedIcon: Icons.account_balance_wallet,
+      label: 'Account',
+    ),
   ];
 
   static const double _wideBreakpoint = 720;
@@ -133,17 +167,27 @@ class AppScaffold extends StatelessWidget {
               labelType: NavigationRailLabelType.all,
               leading: Padding(
                 padding: const EdgeInsets.symmetric(vertical: 16),
-                child: Icon(Icons.show_chart, color: AppColors.accentCyan, size: 32),
+                child: Icon(
+                  Icons.show_chart,
+                  color: AppColors.accentCyan,
+                  size: 32,
+                ),
               ),
               destinations: _navItems
-                  .map((item) => NavigationRailDestination(
-                        icon: Icon(item.icon),
-                        selectedIcon: Icon(item.selectedIcon),
-                        label: Text(item.label),
-                      ))
+                  .map(
+                    (item) => NavigationRailDestination(
+                      icon: Icon(item.icon),
+                      selectedIcon: Icon(item.selectedIcon),
+                      label: Text(item.label),
+                    ),
+                  )
                   .toList(),
             ),
-            const VerticalDivider(width: 1, thickness: 0.5, color: AppColors.divider),
+            const VerticalDivider(
+              width: 1,
+              thickness: 0.5,
+              color: AppColors.divider,
+            ),
             Expanded(child: _screens[selectedIndex]),
           ],
         ),
@@ -156,11 +200,13 @@ class AppScaffold extends StatelessWidget {
         currentIndex: selectedIndex,
         onTap: nav.goToIndex,
         items: _navItems
-            .map((item) => BottomNavigationBarItem(
-                  icon: Icon(item.icon),
-                  activeIcon: Icon(item.selectedIcon),
-                  label: item.label,
-                ))
+            .map(
+              (item) => BottomNavigationBarItem(
+                icon: Icon(item.icon),
+                activeIcon: Icon(item.selectedIcon),
+                label: item.label,
+              ),
+            )
             .toList(),
       ),
     );
@@ -171,5 +217,9 @@ class _NavItem {
   final IconData icon;
   final IconData selectedIcon;
   final String label;
-  const _NavItem({required this.icon, required this.selectedIcon, required this.label});
+  const _NavItem({
+    required this.icon,
+    required this.selectedIcon,
+    required this.label,
+  });
 }

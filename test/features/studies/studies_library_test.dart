@@ -97,6 +97,17 @@ void main() {
         reason: 'second scan must not duplicate existing entries');
   });
 
+  test('boot does not compute health; refreshHealth populates it', () async {
+    final lib = StudiesLibrary(storage: LibraryStorage());
+    await lib.boot(scanDirs: [tempDir.path]);
+    // boot must stay free of the sqflite health probe (so FakeAsync
+    // widget tests that await boot() never block) — health is null until
+    // refreshHealth runs (triggered by main.dart in the real app).
+    expect(lib.entries.every((e) => e.health == null), isTrue);
+    await lib.refreshHealth();
+    expect(lib.entries.every((e) => e.health != null), isTrue);
+  });
+
   test('missing file keeps entry but marks missing', () async {
     final lib = StudiesLibrary(storage: LibraryStorage());
     await lib.boot(scanDirs: [tempDir.path]);
