@@ -30,7 +30,11 @@ class AggregateLeaderboard extends ChangeNotifier {
 
   int minTrades = 20;
   int limit = 10;
-  String sortBy = 'score';
+  // Welle O3-B4-12: default sort is PnL, not score. Real production
+  // studies write score=-inf for nearly every trial (constraint penalty),
+  // so a score-ranked default would order the profitable trials
+  // arbitrarily. PnL is the natural ranking for a "profitable runs" board.
+  String sortBy = 'pnl';
 
   List<LeaderboardRow> _rows = const [];
   List<LeaderboardRow> get rows => _rows;

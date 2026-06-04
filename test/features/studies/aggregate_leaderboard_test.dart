@@ -106,6 +106,7 @@ void main() {
   test('merges profitable trials across pinned DBs, sorted by score',
       () async {
     final agg = AggregateLeaderboard(library: library);
+    agg.sortBy = 'score'; // explicit — default is now 'pnl' (O3-B4-12)
     await agg.recompute();
     expect(agg.rows.length, 4,
         reason: '3 profitable in A (one filtered by min_trades) → 2; '
@@ -115,6 +116,22 @@ void main() {
     expect(agg.rows.first.strategy, 'ichimoku');
     // Strategies must mix in the result.
     expect(agg.rows.any((r) => r.strategy == 'bb_rsi'), isTrue);
+  });
+
+  test('default sort is pnl (O3-B4-12)', () async {
+    final agg = AggregateLeaderboard(library: library);
+    expect(agg.sortBy, 'pnl', reason: 'profitable-runs board ranks by PnL');
+    await agg.recompute();
+    // Highest PnL first: dbA pnl=200 (trades 25 >= default min 20).
+    expect(agg.rows.first.trial.metrics.totalPnl, 200);
+    // Descending PnL across the merged result.
+    for (var i = 1; i < agg.rows.length; i++) {
+      expect(
+        agg.rows[i].trial.metrics.totalPnl <=
+            agg.rows[i - 1].trial.metrics.totalPnl,
+        isTrue,
+      );
+    }
   });
 
   test('min_trades cutoff drops below-threshold rows', () async {
