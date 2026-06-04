@@ -715,7 +715,7 @@ class BacktestService {
       final netPnl = grossPnl - pos.entryFee - exitFee;
       final entryNotional = pos.entryPrice * pos.quantity;
       final pnlPct = entryNotional > 0 ? (netPnl / entryNotional) * 100 : 0.0;
-      final alloc = entryNotional + pos.entryFee;
+      final alloc = entryNotional; // N-13: entryNotional == full alloc (qty = alloc/entry)
       // D-09 partial alloc: return reserved margin + realised PnL to the
       // current balance (no longer assumed zero pre-close). Legacy
       // full-balance path: balance==0 pre-close, so `+= alloc + netPnl`
@@ -758,7 +758,7 @@ class BacktestService {
             // `balance += alloc + net_pnl` post-D-09.
             final alloc = balance * p.sizeFraction;
             final fee = alloc * feeRate;
-            final qty = (alloc - fee) / entryPrice;
+            final qty = alloc / entryPrice; // N-13: entry fee does not shrink position
             position = _OpenPosition(
               isLong: true,
               entryPrice: entryPrice,
@@ -775,7 +775,7 @@ class BacktestService {
             final entryPrice = candle.open * (1 - slipFactor);
             final alloc = balance * p.sizeFraction;
             final fee = alloc * feeRate;
-            final qty = (alloc - fee) / entryPrice;
+            final qty = alloc / entryPrice; // N-13: entry fee does not shrink position
             position = _OpenPosition(
               isLong: false,
               entryPrice: entryPrice,
@@ -1202,7 +1202,7 @@ class BacktestService {
       final entryNotional = pos.entryPrice * pos.quantity;
       final pnlPct =
           entryNotional > 0 ? (netPnl / entryNotional) * 100 : 0.0;
-      final alloc = entryNotional + pos.entryFee;
+      final alloc = entryNotional; // N-13: entryNotional == full alloc (qty = alloc/entry)
       balance += alloc + netPnl;
 
       trades.add(ClosedTrade(
@@ -1230,7 +1230,7 @@ class BacktestService {
             final entryPrice = candle.open * (1 + slipFactor);
             final alloc = balance * p.sizeFraction;
             final fee = alloc * feeRate;
-            final qty = (alloc - fee) / entryPrice;
+            final qty = alloc / entryPrice; // N-13: entry fee does not shrink position
             position = _OpenPosition(
               isLong: true,
               entryPrice: entryPrice,
@@ -1247,7 +1247,7 @@ class BacktestService {
             final entryPrice = candle.open * (1 - slipFactor);
             final alloc = balance * p.sizeFraction;
             final fee = alloc * feeRate;
-            final qty = (alloc - fee) / entryPrice;
+            final qty = alloc / entryPrice; // N-13: entry fee does not shrink position
             position = _OpenPosition(
               isLong: false,
               entryPrice: entryPrice,
@@ -1594,7 +1594,7 @@ class BacktestService {
       final entryNotional = pos.entryPrice * pos.quantity;
       final pnlPct =
           entryNotional > 0 ? (netPnl / entryNotional) * 100 : 0.0;
-      final alloc = entryNotional + pos.entryFee;
+      final alloc = entryNotional; // N-13: entryNotional == full alloc (qty = alloc/entry)
       balance += alloc + netPnl;
 
       trades.add(ClosedTrade(
@@ -1622,7 +1622,7 @@ class BacktestService {
             final entryPrice = candle.open * (1 + slipFactor);
             final alloc = balance * p.sizeFraction;
             final fee = alloc * feeRate;
-            final qty = (alloc - fee) / entryPrice;
+            final qty = alloc / entryPrice; // N-13: entry fee does not shrink position
             position = _OpenPosition(
               isLong: true,
               entryPrice: entryPrice,
@@ -1639,7 +1639,7 @@ class BacktestService {
             final entryPrice = candle.open * (1 - slipFactor);
             final alloc = balance * p.sizeFraction;
             final fee = alloc * feeRate;
-            final qty = (alloc - fee) / entryPrice;
+            final qty = alloc / entryPrice; // N-13: entry fee does not shrink position
             position = _OpenPosition(
               isLong: false,
               entryPrice: entryPrice,

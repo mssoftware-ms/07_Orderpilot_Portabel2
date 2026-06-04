@@ -4,9 +4,17 @@
 /// Plan-rev3 §3.4 F-03b (post-F-03 follow-up): the Dart engine recorded
 /// `equity = balance + unrealized_pnl` on every bar during an open
 /// position, which silently DROPS the reserved margin
-/// (`alloc = entry_notional + entry_fee`) — equity values went strongly
-/// negative through long positions and inflated the Sharpe denominator.
-/// Rust's `BacktestEngine::current_equity` (rust/.../backtest/mod.rs:349)
+/// (`alloc = entry_notional`) — equity values went strongly negative
+/// through long positions and inflated the Sharpe denominator.
+///
+/// F-10 / N-13 correction: the reserved margin is `alloc = entry_notional`
+/// (the entry fee does NOT inflate the position; it is accounted once via
+/// the `- entry_fee` term). The pre-F-10 expectations folded the fee into
+/// `alloc` AND subtracted it, cancelling it out — a Dart-only formula that
+/// did not actually match Rust. The values below now equal Rust's
+/// `current_equity` bit-for-bit.
+///
+/// Rust's `BacktestEngine::current_equity` (rust/.../backtest/mod.rs:580)
 /// has the F-02c-aware formula:
 ///
 ///   if no position:  equity = balance
@@ -37,13 +45,12 @@ import 'package:trading_app/src/bridge/frb_generated.dart';
 void main() {
   group('F-03b midTradeEquity formula (Plan §3.4 mirror of Rust current_equity)', () {
     test('long mid-trade: equity = balance + alloc + unrealized - entry_fee - est_exit_fee', () {
-      // Spec example (per task brief):
-      //   balance_before=10000, entry=100, qty=10, fee_rate=0.001, mark=110
-      //   alloc = 100*10 + 1 = 1001
-      //   balance_after_open = 10000 - 1001 = 8999
+      // Spec example (N-13: alloc = entry_notional, fee not folded in):
+      //   balance_after_open=8999, entry=100, qty=10, fee_rate=0.001, mark=110
+      //   alloc = entry_notional = 100*10 = 1000
       //   unrealized = (110 - 100) * 10 = 100
       //   est_exit_fee = 110 * 10 * 0.001 = 1.1
-      //   equity = 8999 + 1001 + 100 - 1 - 1.1 = 10097.9
+      //   equity = 8999 + 1000 + 100 - 1 - 1.1 = 10096.9
       final got = midTradeEquity(
         balance: 8999,
         entryPrice: 100,
@@ -53,14 +60,15 @@ void main() {
         feeRate: 0.001,
         isLong: true,
       );
-      expect(got, closeTo(10097.9, 1e-9));
+      expect(got, closeTo(10096.9, 1e-9));
     });
 
     test('short mid-trade: unrealized has opposite sign', () {
       // Same primitives, short side: position profits when price falls.
       //   mark=90 (was 100), unrealized_short = (100-90)*10 = 100
+      //   alloc = entry_notional = 100*10 = 1000 (N-13)
       //   est_exit_fee = 90 * 10 * 0.001 = 0.9
-      //   equity = 8999 + 1001 + 100 - 1 - 0.9 = 10098.1
+      //   equity = 8999 + 1000 + 100 - 1 - 0.9 = 10097.1
       final got = midTradeEquity(
         balance: 8999,
         entryPrice: 100,
@@ -70,7 +78,7 @@ void main() {
         feeRate: 0.001,
         isLong: false,
       );
-      expect(got, closeTo(10098.1, 1e-9));
+      expect(got, closeTo(10097.1, 1e-9));
     });
 
     test('no position: equity = balance, ignores mark price and fee', () {
