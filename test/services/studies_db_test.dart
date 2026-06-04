@@ -81,17 +81,23 @@ void main() {
       expect(t0.scoreIsFinite, isFalse);
     });
 
-    test('top10 excludes -inf scores and sorts descending', () async {
+    test('top10 returns profitable trials ranked by PnL descending',
+        () async {
+      // Welle O3-B4-13: top10 is now PnL-ranked, profitable-only (not
+      // score-ranked). Fixture profitable trials: trial 2 (pnl 450),
+      // trial 1 (120.5), trial 4 (60.0). trials 0/3 have pnl 0 (excluded);
+      // trial 5 is malformed (skipped).
       final studies = await db.listStudies();
       final top = await db.top10(studies.first.id);
-      // 3 finite trials in the fixture: scores 0.85, 1.45, 2.10.
       expect(top.length, 3);
-      expect(top.first.score, 2.10);
-      expect(top.last.score, 0.85);
-      // All scores must be finite.
-      for (final t in top) {
-        expect(t.score.isFinite, isTrue,
-            reason: 'top10 must never contain non-finite scores');
+      expect(top.first.trialId, 2);
+      expect(top.first.metrics.totalPnl, 450.0);
+      expect(top.last.metrics.totalPnl, 60.0);
+      expect(top.every((t) => t.metrics.totalPnl > 0), isTrue);
+      for (var i = 1; i < top.length; i++) {
+        expect(
+            top[i].metrics.totalPnl <= top[i - 1].metrics.totalPnl, isTrue,
+            reason: 'top10 must be PnL-descending');
       }
     });
 
@@ -357,6 +363,19 @@ void main() {
       expect(h.profitableTrialCount, 3,
           reason: 'health already ignores score — parity with leaderboard');
       expect(h.totalTrialCount, 5);
+    });
+
+    test('top10 returns profitable trials even when every score is -inf',
+        () async {
+      // Per-study drill-down (O3-B4-13): same -inf robustness as the
+      // leaderboard. 3 trials have pnl>0; PnL-ranked → 1978 leads.
+      final top = await db.top10(1);
+      expect(top.length, 3,
+          reason: '3 trials have pnl>0; -inf score must not exclude them');
+      expect(top.every((t) => t.metrics.totalPnl > 0), isTrue);
+      expect(top.every((t) => !t.scoreIsFinite), isTrue,
+          reason: 'all seeded scores are -inf');
+      expect(top.first.metrics.totalPnl, 1978.0);
     });
   });
 }

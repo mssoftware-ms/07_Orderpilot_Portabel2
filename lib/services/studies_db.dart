@@ -153,24 +153,30 @@ class StudiesDb {
     return _parseTrialRows(rows);
   }
 
-  /// Top-10 trials by score, descending. Excludes non-finite scores
-  /// (Optuna writes `-inf` for 0-trade trials and they would otherwise
-  /// dominate any sort direction).
+  /// Welle O3-B4-13: top-10 PROFITABLE trials of a study, ranked by PnL
+  /// descending. "Profitable" is `total_pnl > 0`, independent of the
+  /// score value — real production studies write `score = -inf` for
+  /// nearly every trial (constraint penalty; see [topNProfitable]).
   ///
-  /// SQLite stores `-inf` as a REAL value that compares less than every
-  /// finite number, so `score > -inf` is the cleanest exclusion filter
-  /// (also catches NaN per IEEE-754 — NaN comparisons are always false,
-  /// so NaN rows are dropped too).
+  /// Ranking by PnL (not score) keeps the per-study drill-down consistent
+  /// with the global leaderboard. The previous score-ranked +
+  /// `score > -1e308`-filtered version returned an EMPTY table for those
+  /// DBs (e.g. studies-bb_rsi.db: 309 profitable trials, all score=-inf).
+  ///
+  /// Client-side filter/sort — one study is ≤ ~1000 trials, so this needs
+  /// no JSON1 extension and no fallback branch.
   Future<List<Trial>> top10(int studyId) async {
     final db = _require();
-    final rows = await db.rawQuery(
-      'SELECT * FROM trials '
-      'WHERE study_id = ? AND score > -1e308 '
-      'ORDER BY score DESC '
-      'LIMIT 10',
-      [studyId],
+    final rows = await db.query(
+      'trials',
+      where: 'study_id = ?',
+      whereArgs: [studyId],
     );
-    return _parseTrialRows(rows);
+    final profitable = _parseTrialRows(rows)
+        .where((t) => t.metrics.totalPnl > 0)
+        .toList()
+      ..sort((a, b) => b.metrics.totalPnl.compareTo(a.metrics.totalPnl));
+    return profitable.take(10).toList();
   }
 
   /// Welle O3-B4: cross-study profitable trials within a single DB.

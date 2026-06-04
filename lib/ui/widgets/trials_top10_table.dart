@@ -26,7 +26,10 @@ class TrialsTop10Table extends StatefulWidget {
 }
 
 class _TrialsTop10TableState extends State<TrialsTop10Table> {
-  _SortField _sortField = _SortField.score;
+  // Welle O3-B4-13: default sort is PnL, not score. Real production
+  // studies write score=-inf for nearly every trial, so a score-default
+  // would re-order the PnL-ranked rows from `top10()` arbitrarily.
+  _SortField _sortField = _SortField.totalPnl;
   bool _ascending = false; // best-first by default
 
   List<Trial> get _sortedTrials {

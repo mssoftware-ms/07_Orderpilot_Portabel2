@@ -69,23 +69,24 @@ void main() {
     expect(find.text('No trials in this study yet.'), findsOneWidget);
   });
 
-  testWidgets('default sort is by score descending (best first)',
+  testWidgets('default sort is by PnL descending (best first, O3-B4-13)',
       (tester) async {
+    // Scores are ANTI-correlated with PnL so the assertion proves PnL
+    // ordering, not score ordering: if it sorted by score, the score=2.0
+    // row (pnl 150) would lead instead of the pnl=300 row.
     final trials = [
-      _trial(id: 1, trialId: 0, score: 0.5),
-      _trial(id: 2, trialId: 1, score: 2.0),
-      _trial(id: 3, trialId: 2, score: 1.0),
+      _trial(id: 1, trialId: 0, score: 0.5, totalPnl: 300.0),
+      _trial(id: 2, trialId: 1, score: 2.0, totalPnl: 150.0),
+      _trial(id: 3, trialId: 2, score: 1.0, totalPnl: 50.0),
     ];
     await _pump(tester, trials);
 
-    // The score column shows 3-decimal strings, and the highest-score row
-    // (2.0 / "2.000") must precede the others. We assert that the global
-    // top-down ordering on screen reflects DESC sort by score.
-    final score20 = tester.getCenter(find.text('2.000'));
-    final score10 = tester.getCenter(find.text('1.000'));
-    final score05 = tester.getCenter(find.text('0.500'));
-    expect(score20.dy, lessThan(score10.dy));
-    expect(score10.dy, lessThan(score05.dy));
+    // PnL column shows "+<2dp>". Highest PnL (300) must precede the rest.
+    final pnl300 = tester.getCenter(find.text('+300.00'));
+    final pnl150 = tester.getCenter(find.text('+150.00'));
+    final pnl50 = tester.getCenter(find.text('+50.00'));
+    expect(pnl300.dy, lessThan(pnl150.dy));
+    expect(pnl150.dy, lessThan(pnl50.dy));
   });
 
   testWidgets('tap on a row opens the detail sheet with params',
