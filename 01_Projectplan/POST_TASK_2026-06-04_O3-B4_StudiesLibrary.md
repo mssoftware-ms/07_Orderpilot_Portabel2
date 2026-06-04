@@ -44,7 +44,8 @@ kein Live-Stream-Update, kein Custom-Re-Scoring, keine ruvector/stat_gates-Integ
 | 9 | `4f487cb` | feat(O3-B4-5c): global_leaderboard_table widget |
 | 10 | `81566f6` | feat(O3-B4-5.1): studies_screen composes library + leaderboard |
 | 11 | `9995e96` | test(O3-B4-6): integration smoke test for studies library |
-| 12 | *(dieser Report)* | chore(O3-B4-7): UAT pass + post-task report |
+| 12 | `792d6ff` | chore(O3-B4-7): UAT pass + post-task report |
+| 13 | `192a274` | fix(O3-B4-8): wire health-dot refresh + library-row drill-down (Codex stop-review) |
 
 Working-Tree-Hinweis: Vor Task 1 lag eine fremde Dependency-Migration als M-Files vor;
 der QA-Koordinator hat sie selbst committet+gepusht (`e538b81 #up`), bevor O3-B4 startete.
@@ -144,45 +145,46 @@ visuelle Bestätigung am Windows-Build liegt beim QA-Koordinator.
 
 | # | Check | Automatisierte Evidenz | Status |
 |---|---|---|---|
-| 1 | Library listet optimizer_studies; ruvector/stat_gates kein Crash, nicht silent | Scan listet alle `.db` (studies_library_test); ungültige DBs werden bei `topNProfitable`/Health-Open via `NotAStudiesDbException` gefangen+übersprungen (aggregate broken-DB-Test) | 🔶 siehe Hinweis A |
+| 1 | Library listet optimizer_studies; ruvector/stat_gates kein Crash, nicht silent | Scan listet alle `.db` (studies_library_test); Health-Dots werden im App-Flow per `main.dart` → `refreshHealth()` gefüllt (O3-B4-8, test „boot…refreshHealth populates it"); ungültige DBs → `NotAStudiesDbException` gefangen+übersprungen | 🔶 siehe Hinweis A |
 | 2 | Alle Entries beim ersten Boot un-pinned | studies_library_test „scanDirectory finds .db files" (alle `pinned==false`) | ✅ |
 | 3 | Pin 2 DBs → Leaderboard mischt beide Strategien | aggregate_leaderboard_test + studies_library_smoke_test (ichimoku+bb_rsi) | ✅ |
 | 4 | min_trades=20 → Low-Sample raus, im Drill-Down weiter sichtbar | studies_db topNProfitable min_trades + aggregate min_trades-cutoff | ✅ |
 | 5 | Sort PnL → Reihenfolge + Rank-Update | filter_bar sort-dropdown + aggregate sortBy=pnl | ✅ |
 | 6 | Click Leaderboard-Row → Detail-Sheet (Strategy+Study+Trial) | global_leaderboard_table_test „tap on row opens detail sheet" + smoke | ✅ |
-| 7 | Click Library-Row → Per-Study-Drill-Down lädt | — | ⚠️ siehe Hinweis B |
+| 7 | Click Library-Row → Per-Study-Drill-Down lädt | LibraryPanel `onOpenDb`-Callback → `provider.loadDb` (O3-B4-8); library_panel_test „row body tap fires onOpenDb with the entry path" + studies_viewer_smoke (loadDb rendert Per-Study) | ✅ |
 | 8 | DB löschen → Reload → „Missing", andere liefern weiter, kein Crash | studies_library_test „missing file keeps entry but marks missing" + aggregate broken-DB-Test | 🔶 (GUI-Reload visuell offen) |
 | 9 | Add custom ruvector.db → „Not an Optuna studies DB", nicht gespeichert | studies_library_test „addCustom rejects non-studies DB" | ✅ |
 | 10 | SharedPreferences zerschossen → leere Library + Warn + Auto-Rescan | library_storage_test „corrupt JSON resets to empty" / „unknown version resets" | ✅ |
 | 11 | Bestehender Pick-`.db`-Flow + studies_viewer_smoke_test grün | studies_viewer_smoke_test ✅ (grün mit neuen Providern) | ✅ |
 | 12 | Phase-1-Backtest unverändert (91 Trades / -2071.38 USDT) | trades=91 ✅; PnL & Parität siehe §5 | ⚠️ §5 |
 
-**Hinweis A (UAT 1):** Auto-gescannte Nicht-Studies-DBs (`ruvector.db`,
-`stat_gates_results.db`) erscheinen als graue Health-Dot-Einträge („Not scanned yet"
-bzw. nach fehlgeschlagenem Health-Open) und tragen nichts zum Leaderboard bei (open
-wirft → gefangen → übersprungen). Sie werden also **nicht** silent geschluckt und
-crashen nicht — aber der IMPL_PLAN rendert für sie keinen expliziten „Not a studies DB"-
-Text (nur der manuelle Add-Custom-Pfad zeigt den Toast). Minor-Deviation gegenüber dem
-PRE_TASK-§7.1-Wortlaut.
+**Hinweis A (UAT 1) — Rest-Nuance:** Gültige Studies-DBs zeigen seit O3-B4-8 ihren
+echten Health-Dot (grün/gelb/rot via `refreshHealth` im App-Boot). Auto-gescannte
+Nicht-Studies-DBs (`ruvector.db`, `stat_gates_results.db`) erscheinen als **graue**
+Dots („Not scanned yet", da der Health-Open fehlschlägt) und tragen nichts zum
+Leaderboard bei. Sie werden also **nicht** silent geschluckt und crashen nicht — aber
+es wird kein expliziter „Not a studies DB"-Text gerendert (nur der manuelle
+Add-Custom-Pfad zeigt den Toast). Minor-Deviation gegenüber dem PRE_TASK-§7.1-Wortlaut;
+Verschärfung optional (siehe §8).
 
-**Hinweis B (UAT 7):** Der IMPL_PLAN verdrahtet **keinen** Library-Row-Click → Per-Study-
-Load. `_LibraryRow` hat nur Pin-Toggle + Health-Dot; der Per-Study-Drill-Down bleibt über
-den **erhaltenen manuellen „Pick .db"-Picker** erreichbar (UAT 11). Damit weicht die
-Umsetzung vom PRE_TASK-§7.7-Wortlaut ab (dort: Klick auf Library-Row lädt Drill-Down).
-Empfehlung für eine Folge-Welle: optionaler Row-`onTap` → `StudiesProvider.loadDb(path)`.
+**Hinweis B (UAT 7) — erledigt in O3-B4-8:** Library-Row-Body-Tap lädt jetzt die DB in
+den Per-Study-Drill-Down (`LibraryPanel.onOpenDb` → `StudiesProvider.loadDb`); die
+Pin-Schaltfläche gewinnt weiterhin ihren eigenen Tap. Der manuelle „Pick .db"-Picker
+bleibt zusätzlich erhalten (UAT 11).
 
 ---
 
 ## 7. Sign-Off-Checkliste (Status)
 
-- [x] Subtasks 1.0–6.0 (11 Code/Test-Commits) atomic committed + pushed
+- [x] Subtasks 1.0–6.0 (11 Code/Test-Commits) + O3-B4-8 App-Flow-Fix atomic committed + pushed
 - [x] `flutter analyze` clean für alle O3-B4-`lib/`+`test/`-Dateien (2 Restissues nur in
       gitignored `build/windows/`-Artefakten, umgebungsbedingt)
 - [x] Alle neuen + studies-Regressions-Tests grün
 - [x] Bestehender `studies_viewer_smoke_test.dart` grün (kein Regress)
 - [ ] **`flutter test` durchgehend grün — BLOCKIERT** durch vorbestehende dart↔rust-Parität (§5)
-- [~] UAT 1–12 — automatisiert belegt (siehe §6); visuelle Windows-Bestätigung + UAT 7-Gap
-      + UAT 12-Parität beim QA-Koordinator
+- [~] UAT 1–12 — automatisiert belegt (siehe §6); UAT 7 + Health-Dots seit O3-B4-8 im
+      App-Flow verdrahtet; offen bleiben visuelle Windows-Bestätigung + UAT 12-Parität (§5)
+      beim QA-Koordinator
 - [x] POST_TASK-Report (dieses Dokument)
 
 ---
@@ -193,8 +195,10 @@ Empfehlung für eine Folge-Welle: optionaler Row-`onTap` → `StudiesProvider.lo
    Engine-Welle. Verdacht: Rust-Source-Drift seit letztem frischem `.so` bzw.
    Rounding/Ordering in F-01/F-02/F-03. `tool/build_rust.sh release` als Pflicht-Schritt
    in jede CI/Test-Routine aufnehmen, damit stale `.so` solche Divergenzen nicht maskiert.
-2. **`-2071.38`-Referenz aktualisieren** in HANDOFF/Memory `project_regression_guards` →
+2. **`-2071.38`-Referenz aktualisieren** in HANDOFF/Memory `project-regression-guards` →
    aktueller Dart-Wert `-1565.358744` (91 Trades), oder den Wert nach behobener Parität.
-3. **UAT 7** nachrüsten: Library-Row-`onTap` → `StudiesProvider.loadDb`.
-4. **UAT 1** optional schärfen: expliziter „Not a studies DB"-Hint für auto-gescannte
+3. **UAT 1** optional schärfen: expliziter „Not a studies DB"-Hint für auto-gescannte
    Nicht-Studies-DBs (Health-Probe beim Scan statt erst lazy bei `refreshHealth`).
+
+*(UAT 7 Library-Row-Drill-Down + Health-Dot-Verdrahtung wurden in O3-B4-8 nachgezogen —
+nicht mehr offen.)*
