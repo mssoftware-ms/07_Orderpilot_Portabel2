@@ -90,7 +90,7 @@ class _PickerSection extends StatelessWidget {
 
   Future<void> _pickDb(BuildContext context) async {
     try {
-      final result = await FilePicker.platform.pickFiles(
+      final result = await FilePicker.pickFiles(
         type: FileType.custom,
         allowedExtensions: const ['db', 'sqlite', 'sqlite3'],
         dialogTitle: 'Select an Optuna studies .db file',

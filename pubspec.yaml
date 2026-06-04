@@ -13,8 +13,8 @@ dependencies:
   cupertino_icons: ^1.0.8
 
   # Charting
-  fl_chart: ^0.70.2
-  candlesticks: ^2.1.0
+  fl_chart: ^1.2.0
+  candlesticks: ^3.0.1
 
   # Networking
   http: ^1.4.0
@@ -28,13 +28,13 @@ dependencies:
   yaml: ^3.1.2
 
   # Studies viewer (Welle O3-B2): SQLite FFI + file picker
-  sqflite_common_ffi: ^2.3.0
-  file_picker: ^8.0.0
+  sqflite_common_ffi: ^2.4.1
+  file_picker: ^11.0.2
 
   # Welle P4P (Bitunix futures connector): API credentials in platform-secure
   # storage (DPAPI on Windows, Keychain on macOS/iOS, libsecret on Linux,
-  # EncryptedSharedPreferences on Android) plus double-SHA-256 signing.
-  flutter_secure_storage: ^9.2.4
+  # Android Keystore-backed storage on Android) plus double-SHA-256 signing.
+  flutter_secure_storage: ^10.3.1
   crypto: ^3.0.3
 
   # Welle B4.3 (risk layer): persistent risk limits + kill-switch state in

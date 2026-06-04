@@ -1,11 +1,9 @@
 /// Welle P4C-3 candlestick + Bollinger-Bands renderer.
 ///
 /// A self-contained [CustomPaint]-based chart pane: the project's
-/// pubspec ships `candlesticks: ^2.1.0`, but that package only exposes
-/// a top-toolbar API and no per-bar indicator overlay hook. Rather
-/// than upgrade the dependency or replace it with `fl_chart` (which
-/// has no candlestick series in 0.70.x), the chart tab now owns a
-/// minimal pure-Flutter renderer:
+/// The project keeps the `candlesticks` package available for future
+/// charting work, but this pane owns a minimal pure-Flutter renderer so
+/// Bollinger overlays, axes, and future interaction hooks stay local:
 ///
 /// - Candle bodies + wicks scaled to the (min low … max high) range of
 ///   the supplied window.

@@ -14,7 +14,7 @@
 ///     [BitunixSigner.stripBodyWhitespace] helper enforces that.
 ///   * [BitunixSecretsStore] wraps `flutter_secure_storage` to persist the
 ///     credentials on platform-secure key stores (DPAPI on Windows, Keychain
-///     on macOS/iOS, libsecret on Linux, EncryptedSharedPreferences on
+///     on macOS/iOS, libsecret on Linux, Android Keystore-backed storage on
 ///     Android). A [BitunixSecretsBackend] hook keeps the store
 ///     unit-testable without spinning up the native plugin.
 ///
@@ -146,9 +146,7 @@ class BitunixSecretsStore {
 
   BitunixSecretsStore({BitunixSecretsBackend? backend})
       : _backend = backend ??
-            _FlutterSecureStorageBackend(const FlutterSecureStorage(
-              aOptions: AndroidOptions(encryptedSharedPreferences: true),
-            ));
+            _FlutterSecureStorageBackend(const FlutterSecureStorage());
 
   final BitunixSecretsBackend _backend;
 
