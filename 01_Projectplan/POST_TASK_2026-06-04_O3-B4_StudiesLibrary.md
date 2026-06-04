@@ -46,6 +46,7 @@ kein Live-Stream-Update, kein Custom-Re-Scoring, keine ruvector/stat_gates-Integ
 | 11 | `9995e96` | test(O3-B4-6): integration smoke test for studies library |
 | 12 | `792d6ff` | chore(O3-B4-7): UAT pass + post-task report |
 | 13 | `192a274` | fix(O3-B4-8): wire health-dot refresh + library-row drill-down (Codex stop-review) |
+| 14 | `0d55af7` | fix(O3-B4-9): refreshHealth must not clobber concurrent pin changes (Codex stop-review) |
 
 Working-Tree-Hinweis: Vor Task 1 lag eine fremde Dependency-Migration als M-Files vor;
 der QA-Koordinator hat sie selbst committet+gepusht (`e538b81 #up`), bevor O3-B4 startete.
@@ -201,4 +202,7 @@ bleibt zusätzlich erhalten (UAT 11).
    Nicht-Studies-DBs (Health-Probe beim Scan statt erst lazy bei `refreshHealth`).
 
 *(UAT 7 Library-Row-Drill-Down + Health-Dot-Verdrahtung wurden in O3-B4-8 nachgezogen —
-nicht mehr offen.)*
+nicht mehr offen. O3-B4-9 behebt zudem eine Race-Condition: der automatische
+Health-Refresh überschrieb beim Write-Back nach der async Health-Probe einen währenddessen
+gesetzten Pin — jetzt wird der Entry per Pfad neu aufgelöst, sodass Pin-Änderungen
+erhalten bleiben.)*
