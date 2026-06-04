@@ -101,3 +101,74 @@ First-divergence report archived at:
    an unforgettable rebuild guarantee, if the WSL2/worktree concern (Q3) clears.
 3. The skipped `dart_rust_parity_test.dart` (BB+RSI sinus fixture, 0 trades)
    stays skipped — Welle I2-3, untouched, out of F-10 scope.
+
+---
+
+## 8. QA-Koordinator-Audit (Windows-CC, 2026-06-04)
+
+**Range-Audit** `bdbf95e..cb90ec8` (7 Commits, working-tree sauber, HEAD = origin/main):
+git diff zeigt 5 Dart/Test-Files berührt — **null Rust-Code geändert**, wie im
+Plan §1 (Dart wandert auf Rust-canonical). Bestätigt die „Rust war der
+Strict-Spec-korrekte Engine"-Aussage in §1.
+
+**Diagnose-Audit:** First-Divergence-Report (`01_Projectplan/F-10_first_divergence_report.txt`)
+isoliert Drift bei Trade #0 auf `quantity`-Ratio `0.97325`. Mathematische
+Decomposition `(fee_aware/legacy) × 1/(1-fee_rate) = 0.97325` ist
+arithmetisch korrekt und wird durch die schrittweise Drift-Reduktion
+(51.30 → -0.63 → 0.000000) empirisch bestätigt. Saubere TDD-Diagnose.
+
+**f03b-Test-Änderung verifiziert:** Diff zeigt die alte Erwartung `10097.9`
+(fee in alloc gefolded und subtrahiert, semantisch cancel-out, Dart-only
+ungleich Rust) → neue Erwartung `10096.9` (alloc = entry_notional,
+N-13-konform). Algebra prüft: `(1001 - 1) ≠ (1000 - 1)` weil Rust `alloc`
+auch in der `qty`-Berechnung wiederverwendet (`alloc / entry`, nicht
+`(alloc - fee) / entry`). Test-Update ist **semantisch konsistent**, kein
+„Test-an-Bug-angepasst". OK.
+
+**Phase-1-Test auf Windows (§7.3 hart):**
+
+```
+bash tool/test_with_rust.sh test/integration/phase1_reference_backtest_test.dart
+  test/integration/dart_rust_first_divergence_test.dart
+
+dart.trades       = 91          rust.trades       = 91
+dart.total_pnl    = -1514.059742 rust.total_pnl    = -1514.059742
+total_drift       = 0.000000   first_divergence  = NONE
+Dart 3x bit-exact:  ✓    Rust 3x bit-exact:  ✓    Dart vs Rust 1e-9: ✓
+All tests passed!
+```
+
+**Vollständige Suite auf Windows:** `bash tool/test_with_rust.sh` → **672 passed
+/ 34 skipped / 0 failed** — exakt parallel-CCs WSL2-Zahlen, keine
+Plattform-Drift. Die in O3-B4-10 gefundene Lesson („WSL2-grün allein zählt
+nicht") greift hier nicht — F-10 ist auf beiden Plattformen identisch grün.
+
+**Memory finalisiert:** `C:\Users\maiks\.claude\projects\…\memory\project_regression_guards.md`
+gemäß PRE_TASK §6 D.3 mit dem aktuellen gemeinsamen Wert
+`Dart == Rust == -1514.059742` aktualisiert. (User-Memory ist
+plattform-lokal, nicht git-tracked — parallel-CCs WSL2-Memory wurde
+separat von ihm gesetzt.)
+
+**Sign-off-Status (final):**
+
+- [x] §7.1 First-Divergence-Test + Report
+- [x] §7.2 Subsystem-Fixes (B.1, B.2)
+- [x] §7.3 **`flutter test` durchgehend grün auf Windows** (672/34/0)
+- [x] §7.4 Trade-Count 91 stabil
+- [x] §7.5 `dart_rust_first_divergence_test.dart` zeigt NONE
+- [x] §7.6 CI/Build-Hardening (`tool/test_with_rust.sh` ausgewählt — Option 3
+      pragmatisch, Hook-Option-1 zurückgestellt)
+- [x] §7.7 Memory final
+- [x] §7.8 POST_TASK + Audit-Trailer (dieses Dokument)
+
+**Final-Sign-off-Entscheidung:** F-10 ist **vollständig abgeschlossen**.
+Phase-1-Parity ist auf 1e-9 wiederhergestellt, beide Engines bit-identisch
+auf 91 Trades / -1514.059742 USDT. Der Regression-Lock
+(`dart_rust_first_divergence_test.dart`) verhindert dass die Drift
+unbemerkt zurückkehrt.
+
+**Verbleibend (offene Backlog-Items, keine F-10-Blocker):**
+- O3-B4 Code-Review Major A (`_jsonExtractAvailable` static-Refactor, 5 Min)
+- O3-B4 visuelle Windows-UAT-Walkthrough auf deiner Seite
+- Optional CI-Hardening-Option-1 (settings.json pre-test hook) falls
+  Workspace-Setup das stabil tragen kann (PRE_TASK §5 Q3 zu klären)
