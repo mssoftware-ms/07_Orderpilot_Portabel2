@@ -4,6 +4,7 @@
 /// malformed metrics_json) so the skip-and-warn path is also covered.
 library;
 
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
@@ -253,6 +254,109 @@ void main() {
         expect(e.message, contains('01_Projectplan/optimizer_studies'));
         expect(e.path, wrongSchemaPath);
       }
+    });
+  });
+
+  // ─── Welle O3-B4-12 — real-data regression: all-(-inf) scores ─────────────
+  //
+  // Real Optuna production studies penalise EVERY trial with score=-inf
+  // (a hard constraint no trial satisfies), yet record raw total_pnl
+  // independently. Verified against the shipped studies-bb_rsi.db: 1000
+  // trials, ALL score=-inf, but 309 with total_pnl > 0. The legacy
+  // `score > -1e308` filter (inherited from O3-B2 top10) wrongly dropped
+  // every profitable trial → empty leaderboard. "Profitable" must be
+  // defined purely by total_pnl, independent of the score value.
+  group('StudiesDb.topNProfitable all-(-inf)-scores (O3-B4-12)', () {
+    late Directory tempDir;
+    late String dbPath;
+    late StudiesDb db;
+
+    setUp(() async {
+      tempDir = await Directory.systemTemp.createTemp('studies_neginf_');
+      dbPath = '${tempDir.path}/studies-neginf.db'
+          .replaceAll('/', Platform.pathSeparator);
+      final seed = await databaseFactory.openDatabase(dbPath);
+      await seed.execute('CREATE TABLE studies (id INTEGER PRIMARY KEY, '
+          'name TEXT NOT NULL, strategy TEXT NOT NULL, '
+          'search_space_yaml TEXT NOT NULL, created_at TEXT NOT NULL, '
+          'commit_hash TEXT)');
+      await seed.execute('CREATE TABLE trials (id INTEGER PRIMARY KEY, '
+          'study_id INTEGER NOT NULL, trial_id INTEGER NOT NULL, '
+          'params_json TEXT NOT NULL, metrics_json TEXT NOT NULL, '
+          'score REAL NOT NULL, created_at TEXT NOT NULL)');
+      await seed.insert('studies', {
+        'name': 'production_neginf',
+        'strategy': 'bb_rsi',
+        'search_space_yaml': 'strategy_name: bb_rsi',
+        'created_at': '2026-06-04T00:00:00Z',
+      });
+      // Every trial carries score = -inf (production-study constraint
+      // penalty); raw PnL is recorded independently.
+      const seeded = [
+        {'pnl': 1978.0, 'trades': 3}, // profitable, few trades
+        {'pnl': 1382.0, 'trades': 10}, // profitable
+        {'pnl': 1171.0, 'trades': 25}, // profitable, high sample
+        {'pnl': -500.0, 'trades': 30}, // loss
+        {'pnl': 0.0, 'trades': 0}, // 0-trade
+      ];
+      for (var i = 0; i < seeded.length; i++) {
+        await seed.insert('trials', {
+          'study_id': 1,
+          'trial_id': i,
+          'params_json': '{"values":{"x":0.5}}',
+          'metrics_json': jsonEncode({
+            'total_trades': seeded[i]['trades'],
+            'total_pnl': seeded[i]['pnl'],
+            'win_rate': 50.0,
+            'sharpe_ratio': 1.0,
+            'max_drawdown_pct': 5.0,
+            'profit_factor': 1.5,
+            'final_equity': 10000 + (seeded[i]['pnl'] as double),
+          }),
+          'score': double.negativeInfinity,
+          'created_at': '2026-06-04T00:00:00Z',
+        });
+      }
+      await seed.close();
+      db = StudiesDb();
+      await db.open(dbPath);
+    });
+
+    tearDown(() async {
+      await db.close();
+      if (tempDir.existsSync()) await tempDir.delete(recursive: true);
+    });
+
+    test('returns profitable trials even when every score is -inf',
+        () async {
+      final rows = await db.topNProfitable(minTrades: 0, limit: 50);
+      expect(rows.length, 3,
+          reason: '3 trials have pnl>0; -inf score must not exclude them');
+      expect(rows.every((r) => r.trial.metrics.totalPnl > 0), isTrue);
+      expect(rows.every((r) => !r.trial.scoreIsFinite), isTrue,
+          reason: 'all seeded scores are -inf — proves the filter is gone');
+    });
+
+    test('min_trades cutoff still applies with -inf scores', () async {
+      final cut = await db.topNProfitable(minTrades: 20, limit: 50);
+      expect(cut.length, 1,
+          reason: 'only the 25-trade profitable trial qualifies');
+      expect(cut.first.trial.metrics.totalTrades, 25);
+    });
+
+    test('sortBy=pnl orders by PnL despite -inf scores', () async {
+      final byPnl =
+          await db.topNProfitable(minTrades: 0, limit: 50, sortBy: 'pnl');
+      expect(byPnl.first.trial.metrics.totalPnl, 1978.0);
+      expect(byPnl.last.trial.metrics.totalPnl, 1171.0);
+    });
+
+    test('healthSnapshot counts profitable independent of -inf score',
+        () async {
+      final h = await db.healthSnapshot();
+      expect(h.profitableTrialCount, 3,
+          reason: 'health already ignores score — parity with leaderboard');
+      expect(h.totalTrialCount, 5);
     });
   });
 }

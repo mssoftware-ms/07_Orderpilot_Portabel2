@@ -175,10 +175,18 @@ class StudiesDb {
 
   /// Welle O3-B4: cross-study profitable trials within a single DB.
   ///
-  /// Filters on `total_pnl > 0` and `total_trades >= minTrades`, drops
-  /// `-inf` scores (defensive). `sortBy` ∈ {score, pnl, sharpe, pf,
-  /// trades, winRate}; defaults to `score`. Result rows are denormalized
-  /// with strategy + study name so the UI does not need a second JOIN.
+  /// Filters on `total_pnl > 0` and `total_trades >= minTrades`. The
+  /// "profitable" definition is PURELY PnL-based and MUST NOT depend on
+  /// the `score` value: real Optuna production studies penalise nearly
+  /// every trial with `score = -inf` (a hard constraint no trial meets),
+  /// yet record raw PnL independently — verified against the shipped
+  /// studies-bb_rsi.db (1000 trials, all score=-inf, 309 with pnl>0).
+  /// An earlier `score > -1e308` filter (copied from [top10]) wrongly
+  /// dropped every profitable trial → empty leaderboard (Welle O3-B4-12).
+  ///
+  /// `sortBy` ∈ {score, pnl, sharpe, pf, trades, winRate}. Result rows
+  /// are denormalized with strategy + study name so the UI needs no
+  /// second JOIN.
   ///
   /// The SQL `WHERE` carries a `json_valid(metrics_json)` guard so a
   /// single malformed `metrics_json` row is skipped (matching the
@@ -242,8 +250,7 @@ class StudiesDb {
     final rows = await db.rawQuery(
       'SELECT t.*, s.strategy AS _strategy, s.name AS _study_name '
       'FROM trials t JOIN studies s ON t.study_id = s.id '
-      'WHERE t.score > -1e308 '
-      '  AND json_valid(t.metrics_json) '
+      'WHERE json_valid(t.metrics_json) '
       "  AND CAST(json_extract(t.metrics_json, '\$.total_pnl') AS REAL) > 0 "
       "  AND CAST(json_extract(t.metrics_json, '\$.total_trades') AS INTEGER) >= ? "
       'ORDER BY $orderExpr DESC '
@@ -261,10 +268,11 @@ class StudiesDb {
   }) async {
     // Client-side: join studies + trials, parse metrics in Dart, filter,
     // sort. O(total_trials_in_db) per call — acceptable for ≤10k trials.
+    // No score filter — "profitable" is PnL-based only (see topNProfitable
+    // doc, Welle O3-B4-12). The pnl>0 / minTrades cut happens in Dart below.
     final rows = await db.rawQuery(
       'SELECT t.*, s.strategy AS _strategy, s.name AS _study_name '
-      'FROM trials t JOIN studies s ON t.study_id = s.id '
-      'WHERE t.score > -1e308',
+      'FROM trials t JOIN studies s ON t.study_id = s.id',
     );
     final all = _mapToLeaderboardRows(rows)
         .where((r) =>
