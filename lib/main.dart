@@ -12,6 +12,8 @@ import 'features/chart/chart_provider.dart';
 import 'features/exchange/bitunix_connection_provider.dart';
 import 'features/paper/paper_trading_provider.dart';
 import 'features/risk/risk_manager.dart';
+import 'features/studies/aggregate_leaderboard.dart';
+import 'features/studies/studies_library.dart';
 import 'features/studies/studies_provider.dart';
 import 'ui/themes/app_theme.dart';
 import 'ui/screens/account_screen.dart';
@@ -46,6 +48,19 @@ class TradingApp extends StatelessWidget {
       providers: [
         ChangeNotifierProvider(create: (_) => BacktestProvider()),
         ChangeNotifierProvider(create: (_) => StudiesProvider()),
+        // Welle O3-B4: multi-DB Studies Library + global leaderboard.
+        // The library boots in its create (scan default dir + load
+        // persistent pin-state); the leaderboard is a proxy of it so it
+        // is constructed once and survives library notifications.
+        ChangeNotifierProvider(
+          create: (_) => StudiesLibrary()
+            ..boot(scanDirs: const ['01_Projectplan/optimizer_studies']),
+        ),
+        ChangeNotifierProxyProvider<StudiesLibrary, AggregateLeaderboard>(
+          create: (ctx) =>
+              AggregateLeaderboard(library: ctx.read<StudiesLibrary>()),
+          update: (_, lib, prev) => prev ?? AggregateLeaderboard(library: lib),
+        ),
         ChangeNotifierProvider(create: (_) => ChartProvider()),
         // Welle B4.3-3: RiskManager has to live before PaperTradingProvider
         // so the paper provider can read it back via context.read at

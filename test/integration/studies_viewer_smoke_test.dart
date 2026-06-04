@@ -15,6 +15,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:provider/provider.dart';
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
+import 'package:trading_app/features/studies/aggregate_leaderboard.dart';
+import 'package:trading_app/features/studies/studies_library.dart';
 import 'package:trading_app/features/studies/studies_provider.dart';
 import 'package:trading_app/ui/screens/studies_screen.dart';
 
@@ -22,10 +24,20 @@ Future<void> _pump(WidgetTester tester, StudiesProvider provider) async {
   // The studies screen renders a chart + table + chips — give the test
   // surface room so the chart and detail-sheet are not clipped.
   await tester.binding.setSurfaceSize(const Size(1400, 1800));
+  // Welle O3-B4: the screen now also reads StudiesLibrary +
+  // AggregateLeaderboard. An empty (un-booted) library keeps the global
+  // leaderboard in its empty state — no #-rank labels that would clash
+  // with the per-study top-10 assertions below.
+  final library = StudiesLibrary();
   await tester.pumpWidget(
     MaterialApp(
-      home: ChangeNotifierProvider<StudiesProvider>.value(
-        value: provider,
+      home: MultiProvider(
+        providers: [
+          ChangeNotifierProvider<StudiesProvider>.value(value: provider),
+          ChangeNotifierProvider<StudiesLibrary>.value(value: library),
+          ChangeNotifierProvider<AggregateLeaderboard>.value(
+              value: AggregateLeaderboard(library: library)),
+        ],
         child: const StudiesScreen(),
       ),
     ),

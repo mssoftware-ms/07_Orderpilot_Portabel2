@@ -4,18 +4,33 @@ library;
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:provider/provider.dart';
+import 'package:trading_app/features/studies/aggregate_leaderboard.dart';
+import 'package:trading_app/features/studies/studies_library.dart';
 import 'package:trading_app/features/studies/studies_provider.dart';
 import 'package:trading_app/ui/screens/studies_screen.dart';
 
-Future<void> _pump(WidgetTester tester, StudiesProvider provider) async {
-  await tester.pumpWidget(
-    MaterialApp(
-      home: ChangeNotifierProvider<StudiesProvider>.value(
-        value: provider,
-        child: const StudiesScreen(),
-      ),
+// Welle O3-B4: StudiesScreen now also depends on StudiesLibrary +
+// AggregateLeaderboard (for the Library panel + global leaderboard above
+// the per-study sections). These regression tests exercise the per-study
+// drill-down, so an empty (un-booted) library is enough — it renders the
+// "No studies databases yet" / "No profitable trials" empty states.
+Widget _wrap(StudiesProvider provider) {
+  final library = StudiesLibrary();
+  return MaterialApp(
+    home: MultiProvider(
+      providers: [
+        ChangeNotifierProvider<StudiesProvider>.value(value: provider),
+        ChangeNotifierProvider<StudiesLibrary>.value(value: library),
+        ChangeNotifierProvider<AggregateLeaderboard>.value(
+            value: AggregateLeaderboard(library: library)),
+      ],
+      child: const StudiesScreen(),
     ),
   );
+}
+
+Future<void> _pump(WidgetTester tester, StudiesProvider provider) async {
+  await tester.pumpWidget(_wrap(provider));
   await tester.pumpAndSettle();
 }
 
@@ -76,14 +91,7 @@ void main() {
     p.setLoading(true);
     // CircularProgressIndicator never settles, so we pump one frame
     // instead of pumpAndSettle.
-    await tester.pumpWidget(
-      MaterialApp(
-        home: ChangeNotifierProvider<StudiesProvider>.value(
-          value: p,
-          child: const StudiesScreen(),
-        ),
-      ),
-    );
+    await tester.pumpWidget(_wrap(p));
     await tester.pump();
 
     expect(find.byKey(const Key('studies-loading-indicator')),

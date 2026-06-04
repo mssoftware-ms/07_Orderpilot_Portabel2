@@ -16,8 +16,12 @@ import 'package:provider/provider.dart';
 
 import '../../core/logging/app_log.dart';
 import '../../core/models/study.dart';
+import '../../features/studies/aggregate_leaderboard.dart';
 import '../../features/studies/studies_provider.dart';
 import '../themes/app_theme.dart';
+import '../widgets/global_leaderboard_table.dart';
+import '../widgets/leaderboard_filter_bar.dart';
+import '../widgets/library_panel.dart';
 import '../widgets/param_convergence_plot.dart';
 import '../widgets/trials_top10_table.dart';
 
@@ -71,6 +75,49 @@ class _StudiesBody extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
+          // Welle O3-B4: multi-DB Library + Global Leaderboard above the
+          // existing single-DB picker + per-study drill-down sections.
+          const LibraryPanel(),
+          const SizedBox(height: 16),
+          Container(
+            padding: const EdgeInsets.all(16),
+            decoration: BoxDecoration(
+              color: AppColors.surfaceCard,
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(color: AppColors.border, width: 0.5),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: const [
+                Row(
+                  children: [
+                    Icon(Icons.emoji_events,
+                        size: 18, color: AppColors.accentCyan),
+                    SizedBox(width: 8),
+                    Text('Global leaderboard',
+                        style: TextStyle(
+                            color: AppColors.textPrimary,
+                            fontSize: 14,
+                            fontWeight: FontWeight.w600)),
+                  ],
+                ),
+                SizedBox(height: 12),
+                LeaderboardFilterBar(),
+                SizedBox(height: 12),
+                _GlobalLeaderboardConsumer(),
+              ],
+            ),
+          ),
+          const SizedBox(height: 24),
+          const Divider(color: AppColors.divider),
+          const SizedBox(height: 16),
+          const Text('Per-study drill-down',
+              style: TextStyle(
+                  color: AppColors.textSecondary,
+                  fontSize: 11,
+                  fontWeight: FontWeight.w600,
+                  letterSpacing: 0.5)),
+          const SizedBox(height: 12),
           _PickerSection(provider: provider),
           const SizedBox(height: 16),
           _Top10Placeholder(provider: provider),
@@ -79,6 +126,24 @@ class _StudiesBody extends StatelessWidget {
         ],
       ),
     );
+  }
+}
+
+/// Welle O3-B4: rebuilds the Global Leaderboard table on every
+/// [AggregateLeaderboard] notification (recompute, pin/unpin, filter).
+class _GlobalLeaderboardConsumer extends StatelessWidget {
+  const _GlobalLeaderboardConsumer();
+
+  @override
+  Widget build(BuildContext context) {
+    final agg = context.watch<AggregateLeaderboard>();
+    if (agg.loading) {
+      return const Padding(
+        padding: EdgeInsets.symmetric(vertical: 24),
+        child: Center(child: CircularProgressIndicator(strokeWidth: 2)),
+      );
+    }
+    return GlobalLeaderboardTable(rows: agg.rows);
   }
 }
 
