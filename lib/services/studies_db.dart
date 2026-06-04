@@ -208,7 +208,19 @@ class StudiesDb {
         minTrades: minTrades, limit: limit, sortBy: sortBy);
   }
 
-  bool? _jsonExtractAvailable;
+  /// JSON1-availability probe result.
+  ///
+  /// `static` because `StudiesDb` is instantiated fresh per call (see
+  /// `aggregate_leaderboard.dart` recompute loop + `studies_library.dart`
+  /// refreshHealth). An instance field would re-probe every call and the
+  /// negative-result cache would never persist beyond a single query —
+  /// dead code. Once the first probe lands the result, all subsequent
+  /// `StudiesDb` instances skip the failed-SQL path on JSON1-missing
+  /// engines. Idempotent on Windows desktop (sqflite_common_ffi 2.4.1
+  /// ships JSON1) — guards against future cross-platform regressions.
+  ///
+  /// O3-B4-Code-Review Major A follow-up.
+  static bool? _jsonExtractAvailable;
 
   static const Map<String, String> _sortColumnMap = {
     'score': 't.score',
